@@ -78,10 +78,19 @@ openssl req -x509 -new -nodes \
     -out certs/ca.crt
 ```
 
-### 2. Start iron-proxy
+### 2. Create a Docker network
+
+iron-proxy needs a fixed IP so containers can point their DNS at it:
+
+```bash
+docker network create --subnet=172.20.0.0/24 iron-proxy
+```
+
+### 3. Start iron-proxy
 
 ```bash
 docker run -d --name iron-proxy \
+  --network iron-proxy --ip 172.20.0.2 \
   -v $(pwd)/proxy.yaml:/etc/iron-proxy/proxy.yaml:ro \
   -v $(pwd)/certs/ca.crt:/etc/iron-proxy/ca.crt:ro \
   -v $(pwd)/certs/ca.key:/etc/iron-proxy/ca.key:ro \
@@ -89,7 +98,7 @@ docker run -d --name iron-proxy \
   ironsh/iron-proxy:latest -config /etc/iron-proxy/proxy.yaml
 ```
 
-### 3. Route containers through the proxy
+### 4. Route containers through the proxy
 
 The simplest approach is DNS-based routing: point the container's DNS at
 iron-proxy and all hostname lookups resolve to the proxy IP, routing traffic
@@ -97,9 +106,10 @@ through it automatically:
 
 ```bash
 docker run --rm \
+  --network iron-proxy \
   --dns 172.20.0.2 \
-  -v $(pwd)/certs/ca.crt:/usr/local/share/ca-certificates/iron-proxy.crt:ro \
-  alpine sh -c "update-ca-certificates 2>/dev/null && curl https://httpbin.org/get"
+  -v $(pwd)/certs/ca.crt:/certs/ca.crt:ro \
+  curlimages/curl --cacert /certs/ca.crt https://httpbin.org/get
 ```
 
 For stronger enforcement, layer nftables rules to block non-proxy egress, or use
