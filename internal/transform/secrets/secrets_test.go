@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -341,6 +342,90 @@ func TestSecrets_ConcurrentSafety(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSecrets_BasicAuthSwap(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{{
+		Var:          "OPENAI_API_KEY",
+		ProxyValue:   "proxy-openai-abc123",
+		MatchHeaders: []string{"Authorization"},
+		Hosts:        []hostMatch{{Name: "api.openai.com"}},
+	}})
+
+	// Basic auth: "user:proxy-openai-abc123" base64-encoded
+	creds := base64.StdEncoding.EncodeToString([]byte("user:proxy-openai-abc123"))
+	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat", nil)
+	req.Host = "api.openai.com"
+	req.Header.Set("Authorization", "Basic "+creds)
+
+	doTransform(t, s, req)
+
+	got := req.Header.Get("Authorization")
+	require.True(t, strings.HasPrefix(got, "Basic "))
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(got, "Basic "))
+	require.NoError(t, err)
+	require.Equal(t, "user:sk-real-openai-key", string(decoded))
+}
+
+func TestSecrets_BasicAuthNoMatch(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{{
+		Var:          "OPENAI_API_KEY",
+		ProxyValue:   "proxy-openai-abc123",
+		MatchHeaders: []string{"Authorization"},
+		Hosts:        []hostMatch{{Name: "api.openai.com"}},
+	}})
+
+	// Basic auth with no proxy token inside
+	creds := base64.StdEncoding.EncodeToString([]byte("user:some-other-password"))
+	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat", nil)
+	req.Host = "api.openai.com"
+	req.Header.Set("Authorization", "Basic "+creds)
+
+	doTransform(t, s, req)
+
+	// Should be unchanged
+	require.Equal(t, "Basic "+creds, req.Header.Get("Authorization"))
+}
+
+func TestSecrets_BasicAuthAllHeaders(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{{
+		Var:          "OPENAI_API_KEY",
+		ProxyValue:   "proxy-openai-abc123",
+		MatchHeaders: []string{}, // all headers
+		Hosts:        []hostMatch{{Name: "api.openai.com"}},
+	}})
+
+	creds := base64.StdEncoding.EncodeToString([]byte("proxy-openai-abc123:secret"))
+	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat", nil)
+	req.Host = "api.openai.com"
+	req.Header.Set("Authorization", "Basic "+creds)
+
+	doTransform(t, s, req)
+
+	got := req.Header.Get("Authorization")
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(got, "Basic "))
+	require.NoError(t, err)
+	require.Equal(t, "sk-real-openai-key:secret", string(decoded))
+}
+
+func TestSecrets_BasicAuthIgnoredOnNonAuthHeader(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{{
+		Var:          "OPENAI_API_KEY",
+		ProxyValue:   "proxy-openai-abc123",
+		MatchHeaders: []string{}, // all headers
+		Hosts:        []hostMatch{{Name: "api.openai.com"}},
+	}})
+
+	// "Basic <base64>" on a non-Authorization header should not be decoded
+	creds := base64.StdEncoding.EncodeToString([]byte("proxy-openai-abc123:secret"))
+	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat", nil)
+	req.Host = "api.openai.com"
+	req.Header.Set("X-Custom", "Basic "+creds)
+
+	doTransform(t, s, req)
+
+	// The base64 payload doesn't contain the literal proxy token, so no swap
+	require.Equal(t, "Basic "+creds, req.Header.Get("X-Custom"))
 }
 
 func TestSecrets_Name(t *testing.T) {

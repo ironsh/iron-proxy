@@ -5,6 +5,7 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -168,28 +169,67 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret) []string {
 		for _, name := range sec.matchHeaders {
 			if vals := req.Header.Values(name); len(vals) > 0 {
 				for _, v := range vals {
-					if strings.Contains(v, sec.proxyValue) {
+					if headerContains(name, v, sec.proxyValue) {
 						locations = append(locations, "header:"+name)
 						break
 					}
 				}
 				req.Header.Del(name)
 				for _, v := range vals {
-					req.Header.Add(name, strings.ReplaceAll(v, sec.proxyValue, sec.realValue))
+					req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, sec.realValue))
 				}
 			}
 		}
 	} else {
 		for name, vals := range req.Header {
 			for i, v := range vals {
-				if strings.Contains(v, sec.proxyValue) {
-					req.Header[name][i] = strings.ReplaceAll(v, sec.proxyValue, sec.realValue)
+				if headerContains(name, v, sec.proxyValue) {
+					req.Header[name][i] = replaceInHeader(name, v, sec.proxyValue, sec.realValue)
 					locations = append(locations, "header:"+name)
 				}
 			}
 		}
 	}
 	return locations
+}
+
+// replaceInHeader performs a secret replacement in a header value. For
+// Authorization headers with HTTP Basic auth, the base64 payload is decoded
+// before replacement and re-encoded after.
+func replaceInHeader(headerName, value, proxyValue, realValue string) string {
+	if strings.EqualFold(headerName, "Authorization") {
+		if decoded, ok := decodeBasicAuth(value); ok {
+			replaced := strings.ReplaceAll(decoded, proxyValue, realValue)
+			return "Basic " + base64.StdEncoding.EncodeToString([]byte(replaced))
+		}
+	}
+	return strings.ReplaceAll(value, proxyValue, realValue)
+}
+
+// headerContains checks whether a header value contains the proxy token.
+// For Authorization headers with HTTP Basic auth, the base64 payload is
+// decoded before checking.
+func headerContains(headerName, value, proxyValue string) bool {
+	if strings.EqualFold(headerName, "Authorization") {
+		if decoded, ok := decodeBasicAuth(value); ok {
+			return strings.Contains(decoded, proxyValue)
+		}
+	}
+	return strings.Contains(value, proxyValue)
+}
+
+// decodeBasicAuth extracts and base64-decodes the payload from a "Basic ..."
+// Authorization header value. Returns the decoded string and true on success.
+func decodeBasicAuth(value string) (string, bool) {
+	after, ok := strings.CutPrefix(value, "Basic ")
+	if !ok {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(after)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
 }
 
 func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret) []string {
