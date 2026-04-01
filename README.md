@@ -61,12 +61,12 @@ Rejected requests include a `rejected_by` field and log at WARN level. See
 
 ## Why iron-proxy?
 
-|                          | iron-proxy                     | Squid                       | mitmproxy           | Envoy                    |
-| ------------------------ | ------------------------------ | --------------------------- | ------------------- | ------------------------ |
-| Default-deny egress      | Built-in                       | Requires complex ACL config | No enforcement mode | Requires custom Lua/Wasm |
-| Secret injection         | Built-in                       | No                          | No                  | No                       |
-| Structured audit logging | Built-in, per-transform traces | Basic access logs           | Plugin-based        | Access logs only         |
-| Setup complexity         | Single binary + YAML           | Extensive config language   | Python scripting    | Full control plane       |
+|                          | iron-proxy                     | Squid                       | mitmproxy                 | Envoy                              |
+| ------------------------ | ------------------------------ | --------------------------- | ------------------------- | ---------------------------------- |
+| Default-deny egress      | Built-in                       | Requires complex ACL config | Requires custom scripting | Requires RBAC/filter configuration |
+| Secret injection         | Built-in                       | No                          | No                        | No                                 |
+| Structured audit logging | Built-in, per-transform traces | Basic access logs           | Plugin-based              | Configurable access logs           |
+| Setup complexity         | Single binary + YAML           | Extensive config language   | Python scripting          | Complex YAML or control plane      |
 
 iron-proxy is purpose-built for one job: controlling and auditing egress from
 untrusted workloads. Squid can do default-deny but requires significant ACL
