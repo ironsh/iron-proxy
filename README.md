@@ -23,6 +23,18 @@ server, giving you:
     </a>
 </div>
 
+## Installation
+
+Docker images are available on [Docker Hub](https://hub.docker.com/r/ironsh/iron-proxy)
+and pre-built binaries for Linux/macOS (amd64/arm64) are on
+[GitHub Releases](https://github.com/ironsh/iron-proxy/releases).
+
+Or build from source:
+
+```bash
+go build -o iron-proxy ./cmd/iron-proxy
+```
+
 ## Quick start
 
 ```bash
@@ -117,18 +129,6 @@ docker run --rm \
 For stronger enforcement, layer nftables rules to block non-proxy egress, or use
 TPROXY for kernel-level interception. See [Routing traffic to the
 proxy](#routing-traffic-to-the-proxy) for details on each approach.
-
-## Installation
-
-Docker images are available on [Docker Hub](https://hub.docker.com/r/ironsh/iron-proxy)
-and pre-built binaries for Linux/macOS (amd64/arm64) are on
-[GitHub Releases](https://github.com/ironsh/iron-proxy/releases).
-
-Or build from source:
-
-```bash
-go build -o iron-proxy ./cmd/iron-proxy
-```
 
 ## Why iron-proxy?
 
