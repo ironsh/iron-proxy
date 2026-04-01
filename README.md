@@ -2,55 +2,77 @@
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/ironsh/iron-proxy)](https://hub.docker.com/r/ironsh/iron-proxy)
 
-An egress firewall for untrusted workloads. Default-deny HTTP/HTTPS, secret
-injection, and full audit logging, in a single binary.
+## The problem
 
-Sandboxed containers can make outbound requests to anywhere. iron-proxy sits
-between your workload and the internet as a MITM proxy with a built-in DNS
-server, giving you:
+CI jobs, AI coding agents, and sandboxed containers can make arbitrary outbound
+requests. A compromised dependency, a prompt injection, or a malicious build
+step can exfiltrate secrets, phone home, or open a reverse shell. Most
+teams have zero visibility into what's leaving their workloads, let alone any
+way to stop it.
 
-- **Default-deny egress control.** Only allowlisted domains and CIDRs get through.
-- **Secret injection.** Workloads send proxy tokens; iron-proxy swaps in real
-  secrets before the request leaves. The sandbox never sees the real key.
-- **Structured audit logging.** Every request logged as JSON with per-transform
-  traces, so you know exactly what was allowed, blocked, or rewritten.
-- **Protocol support.** WebSocket upgrades and Server-Sent Events are proxied
-  natively.
+## What iron-proxy does
+
+iron-proxy is a MITM egress proxy with a built-in DNS server that sits between
+your untrusted workload and the internet. It enforces default-deny at the
+network boundary, so the workload can only reach domains you explicitly allow.
+Real secrets never enter the sandbox. Workloads use proxy tokens, and
+iron-proxy swaps in real credentials at egress, meaning a compromised workload
+can exfiltrate a token that's worthless outside the proxy.
+
+Single binary. Single YAML config.
+
+- **Default-deny egress.** Every outbound request is blocked unless the
+  destination matches your allowlist. List your domains and CIDRs, everything
+  else gets a 403.
+- **Boundary-level secret injection.** Workloads send proxy tokens; iron-proxy
+  replaces them with real secrets before the request leaves. If the sandbox is
+  compromised, the attacker gets tokens that are useless outside the proxy.
+- **Per-request audit trail.** Every request logged as structured JSON with
+  the full transform pipeline result: which secrets were swapped, which rules
+  matched, what got blocked and why.
+- **Streaming-aware.** WebSocket upgrades and Server-Sent Events are proxied
+  natively. No special configuration for agent workloads that hold long-lived
+  connections.
+
+Built for CI pipelines, GitHub Actions, AI agents (Claude Code, Cursor,
+Codex), and any environment where you run code you don't fully trust.
 
 <div align="center">
+    <strong>Blocked exfiltration + secret rewriting in action:</strong>
+    <br/><br/>
     <a href="https://screen.studio/share/Gq2zqtrp" target="_blank">
         <img src="./images/intro.gif" width="75%" />
     </a>
 </div>
-
+ 
 ## Installation
-
+ 
 Docker images are available on [Docker Hub](https://hub.docker.com/r/ironsh/iron-proxy)
 and pre-built binaries for Linux/macOS (amd64/arm64) are on
 [GitHub Releases](https://github.com/ironsh/iron-proxy/releases).
-
+ 
 Or build from source:
-
+ 
 ```bash
 go build -o iron-proxy ./cmd/iron-proxy
 ```
-
+ 
 ## Quick start
-
+ 
 ```bash
 cd examples/docker-compose
 docker compose up
 ```
-
-This starts the proxy and a demo client that runs five requests: allowed,
-blocked, and three secret-swap scenarios. Check the proxy logs for audit output:
-
+ 
+This starts iron-proxy and a demo client that fires five requests through the
+proxy. Check the logs to see allowed, blocked, and secret-rewritten requests:
+ 
 ```bash
 docker compose logs proxy
 ```
-
-Every proxied request produces a structured JSON audit entry:
-
+ 
+Every request produces a structured JSON audit entry:
+ 
 ```json
 {
   "host": "httpbin.org",
@@ -69,7 +91,7 @@ Every proxied request produces a structured JSON audit entry:
   ]
 }
 ```
-
+ 
 Rejected requests include a `rejected_by` field and log at WARN level. See
 [Audit log format](#audit-log-format) for the full schema.
 
