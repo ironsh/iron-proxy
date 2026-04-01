@@ -118,6 +118,18 @@ For stronger enforcement, layer nftables rules to block non-proxy egress, or use
 TPROXY for kernel-level interception. See [Routing traffic to the
 proxy](#routing-traffic-to-the-proxy) for details on each approach.
 
+## Installation
+
+Docker images are available on [Docker Hub](https://hub.docker.com/r/ironsh/iron-proxy)
+and pre-built binaries for Linux/macOS (amd64/arm64) are on
+[GitHub Releases](https://github.com/ironsh/iron-proxy/releases).
+
+Or build from source:
+
+```bash
+go build -o iron-proxy ./cmd/iron-proxy
+```
+
 ## Why iron-proxy?
 
 |                          | iron-proxy                     | Squid                       | mitmproxy                 | Envoy                              |
@@ -442,18 +454,6 @@ curl -H "X-Internal: proxy-internal-tok" https://httpbin.org/headers
 
 # 5. Secret swap: proxy token in query parameter
 curl "https://httpbin.org/get?token=proxy-openai-abc123&q=hello"
-```
-
-## Installation
-
-Docker images are available on [Docker Hub](https://hub.docker.com/r/ironsh/iron-proxy)
-and pre-built binaries for Linux/macOS (amd64/arm64) are on
-[GitHub Releases](https://github.com/ironsh/iron-proxy/releases).
-
-Or build from source:
-
-```bash
-go build -o iron-proxy ./cmd/iron-proxy
 ```
 
 ## Audit log format
