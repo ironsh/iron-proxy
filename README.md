@@ -124,13 +124,19 @@ docker network create --subnet=172.20.0.0/24 iron-proxy
 
 ### 3. Start iron-proxy
 
+Create an env file with your secrets (keep this out of version control):
+
+```bash
+echo "OPENAI_API_KEY=sk-real-key" > .env
+```
+
 ```bash
 docker run -d --name iron-proxy \
   --network iron-proxy --ip 172.20.0.2 \
   -v $(pwd)/proxy.yaml:/etc/iron-proxy/proxy.yaml:ro \
   -v $(pwd)/certs/ca.crt:/etc/iron-proxy/ca.crt:ro \
   -v $(pwd)/certs/ca.key:/etc/iron-proxy/ca.key:ro \
-  -e OPENAI_API_KEY=sk-real-key \
+  --env-file .env \
   ironsh/iron-proxy:latest -config /etc/iron-proxy/proxy.yaml
 ```
 
