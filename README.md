@@ -59,6 +59,63 @@ Every proxied request produces a structured JSON audit entry:
 Rejected requests include a `rejected_by` field and log at WARN level. See
 [Audit log format](#audit-log-format) for the full schema.
 
+## Production usage
+
+### 1. Generate a CA
+
+iron-proxy terminates TLS by generating leaf certificates on the fly, signed by
+a CA you provide. Client containers must trust this CA.
+
+```bash
+mkdir -p certs
+openssl genrsa -out certs/ca.key 4096
+openssl req -x509 -new -nodes \
+    -key certs/ca.key \
+    -sha256 -days 3650 \
+    -subj "/CN=iron-proxy CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign" \
+    -out certs/ca.crt
+```
+
+### 2. Create a Docker network
+
+iron-proxy needs a fixed IP so containers can point their DNS at it:
+
+```bash
+docker network create --subnet=172.20.0.0/24 iron-proxy
+```
+
+### 3. Start iron-proxy
+
+```bash
+docker run -d --name iron-proxy \
+  --network iron-proxy --ip 172.20.0.2 \
+  -v $(pwd)/proxy.yaml:/etc/iron-proxy/proxy.yaml:ro \
+  -v $(pwd)/certs/ca.crt:/etc/iron-proxy/ca.crt:ro \
+  -v $(pwd)/certs/ca.key:/etc/iron-proxy/ca.key:ro \
+  -e OPENAI_API_KEY=sk-real-key \
+  ironsh/iron-proxy:latest -config /etc/iron-proxy/proxy.yaml
+```
+
+### 4. Route containers through the proxy
+
+The simplest approach is DNS-based routing: point the container's DNS at
+iron-proxy and all hostname lookups resolve to the proxy IP, routing traffic
+through it automatically:
+
+```bash
+docker run --rm \
+  --network iron-proxy \
+  --dns 172.20.0.2 \
+  -v $(pwd)/certs/ca.crt:/certs/ca.crt:ro \
+  curlimages/curl --cacert /certs/ca.crt https://httpbin.org/get
+```
+
+For stronger enforcement, layer nftables rules to block non-proxy egress, or use
+TPROXY for kernel-level interception. See [Routing traffic to the
+proxy](#routing-traffic-to-the-proxy) for details on each approach.
+
 ## Why iron-proxy?
 
 |                          | iron-proxy                     | Squid                       | mitmproxy                 | Envoy                              |
