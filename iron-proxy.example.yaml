@@ -32,13 +32,20 @@ tls:
 transforms:
   - name: allowlist
     config:
+      # Simple form: allow all methods and paths to these hosts
       domains:
-        - "api.openai.com"
-        - "*.anthropic.com"
         - "registry.npmjs.org"
       cidrs:
         - "10.0.0.0/8"
         - "172.16.0.0/12"
+      # Rule form: restrict by method and/or path
+      rules:
+        - host: "api.openai.com"
+          methods: ["POST"]
+          paths: ["/v1/*"]
+        - host: "*.anthropic.com"
+          methods: ["POST"]
+          paths: ["/v1/messages", "/v1/complete"]
 
 # Logging
 log:
