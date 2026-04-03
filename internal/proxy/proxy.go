@@ -332,16 +332,17 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
+	reader := streamBody(resp.Body)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		// Fallback to regular copy if flushing isn't supported
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = io.Copy(w, reader)
 		return
 	}
 
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := resp.Body.Read(buf)
+		n, err := reader.Read(buf)
 		if n > 0 {
 			_, _ = w.Write(buf[:n])
 			flusher.Flush()
@@ -359,8 +360,17 @@ func writeResponse(w http.ResponseWriter, resp *http.Response) {
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	if resp.Body != nil {
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = io.Copy(w, streamBody(resp.Body))
 	}
+}
+
+// streamBody returns a streaming reader if the body supports it, avoiding
+// unnecessary buffering when writing the final response.
+func streamBody(body io.ReadCloser) io.Reader {
+	if b, ok := body.(transform.Bufferable); ok {
+		return b.StreamingReader()
+	}
+	return body
 }
 
 // upstreamTransport is the transport used for upstream requests.

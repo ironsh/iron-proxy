@@ -6,10 +6,12 @@ import (
 	"sync"
 )
 
-// Resetter is implemented by body types that support rewinding for replay
-// between pipeline transforms.
-type Resetter interface {
+// Bufferable is implemented by body types that support rewinding for replay
+// between pipeline transforms, and streaming for final output without
+// unnecessary buffering.
+type Bufferable interface {
 	Reset()
+	StreamingReader() io.Reader
 }
 
 // ReplayableBody wraps an io.ReadCloser with incremental buffering and rewind
@@ -88,6 +90,32 @@ func (b *ReplayableBody) Reset() {
 	b.pos = 0
 }
 
+// StreamingReader returns a reader that drains the buffered data from the
+// current position, then streams directly from the underlying reader without
+// appending to the buffer. Use this for final output (e.g. writing the HTTP
+// response) to avoid buffering the entire body into memory.
+func (b *ReplayableBody) StreamingReader() io.Reader {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	var readers []io.Reader
+
+	// Any buffered data from the current position.
+	if b.pos < len(b.buf) {
+		readers = append(readers, bytes.NewReader(b.buf[b.pos:]))
+	}
+
+	// Remaining unbuffered data from the original, if not fully consumed.
+	if !b.eof {
+		readers = append(readers, b.original)
+	}
+
+	if len(readers) == 0 {
+		return bytes.NewReader(nil)
+	}
+	return io.MultiReader(readers...)
+}
+
 // Close is a no-op if the original has already been consumed; otherwise
 // closes the underlying reader.
 func (b *ReplayableBody) Close() error {
@@ -126,6 +154,11 @@ func (b *BufferedBody) Read(p []byte) (int, error) {
 // Reset rewinds to the beginning.
 func (b *BufferedBody) Reset() {
 	b.pos = 0
+}
+
+// StreamingReader returns a reader over the remaining data.
+func (b *BufferedBody) StreamingReader() io.Reader {
+	return bytes.NewReader(b.data[b.pos:])
 }
 
 // Close is a no-op.

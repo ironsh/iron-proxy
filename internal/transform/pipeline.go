@@ -51,7 +51,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, tctx *TransformContext, r
 		dur := time.Since(start)
 
 		// Reset body for the next transform.
-		if r, ok := req.Body.(Resetter); ok {
+		if r, ok := req.Body.(Bufferable); ok {
 			r.Reset()
 		}
 
@@ -90,10 +90,10 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, tctx *TransformContext, 
 		dur := time.Since(start)
 
 		// Reset bodies for the next transform.
-		if r, ok := req.Body.(Resetter); ok {
+		if r, ok := req.Body.(Bufferable); ok {
 			r.Reset()
 		}
-		if r, ok := resp.Body.(Resetter); ok {
+		if r, ok := resp.Body.(Bufferable); ok {
 			r.Reset()
 		}
 
