@@ -79,7 +79,7 @@ func main() {
 	pipeline.SetAuditFunc(transform.NewAuditLogger(logger))
 
 	// Build upstream resolver
-	var resolver *net.Resolver
+	resolver := net.DefaultResolver
 	if cfg.DNS.UpstreamResolver != "" {
 		resolver = &net.Resolver{
 			PreferGo: true,
@@ -92,11 +92,7 @@ func main() {
 	}
 
 	// Initialize DNS server
-	dnsResolver := net.DefaultResolver
-	if resolver != nil {
-		dnsResolver = resolver
-	}
-	dnsServer, err := idns.New(cfg.DNS, dnsResolver, logger)
+	dnsServer, err := idns.New(cfg.DNS, resolver, logger)
 	if err != nil {
 		logger.Error("initializing DNS server", slog.String("error", err.Error()))
 		os.Exit(1)
