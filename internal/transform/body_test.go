@@ -8,77 +8,97 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReplayableBody_StreamWithoutBuffer(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
+func TestReplayableBody_Read(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")), 1024)
 
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
 }
 
-func TestReplayableBody_BufferAndRewind(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
-
-	require.NoError(t, body.Buffer(1024))
+func TestReplayableBody_ResetAndReread(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")), 1024)
 
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
 
-	// Rewind and read again
-	_, err = body.Seek(0, io.SeekStart)
-	require.NoError(t, err)
+	body.Reset()
 
 	data, err = io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
 }
 
-func TestReplayableBody_BufferTooLarge(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello world")))
+func TestReplayableBody_MultipleResets(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("abc")), 1024)
 
-	err := body.Buffer(5)
-	require.ErrorIs(t, err, ErrBodyTooLarge)
+	for i := 0; i < 5; i++ {
+		data, err := io.ReadAll(body)
+		require.NoError(t, err)
+		require.Equal(t, "abc", string(data))
+		body.Reset()
+	}
 }
 
-func TestReplayableBody_BufferIdempotent(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
+func TestReplayableBody_IncrementalRead(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello world")), 1024)
 
-	require.NoError(t, body.Buffer(1024))
-	require.NoError(t, body.Buffer(512)) // smaller limit, already buffered — no-op
-	require.NoError(t, body.Buffer(2048)) // larger limit — also fine
-
-	_, err := body.Seek(0, io.SeekStart)
+	// Read in small chunks.
+	buf := make([]byte, 3)
+	n, err := body.Read(buf)
 	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "hel", string(buf[:n]))
+
+	// Read more.
+	n, err = body.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, "lo ", string(buf[:n]))
+
+	// Reset and re-read from the start — should get buffered data.
+	body.Reset()
+	data, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "hello world", string(data))
+}
+
+func TestReplayableBody_MaxBytesTruncates(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello world")), 5)
 
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
+
+	// Reset and re-read: same truncated data.
+	body.Reset()
+	data, err = io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(data))
 }
 
-func TestReplayableBody_SeekWithoutBuffer(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
+func TestReplayableBody_Unlimited(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello world")), 0)
 
-	_, err := body.Seek(0, io.SeekStart)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot seek unbuffered body")
+	data, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "hello world", string(data))
 }
 
 func TestReplayableBody_NilBody(t *testing.T) {
-	body := NewReplayableBody(nil)
+	body := NewReplayableBody(nil, 1024)
 
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Empty(t, data)
 }
 
-func TestReplayableBody_CloseUnbuffered(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
+func TestReplayableBody_Close(t *testing.T) {
+	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")), 1024)
 	require.NoError(t, body.Close())
-}
 
-func TestReplayableBody_CloseBuffered(t *testing.T) {
-	body := NewReplayableBody(io.NopCloser(strings.NewReader("hello")))
-	require.NoError(t, body.Buffer(1024))
-	require.NoError(t, body.Close())
+	// After consuming, close is a no-op.
+	body2 := NewReplayableBody(io.NopCloser(strings.NewReader("hello")), 1024)
+	_, _ = io.ReadAll(body2)
+	require.NoError(t, body2.Close())
 }

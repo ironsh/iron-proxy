@@ -19,8 +19,6 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-const defaultBodyMaxBytes int64 = 1 << 20 // 1MB
-
 func init() {
 	transform.Register("secrets", factory)
 }
@@ -264,27 +262,17 @@ func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret) string {
 		return ""
 	}
 
-	rb, ok := req.Body.(*transform.ReplayableBody)
-	if !ok {
-		return ""
-	}
-
-	if err := rb.Buffer(defaultBodyMaxBytes); err != nil {
-		return ""
-	}
-
-	data, err := io.ReadAll(rb)
+	data, err := io.ReadAll(req.Body)
 	if err != nil {
 		return ""
 	}
 
 	if !bytes.Contains(data, []byte(sec.proxyValue)) {
-		_, _ = rb.Seek(0, io.SeekStart)
 		return ""
 	}
 
 	replaced := bytes.ReplaceAll(data, []byte(sec.proxyValue), []byte(sec.realValue))
-	req.Body = io.NopCloser(bytes.NewReader(replaced))
+	req.Body = transform.NewBufferedBody(replaced)
 	req.ContentLength = int64(len(replaced))
 	return "body"
 }

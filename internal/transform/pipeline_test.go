@@ -54,7 +54,7 @@ func (s *stubTransform) TransformResponse(_ context.Context, _ *TransformContext
 func TestPipeline_AllContinue(t *testing.T) {
 	t1 := &stubTransform{name: "t1"}
 	t2 := &stubTransform{name: "t2"}
-	p := NewPipeline([]Transformer{t1, t2}, testLogger())
+	p := NewPipeline([]Transformer{t1, t2}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -72,7 +72,7 @@ func TestPipeline_RequestRejectShortCircuits(t *testing.T) {
 		reqResult: &TransformResult{Action: ActionReject},
 	}
 	t2 := &stubTransform{name: "never-called"}
-	p := NewPipeline([]Transformer{t1, t2}, testLogger())
+	p := NewPipeline([]Transformer{t1, t2}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -96,7 +96,7 @@ func TestPipeline_RequestRejectCustomResponse(t *testing.T) {
 		name:      "rate-limiter",
 		reqResult: &TransformResult{Action: ActionReject, Response: customResp},
 	}
-	p := NewPipeline([]Transformer{t1}, testLogger())
+	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -111,7 +111,7 @@ func TestPipeline_RequestError(t *testing.T) {
 		name:   "broken",
 		reqErr: errors.New("something broke"),
 	}
-	p := NewPipeline([]Transformer{t1}, testLogger())
+	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -127,7 +127,7 @@ func TestPipeline_ResponseReject(t *testing.T) {
 		name:      "response-blocker",
 		resResult: &TransformResult{Action: ActionReject},
 	}
-	p := NewPipeline([]Transformer{t1}, testLogger())
+	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	upstreamResp := &http.Response{StatusCode: http.StatusOK}
@@ -141,7 +141,7 @@ func TestPipeline_ResponseReject(t *testing.T) {
 
 func TestPipeline_ResponseContinuePassesThrough(t *testing.T) {
 	t1 := &stubTransform{name: "passthrough"}
-	p := NewPipeline([]Transformer{t1}, testLogger())
+	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	upstreamResp := &http.Response{StatusCode: http.StatusOK}
@@ -154,7 +154,7 @@ func TestPipeline_ResponseContinuePassesThrough(t *testing.T) {
 }
 
 func TestPipeline_EmptyPipeline(t *testing.T) {
-	p := NewPipeline(nil, testLogger())
+	p := NewPipeline(nil, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -171,7 +171,7 @@ func TestPipeline_EmptyPipeline(t *testing.T) {
 func TestPipeline_Names(t *testing.T) {
 	t1 := &stubTransform{name: "allowlist"}
 	t2 := &stubTransform{name: "logger"}
-	p := NewPipeline([]Transformer{t1, t2}, testLogger())
+	p := NewPipeline([]Transformer{t1, t2}, BodyLimits{}, testLogger())
 	require.Equal(t, "allowlist → logger", p.Names())
 }
 
@@ -182,7 +182,7 @@ func TestPipeline_RequestRejectStopsAtSecond(t *testing.T) {
 		reqResult: &TransformResult{Action: ActionReject},
 	}
 	t3 := &stubTransform{name: "third"}
-	p := NewPipeline([]Transformer{t1, t2, t3}, testLogger())
+	p := NewPipeline([]Transformer{t1, t2, t3}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -199,7 +199,7 @@ func TestPipeline_RequestRejectStopsAtSecond(t *testing.T) {
 
 func TestPipeline_TraceCapturesTiming(t *testing.T) {
 	t1 := &stubTransform{name: "t1"}
-	p := NewPipeline([]Transformer{t1}, testLogger())
+	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace
@@ -214,7 +214,7 @@ func TestPipeline_TraceCapturesTiming(t *testing.T) {
 func TestPipeline_AnnotationsInTrace(t *testing.T) {
 	// Custom transform that annotates
 	annotator := &annotatingTransform{name: "annotator"}
-	p := NewPipeline([]Transformer{annotator}, testLogger())
+	p := NewPipeline([]Transformer{annotator}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	var traces []TransformTrace

@@ -77,7 +77,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, logger)
+	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
 	// 4. Start proxy with HTTPS
 	p := New("127.0.0.1:0", "127.0.0.1:0", certCache, pipeline, logger)

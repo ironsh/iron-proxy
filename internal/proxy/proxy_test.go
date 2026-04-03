@@ -62,7 +62,7 @@ func startProxy(t *testing.T) (*Proxy, string, string, *x509.CertPool) {
 	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
 	require.NoError(t, err)
 
-	pipeline := transform.NewPipeline(nil, testLogger())
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
 	p := New("127.0.0.1:0", "127.0.0.1:0", cache, pipeline, testLogger())
 
 	// Start HTTP listener manually to get random port

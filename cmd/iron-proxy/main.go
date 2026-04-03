@@ -20,6 +20,7 @@ import (
 
 	// Register built-in transforms.
 	_ "github.com/ironsh/iron-proxy/internal/transform/allowlist"
+	_ "github.com/ironsh/iron-proxy/internal/transform/grpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -71,7 +72,10 @@ func main() {
 		}
 		transformers = append(transformers, t)
 	}
-	pipeline := transform.NewPipeline(transformers, logger)
+	pipeline := transform.NewPipeline(transformers, transform.BodyLimits{
+		MaxRequestBodyBytes:  cfg.Proxy.MaxRequestBodyBytes,
+		MaxResponseBodyBytes: cfg.Proxy.MaxResponseBodyBytes,
+	}, logger)
 	pipeline.SetAuditFunc(transform.NewAuditLogger(logger))
 
 	// Initialize DNS server
