@@ -21,10 +21,11 @@ type Config struct {
 
 // DNS configures the built-in DNS server.
 type DNS struct {
-	Listen      string      `yaml:"listen"`
-	ProxyIP     string      `yaml:"proxy_ip"`
-	Passthrough []string    `yaml:"passthrough"`
-	Records     []DNSRecord `yaml:"records"`
+	Listen           string      `yaml:"listen"`
+	ProxyIP          string      `yaml:"proxy_ip"`
+	UpstreamResolver string      `yaml:"upstream_resolver"`
+	Passthrough      []string    `yaml:"passthrough"`
+	Records          []DNSRecord `yaml:"records"`
 }
 
 // DNSRecord is a static DNS record entry.

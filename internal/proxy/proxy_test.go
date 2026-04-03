@@ -63,7 +63,7 @@ func startProxy(t *testing.T) (*Proxy, string, string, *x509.CertPool) {
 	require.NoError(t, err)
 
 	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
-	p := New("127.0.0.1:0", "127.0.0.1:0", cache, pipeline, testLogger())
+	p := New("127.0.0.1:0", "127.0.0.1:0", cache, pipeline, nil, testLogger())
 
 	// Start HTTP listener manually to get random port
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -152,7 +152,7 @@ func TestHTTPSProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	_, _, httpsAddr, caPool := startProxy(t)
+	p, _, httpsAddr, caPool := startProxy(t)
 
 	// We need to route the request to the proxy but with the upstream's Host.
 	// The proxy will make a TLS connection to the upstream.
@@ -162,8 +162,7 @@ func TestHTTPSProxy(t *testing.T) {
 	const fakeHost = "test.example.com"
 	upstreamAddr := upstream.Listener.Addr().String()
 
-	origTransport := upstreamTransport
-	upstreamTransport = &http.Transport{
+	p.transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
@@ -172,7 +171,6 @@ func TestHTTPSProxy(t *testing.T) {
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
 		},
 	}
-	defer func() { upstreamTransport = origTransport }()
 
 	client := &http.Client{
 		Transport: &http.Transport{

@@ -78,15 +78,28 @@ func main() {
 	}, logger)
 	pipeline.SetAuditFunc(transform.NewAuditLogger(logger))
 
+	// Build upstream resolver
+	resolver := net.DefaultResolver
+	if cfg.DNS.UpstreamResolver != "" {
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 5 * time.Second}
+				return d.DialContext(ctx, "udp", cfg.DNS.UpstreamResolver)
+			},
+		}
+		logger.Info("using upstream resolver", slog.String("addr", cfg.DNS.UpstreamResolver))
+	}
+
 	// Initialize DNS server
-	dnsServer, err := idns.New(cfg.DNS, net.DefaultResolver, logger)
+	dnsServer, err := idns.New(cfg.DNS, resolver, logger)
 	if err != nil {
 		logger.Error("initializing DNS server", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 
 	// Initialize proxy
-	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, logger)
+	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, resolver, logger)
 
 	// Start services
 	errc := make(chan error, 2)

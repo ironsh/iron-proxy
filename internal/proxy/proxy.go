@@ -24,14 +24,17 @@ type Proxy struct {
 	tlsListener net.Listener
 	certCache   *certcache.Cache
 	pipeline    *transform.Pipeline
+	transport   *http.Transport
 	logger      *slog.Logger
 }
 
-// New creates a new Proxy.
-func New(httpAddr, httpsAddr string, certCache *certcache.Cache, pipeline *transform.Pipeline, logger *slog.Logger) *Proxy {
+// New creates a new Proxy. If resolver is non-nil, it is used to resolve
+// upstream hostnames instead of the OS default resolver.
+func New(httpAddr, httpsAddr string, certCache *certcache.Cache, pipeline *transform.Pipeline, resolver *net.Resolver, logger *slog.Logger) *Proxy {
 	p := &Proxy{
 		certCache: certCache,
 		pipeline:  pipeline,
+		transport: buildTransport(resolver),
 		logger:    logger,
 	}
 
@@ -373,24 +376,29 @@ func streamBody(body io.ReadCloser) io.Reader {
 	return body
 }
 
-// upstreamTransport is the transport used for upstream requests.
-// Separate from http.DefaultTransport so proxy settings don't loop.
-var upstreamTransport = &http.Transport{
-	TLSClientConfig: &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	},
-	DialContext: (&net.Dialer{
+// buildTransport creates the HTTP transport used for upstream requests.
+// If resolver is non-nil, the transport's dialer uses it instead of the OS
+// default — this prevents resolution loops when iron-proxy owns the system DNS.
+func buildTransport(resolver *net.Resolver) *http.Transport {
+	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}).DialContext,
-	MaxIdleConns:          100,
-	IdleConnTimeout:       90 * time.Second,
-	TLSHandshakeTimeout:  10 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
+		Resolver:  resolver,
+	}
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		DialContext:           dialer.DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:  10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
 }
 
 func (p *Proxy) doUpstream(req *http.Request) (*http.Response, error) {
-	return upstreamTransport.RoundTrip(req)
+	return p.transport.RoundTrip(req)
 }
 
 func copyHeaders(dst, src http.Header) {
