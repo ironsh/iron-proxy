@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package transform.v1;
+
+option go_package = "github.com/ironsh/iron-proxy/gen/transform/v1;transformv1";
+
+// TransformService is the gRPC equivalent of the Transformer interface.
+// A single service can handle both request and response transforms.
+service TransformService {
+  rpc TransformRequest(TransformRequestRequest) returns (TransformRequestResponse);
+  rpc TransformResponse(TransformResponseRequest) returns (TransformResponseResponse);
+}
+
+// TransformAction controls what happens after a transform runs.
+enum TransformAction {
+  TRANSFORM_ACTION_UNSPECIFIED = 0;
+  TRANSFORM_ACTION_CONTINUE = 1;
+  TRANSFORM_ACTION_REJECT = 2;
+}
+
+// TransformContext carries metadata about the connection.
+message TransformContext {
+  string sni = 1;
+  bytes client_cert_der = 2;
+}
+
+// --- Request transform ---
+
+message HttpRequest {
+  string method = 1;
+  string url = 2;
+  map<string, HeaderValues> headers = 3;
+  bytes body = 4;
+  string host = 5;
+  string remote_addr = 6;
+}
+
+message HeaderValues {
+  repeated string values = 1;
+}
+
+message HttpResponse {
+  int32 status_code = 1;
+  map<string, HeaderValues> headers = 2;
+  bytes body = 3;
+}
+
+message TransformRequestRequest {
+  TransformContext context = 1;
+  HttpRequest request = 2;
+}
+
+message TransformRequestResponse {
+  TransformAction action = 1;
+  // If action is REJECT, this response is sent to the client.
+  // Ignored when action is CONTINUE.
+  HttpResponse response = 2;
+  // Modified request to forward upstream. If nil, the original request is used.
+  HttpRequest modified_request = 3;
+  // Annotations for tracing/audit.
+  map<string, string> annotations = 4;
+}
+
+// --- Response transform ---
+
+message TransformResponseRequest {
+  TransformContext context = 1;
+  HttpRequest request = 2;
+  HttpResponse response = 3;
+}
+
+message TransformResponseResponse {
+  TransformAction action = 1;
+  // If action is REJECT, this replaces the upstream response.
+  HttpResponse modified_response = 2;
+  // Annotations for tracing/audit.
+  map<string, string> annotations = 3;
+}

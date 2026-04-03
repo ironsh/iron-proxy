@@ -123,6 +123,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Build transform context and audit state
 	startedAt := time.Now()
+	bodyLimits := p.pipeline.BodyLimits()
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
 	}
@@ -145,6 +146,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		result.ResponseTransforms = respTraces
 		p.pipeline.EmitAudit(result)
 	}()
+
+	// Wrap request body for transform replayability.
+	r.Body = transform.NewReplayableBody(r.Body, bodyLimits.MaxRequestBodyBytes)
 
 	// Run request transforms
 	if rejectResp, err := p.pipeline.ProcessRequest(r.Context(), tctx, r, &reqTraces); err != nil {
@@ -194,6 +198,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Wrap response body for transform replayability.
+	resp.Body = transform.NewReplayableBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
 
 	// Run response transforms
 	finalResp, err := p.pipeline.ProcessResponse(r.Context(), tctx, r, resp, &respTraces)

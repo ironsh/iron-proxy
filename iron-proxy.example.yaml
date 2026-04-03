@@ -20,6 +20,9 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
+  # Global body buffer limits for transforms.
+  max_request_body_bytes: 1048576   # default: 1 MiB
+  # max_response_body_bytes: 0      # default: 0 (uncapped)
 
 # TLS / MITM configuration
 tls:
@@ -48,6 +51,32 @@ transforms:
           paths: ["/v1/messages", "/v1/complete"]
         - cidr: "172.16.0.0/12"
           methods: ["GET"]
+
+  # gRPC transforms: each entry delegates to one external TransformService server.
+  # Use multiple entries for multiple servers; they run in pipeline order.
+  - name: grpc
+    config:
+      name: "policy-engine"
+      target: "localhost:9500"
+      send_request_body: true
+      send_response_body: true
+      # Only forward matching requests to this server (omit for all requests).
+      rules:
+        - host: "api.openai.com"
+          methods: ["POST"]
+          paths: ["/v1/*"]
+        - host: "*.anthropic.com"
+      # TLS is off by default (plaintext). Enable for production use.
+      tls:
+        enabled: true
+        ca_cert: "/etc/iron-proxy/grpc-ca.pem"
+        cert: "/etc/iron-proxy/grpc-client.pem"
+        key: "/etc/iron-proxy/grpc-client-key.pem"
+  - name: grpc
+    config:
+      name: "request-logger"
+      target: "localhost:9501"
+      # send_request_body/send_response_body default to false (headers only)
 
 # Logging
 log:

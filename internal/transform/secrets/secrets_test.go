@@ -88,7 +88,7 @@ func TestSecrets_BodySwap(t *testing.T) {
 	}})
 
 	body := `{"api_key": "proxy-openai-abc123", "model": "gpt-4"}`
-	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(body)))
+	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(body)), 1<<20)
 
 	req := httptest.NewRequest("POST", "http://api.openai.com/v1/chat", nil)
 	req.Host = "api.openai.com"
@@ -271,9 +271,9 @@ func TestSecrets_BodyTooLarge(t *testing.T) {
 		Hosts:      []hostMatch{{Name: "api.openai.com"}},
 	}})
 
-	// Create a body larger than defaultBodyMaxBytes (1MB)
-	bigBody := strings.Repeat("x", int(defaultBodyMaxBytes)+100)
-	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(bigBody)))
+	// Create a body larger than the max (1 MiB)
+	bigBody := strings.Repeat("x", (1<<20)+100)
+	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(bigBody)), 1<<20)
 
 	req := httptest.NewRequest("POST", "http://api.openai.com/v1/chat", nil)
 	req.Host = "api.openai.com"

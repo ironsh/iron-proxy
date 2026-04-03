@@ -80,6 +80,11 @@ func MatchGlob(pattern, name string) bool {
 	return matched
 }
 
+// DefaultResolver returns the system's default DNS resolver.
+func DefaultResolver() Resolver {
+	return net.DefaultResolver
+}
+
 // NullResolver is a Resolver that always returns "no such host". Useful when
 // only domain glob matching is needed and CIDR resolution is not required.
 type NullResolver struct{}

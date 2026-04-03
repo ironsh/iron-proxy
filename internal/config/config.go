@@ -36,8 +36,10 @@ type DNSRecord struct {
 
 // Proxy configures the HTTP/HTTPS listener addresses.
 type Proxy struct {
-	HTTPListen  string `yaml:"http_listen"`
-	HTTPSListen string `yaml:"https_listen"`
+	HTTPListen           string `yaml:"http_listen"`
+	HTTPSListen          string `yaml:"https_listen"`
+	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
+	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
 }
 
 // TLS configures certificate authority and cert caching for MITM.
@@ -104,6 +106,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Proxy.HTTPSListen == "" {
 		cfg.Proxy.HTTPSListen = ":443"
 	}
+	if cfg.Proxy.MaxRequestBodyBytes == 0 {
+		cfg.Proxy.MaxRequestBodyBytes = 1 << 20 // 1 MiB
+	}
+	// MaxResponseBodyBytes defaults to 0 (uncapped).
 	if cfg.TLS.CertCacheSize == 0 {
 		cfg.TLS.CertCacheSize = 1000
 	}
