@@ -214,6 +214,8 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
+  max_request_body_bytes: 1048576  # 1 MiB (default)
+  max_response_body_bytes: 0       # uncapped (default)
 
 tls:
   ca_cert: "/etc/iron-proxy/ca.crt" # Required
@@ -274,10 +276,27 @@ iron-proxy scans outbound requests and replaces proxy tokens with the real
 values before forwarding upstream. You control where it looks:
 
 - **`match_headers`:** list of header names to scan. Empty list = all headers.
-- **`match_body`:** scan the request body (buffered, up to 1 MB).
+- **`match_body`:** scan the request body (buffered up to `max_request_body_bytes`).
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
+
+### Body limits
+
+Transforms that inspect or forward request/response bodies (secrets body
+matching, gRPC transforms) operate on buffered bodies. Two global settings
+control the maximum buffer sizes:
+
+- **`max_request_body_bytes`** (default: `1048576` / 1 MiB): caps how much of
+  the request body is buffered for transforms. Data beyond this limit is
+  truncated from the transform's perspective but still forwarded to upstream.
+- **`max_response_body_bytes`** (default: `0` / uncapped): caps how much of
+  the response body is buffered. Set to `0` to buffer the full response, which
+  is the right default for most workloads (e.g., npm packages, model weights).
+
+Bodies are buffered incrementally as transforms read them, and automatically
+rewound between pipeline stages. If a transform doesn't read the body, no
+buffering occurs and the body streams through untouched.
 
 ### TLS
 

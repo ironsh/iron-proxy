@@ -2,7 +2,6 @@
 package grpc
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -274,7 +273,7 @@ func protoToHTTPResponse(pb *transformv1.HttpResponse, req *http.Request) *http.
 	resp := &http.Response{
 		StatusCode: int(pb.GetStatusCode()),
 		Header:     protoToHeaders(pb.GetHeaders()),
-		Body:       io.NopCloser(bytes.NewReader(pb.GetBody())),
+		Body:       transform.NewBufferedBody(pb.GetBody()),
 		Request:    req,
 	}
 	if resp.StatusCode == 0 {
@@ -299,7 +298,7 @@ func applyModifiedRequest(pb *transformv1.HttpRequest, req *http.Request) {
 		req.Header = protoToHeaders(pb.GetHeaders())
 	}
 	if pb.GetBody() != nil {
-		req.Body = io.NopCloser(bytes.NewReader(pb.GetBody()))
+		req.Body = transform.NewBufferedBody(pb.GetBody())
 		req.ContentLength = int64(len(pb.GetBody()))
 	}
 }
@@ -312,7 +311,7 @@ func applyModifiedResponse(pb *transformv1.HttpResponse, resp *http.Response) {
 		resp.Header = protoToHeaders(pb.GetHeaders())
 	}
 	if pb.GetBody() != nil {
-		resp.Body = io.NopCloser(bytes.NewReader(pb.GetBody()))
+		resp.Body = transform.NewBufferedBody(pb.GetBody())
 		resp.ContentLength = int64(len(pb.GetBody()))
 	}
 }
