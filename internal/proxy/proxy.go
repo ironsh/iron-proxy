@@ -354,6 +354,9 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
+	// Remove Content-Length since transforms may have changed the body size.
+	// Go's HTTP server will set it or use chunked encoding.
+	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	if resp.Body != nil {
 		_, _ = io.Copy(w, resp.Body)
