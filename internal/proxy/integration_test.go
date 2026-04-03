@@ -80,7 +80,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
 	// 4. Start proxy with HTTPS
-	p := New("127.0.0.1:0", "127.0.0.1:0", certCache, pipeline, logger)
+	p := New("127.0.0.1:0", "127.0.0.1:0", certCache, pipeline, nil, logger)
 
 	// Start HTTP listener
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -101,8 +101,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	})
 
 	// 6. Override upstream transport to route fakeHost to the real upstream
-	origTransport := upstreamTransport
-	upstreamTransport = &http.Transport{
+	p.transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
@@ -111,7 +110,6 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
 		},
 	}
-	defer func() { upstreamTransport = origTransport }()
 
 	// 7. Test: allowed request through HTTPS proxy
 	caPool := x509.NewCertPool()

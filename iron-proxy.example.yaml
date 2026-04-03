@@ -6,6 +6,10 @@ dns:
   # The IP address returned for intercepted DNS queries.
   # Should be the IP where iron-proxy is running.
   proxy_ip: "10.16.0.1"
+  # Optional upstream DNS resolver for the proxy's own lookups. If set, both
+  # passthrough DNS queries and upstream HTTP connections resolve via this server
+  # instead of the OS default. Useful when iron-proxy owns the system DNS.
+  # upstream_resolver: "8.8.8.8:53"
   # Domains to pass through to the OS resolver (everything else resolves to proxy_ip)
   passthrough:
     - "*.internal.corp"
