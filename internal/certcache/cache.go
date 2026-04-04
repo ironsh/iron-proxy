@@ -152,10 +152,14 @@ func loadCA(certPath, keyPath string) (*x509.Certificate, crypto.Signer, error) 
 
 	parsed, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 	if err != nil {
-		// Try EC private key format as fallback
-		parsed, err = x509.ParseECPrivateKey(keyBlock.Bytes)
+		// Try PKCS1 (RSA) format as fallback
+		parsed, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parsing CA key: %w", err)
+			// Try EC private key format as final fallback
+			parsed, err = x509.ParseECPrivateKey(keyBlock.Bytes)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing CA key (tried PKCS8, PKCS1, and EC formats): %w", err)
+			}
 		}
 	}
 
