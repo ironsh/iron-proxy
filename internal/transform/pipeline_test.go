@@ -12,6 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// wrapBody wraps the request body in a BufferedBody, matching what the proxy
+// does before entering the pipeline.
+func wrapBody(req *http.Request) {
+	req.Body = NewBufferedBody(req.Body, 0)
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -57,6 +63,7 @@ func TestPipeline_AllContinue(t *testing.T) {
 	p := NewPipeline([]Transformer{t1, t2}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	resp, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
@@ -75,6 +82,7 @@ func TestPipeline_RequestRejectShortCircuits(t *testing.T) {
 	p := NewPipeline([]Transformer{t1, t2}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	resp, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
@@ -99,6 +107,7 @@ func TestPipeline_RequestRejectCustomResponse(t *testing.T) {
 	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	resp, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
@@ -114,6 +123,7 @@ func TestPipeline_RequestError(t *testing.T) {
 	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	_, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.Error(t, err)
@@ -130,7 +140,8 @@ func TestPipeline_ResponseReject(t *testing.T) {
 	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	upstreamResp := &http.Response{StatusCode: http.StatusOK}
+	wrapBody(req)
+	upstreamResp := &http.Response{StatusCode: http.StatusOK, Body: NewBufferedBody(http.NoBody, 0)}
 
 	var traces []TransformTrace
 	resp, err := p.ProcessResponse(context.Background(), &TransformContext{}, req, upstreamResp, &traces)
@@ -144,7 +155,8 @@ func TestPipeline_ResponseContinuePassesThrough(t *testing.T) {
 	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	upstreamResp := &http.Response{StatusCode: http.StatusOK}
+	wrapBody(req)
+	upstreamResp := &http.Response{StatusCode: http.StatusOK, Body: NewBufferedBody(http.NoBody, 0)}
 
 	var traces []TransformTrace
 	resp, err := p.ProcessResponse(context.Background(), &TransformContext{}, req, upstreamResp, &traces)
@@ -157,12 +169,13 @@ func TestPipeline_EmptyPipeline(t *testing.T) {
 	p := NewPipeline(nil, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	resp, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
 	require.Nil(t, resp)
 
-	upstreamResp := &http.Response{StatusCode: http.StatusOK}
+	upstreamResp := &http.Response{StatusCode: http.StatusOK, Body: NewBufferedBody(http.NoBody, 0)}
 	resp, err = p.ProcessResponse(context.Background(), &TransformContext{}, req, upstreamResp, &traces)
 	require.NoError(t, err)
 	require.Same(t, upstreamResp, resp)
@@ -185,6 +198,7 @@ func TestPipeline_RequestRejectStopsAtSecond(t *testing.T) {
 	p := NewPipeline([]Transformer{t1, t2, t3}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	resp, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
@@ -202,6 +216,7 @@ func TestPipeline_TraceCapturesTiming(t *testing.T) {
 	p := NewPipeline([]Transformer{t1}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	_, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
@@ -217,6 +232,7 @@ func TestPipeline_AnnotationsInTrace(t *testing.T) {
 	p := NewPipeline([]Transformer{annotator}, BodyLimits{}, testLogger())
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	wrapBody(req)
 	var traces []TransformTrace
 	_, err := p.ProcessRequest(context.Background(), &TransformContext{}, req, &traces)
 	require.NoError(t, err)
