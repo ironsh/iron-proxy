@@ -25,6 +25,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "generate-ca":
+			runGenerateCA(os.Args[2:])
+			return
+		}
+	}
+
 	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
 	flag.Parse()
 
