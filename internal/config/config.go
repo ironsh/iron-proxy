@@ -68,8 +68,15 @@ type Log struct {
 	Level string `yaml:"level"`
 }
 
-// LoadFile reads and parses a YAML config file at the given path.
+// LoadFile reads and parses a YAML config from the given path. If the path is
+// an S3 URL (s3://bucket/key), the config is fetched from S3 using the default
+// AWS credential chain.
 func LoadFile(path string) (*Config, error) {
+	return loadFileOrS3(path)
+}
+
+// loadFromFile reads and parses a YAML config file from a local filesystem path.
+func loadFromFile(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening config file: %w", err)
