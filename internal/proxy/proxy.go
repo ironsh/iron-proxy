@@ -164,7 +164,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if rejectResp != nil {
 		result.Action = transform.ActionReject
 		result.StatusCode = rejectResp.StatusCode
-		writeResponse(w, rejectResp)
+		p.writeResponse(w, rejectResp)
 		return
 	}
 
@@ -232,7 +232,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeResponse(w, finalResp)
+	p.writeResponse(w, finalResp)
 }
 
 // isWebSocketUpgrade detects a WebSocket upgrade request.
@@ -309,7 +309,9 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstreamConn, clientBuf)
+		if _, err := io.Copy(upstreamConn, clientBuf); err != nil {
+			p.logger.Debug("websocket client->upstream copy error", slog.String("error", err.Error()))
+		}
 		// Signal upstream we're done writing
 		if tc, ok := upstreamConn.(*net.TCPConn); ok {
 			tc.CloseWrite()
@@ -318,7 +320,9 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(clientConn, upstreamConn)
+		if _, err := io.Copy(clientConn, upstreamConn); err != nil {
+			p.logger.Debug("websocket upstream->client copy error", slog.String("error", err.Error()))
+		}
 		// Signal client we're done writing
 		if tc, ok := clientConn.(*net.TCPConn); ok {
 			tc.CloseWrite()
@@ -347,24 +351,32 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		_, _ = io.Copy(w, reader)
+		if _, err := io.Copy(w, reader); err != nil {
+			p.logger.Warn("SSE copy error", slog.String("error", err.Error()))
+		}
 		return
 	}
 
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := reader.Read(buf)
+		n, readErr := reader.Read(buf)
 		if n > 0 {
-			_, _ = w.Write(buf[:n])
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				p.logger.Warn("SSE write error", slog.String("error", writeErr.Error()))
+				break
+			}
 			flusher.Flush()
 		}
-		if err != nil {
+		if readErr != nil {
+			if readErr != io.EOF {
+				p.logger.Warn("SSE read error", slog.String("error", readErr.Error()))
+			}
 			break
 		}
 	}
 }
 
-func writeResponse(w http.ResponseWriter, resp *http.Response) {
+func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
 		// If a transform buffered the response body, set Content-Length
@@ -375,12 +387,16 @@ func writeResponse(w http.ResponseWriter, resp *http.Response) {
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(n), 10))
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, buf.StreamingReader())
+		if _, err := io.Copy(w, buf.StreamingReader()); err != nil {
+			p.logger.Warn("response body copy error", slog.String("error", err.Error()))
+		}
 	} else {
 		// Synthetic responses (e.g. reject) with plain bodies.
 		w.WriteHeader(resp.StatusCode)
 		if resp.Body != nil {
-			_, _ = io.Copy(w, resp.Body)
+			if _, err := io.Copy(w, resp.Body); err != nil {
+				p.logger.Warn("response body copy error", slog.String("error", err.Error()))
+			}
 		}
 	}
 }
