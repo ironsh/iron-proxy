@@ -264,6 +264,12 @@ Unmatched requests get a `403 Forbidden`.
 Domain patterns use glob matching: `*.example.com` matches any subdomain and
 `example.com` itself.
 
+**Warn mode:** Set `warn: true` to observe what the allowlist would block without
+actually enforcing it. Requests that would be rejected are allowed through but
+annotated with `"action": "warn"` in the transform trace. This is useful for
+rolling out new allowlist rules or auditing existing traffic before switching
+to enforcement.
+
 ### Secrets
 
 The sandbox never holds real credentials. Instead:

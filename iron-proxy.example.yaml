@@ -39,6 +39,9 @@ tls:
 transforms:
   - name: allowlist
     config:
+      # When true, log requests that would be blocked but allow them through.
+      # Useful for rolling out allowlist rules without breaking existing traffic.
+      # warn: true
       # Simple form: allow all methods and paths to these hosts
       domains:
         - "registry.npmjs.org"
