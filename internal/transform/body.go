@@ -45,7 +45,9 @@ func NewBufferedBodyFromBytes(data []byte) *BufferedBody {
 // Read implements io.Reader. On the first call, the entire underlying reader
 // is eagerly consumed into an internal buffer. All reads serve from the buffer.
 func (b *BufferedBody) Read(p []byte) (int, error) {
-	b.buffer()
+	if err := b.buffer(); err != nil {
+		return 0, err
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -59,16 +61,18 @@ func (b *BufferedBody) Read(p []byte) (int, error) {
 }
 
 // buffer eagerly reads the entire original body into memory exactly once.
-func (b *BufferedBody) buffer() {
+func (b *BufferedBody) buffer() error {
+	var err error
 	b.once.Do(func() {
 		var r io.Reader = b.original
 		if b.maxBytes > 0 {
 			r = io.LimitReader(r, b.maxBytes)
 		}
-		b.data, _ = io.ReadAll(r)
+		b.data, err = io.ReadAll(r)
 		b.original.Close()
 		b.original = nil
 	})
+	return err
 }
 
 // Reset rewinds the read position to the beginning so the body can be
