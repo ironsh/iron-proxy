@@ -15,7 +15,6 @@ jobs:
       - uses: ironsh/iron-proxy-action@v0.1.0
         with:
           egress-rules: egress-rules.yaml
-          warn: true
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -35,7 +34,6 @@ jobs:
       - uses: ironsh/iron-proxy-action@v0.1.0
         with:
           egress-rules: egress-rules.yaml
-          warn: true
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -55,7 +53,6 @@ jobs:
       - uses: ironsh/iron-proxy-action@v0.1.0
         with:
           egress-rules: egress-rules.yaml
-          warn: true
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -77,7 +74,6 @@ jobs:
       - uses: ironsh/iron-proxy-action@v0.1.0
         with:
           egress-rules: egress-rules.yaml
-          warn: true
 
       - uses: actions/setup-go@v6.4.0
         with:
