@@ -327,6 +327,76 @@ func TestAllowlist_RuleWithCIDR(t *testing.T) {
 	require.Equal(t, transform.ActionReject, resultWithMethodAndPath(t, a, "internal.service", "POST", "/").Action)
 }
 
+// --- Warn mode tests ---
+
+func TestAllowlist_WarnModeAllowsBlockedRequests(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Domains: []string{"api.openai.com"},
+		Warn:    true,
+	}, &mockResolver{})
+	require.NoError(t, err)
+
+	// Allowed request: no annotation
+	tctx := &transform.TransformContext{}
+	req := httptest.NewRequest("GET", "http://api.openai.com/", nil)
+	req.Host = "api.openai.com"
+	res, err := a.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Nil(t, tctx.DrainAnnotations())
+
+	// Blocked request in warn mode: continues with annotation
+	tctx2 := &transform.TransformContext{}
+	req2 := httptest.NewRequest("GET", "http://evil.com/", nil)
+	req2.Host = "evil.com"
+	res2, err := a.TransformRequest(context.Background(), tctx2, req2)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res2.Action)
+	annotations := tctx2.DrainAnnotations()
+	require.Equal(t, "warn", annotations["action"])
+}
+
+func TestAllowlist_WarnFalseStillRejects(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Domains: []string{"api.openai.com"},
+		Warn:    false,
+	}, &mockResolver{})
+	require.NoError(t, err)
+
+	require.Equal(t, transform.ActionReject, result(t, a, "evil.com").Action)
+}
+
+func TestAllowlist_WarnModeWithRules(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Rules: []hostmatch.RuleConfig{{
+			Host:    "api.openai.com",
+			Methods: []string{"GET"},
+		}},
+		Warn: true,
+	}, &mockResolver{})
+	require.NoError(t, err)
+
+	// Wrong method in warn mode: continues with annotation
+	tctx := &transform.TransformContext{}
+	req := httptest.NewRequest("POST", "http://api.openai.com/", nil)
+	req.Host = "api.openai.com"
+	res, err := a.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	annotations := tctx.DrainAnnotations()
+	require.Equal(t, "warn", annotations["action"])
+
+	// Wrong host in warn mode: continues with annotation
+	tctx2 := &transform.TransformContext{}
+	req2 := httptest.NewRequest("GET", "http://evil.com/", nil)
+	req2.Host = "evil.com"
+	res2, err := a.TransformRequest(context.Background(), tctx2, req2)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res2.Action)
+	annotations2 := tctx2.DrainAnnotations()
+	require.Equal(t, "warn", annotations2["action"])
+}
+
 // --- Validation tests ---
 
 func TestAllowlist_RuleBothHostAndCIDR(t *testing.T) {

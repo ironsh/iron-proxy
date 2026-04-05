@@ -20,12 +20,14 @@ func init() {
 // and paths against a set of rules.
 type Allowlist struct {
 	rules []hostmatch.Rule
+	warn  bool
 }
 
 type allowlistConfig struct {
 	Domains []string              `yaml:"domains"`
 	CIDRs   []string              `yaml:"cidrs"`
 	Rules   []hostmatch.RuleConfig `yaml:"rules"`
+	Warn    bool                   `yaml:"warn"`
 }
 
 func factory(cfg yaml.Node) (transform.Transformer, error) {
@@ -64,7 +66,7 @@ func newFromConfig(cfg allowlistConfig, resolver hostmatch.Resolver) (*Allowlist
 	}
 	rules = append(rules, compiled...)
 
-	return &Allowlist{rules: rules}, nil
+	return &Allowlist{rules: rules, warn: cfg.Warn}, nil
 }
 
 // New creates an Allowlist from domain globs and CIDR strings.
@@ -75,8 +77,12 @@ func New(domains []string, cidrs []string, resolver hostmatch.Resolver) (*Allowl
 
 func (a *Allowlist) Name() string { return "allowlist" }
 
-func (a *Allowlist) TransformRequest(ctx context.Context, _ *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+func (a *Allowlist) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	if hostmatch.MatchAnyRule(ctx, a.rules, req) {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+	if a.warn {
+		tctx.Annotate("action", "warn")
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 	return &transform.TransformResult{Action: transform.ActionReject}, nil
