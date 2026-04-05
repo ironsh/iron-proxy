@@ -1,0 +1,30 @@
+domains:
+  # Go module proxy and checksum database
+  - "proxy.golang.org"
+  - "sum.golang.org"
+  - "storage.googleapis.com"
+
+  # GitHub (for actions, releases, and module downloads)
+  - "github.com"
+  - "*.github.com"
+  - "*.githubusercontent.com"
+
+  # golangci-lint
+  - "*.golangci.com"
+
+  # Go toolchain
+  - "go.dev"
+  - "*.go.dev"
+  - "golang.org"
+  - "*.golang.org"
+
+  # Google (for gRPC/protobuf modules)
+  - "google.golang.org"
+
+  # Docker Hub (for release builds)
+  - "*.docker.io"
+  - "*.docker.com"
+
+  # GoReleaser
+  - "goreleaser.com"
+  - "*.goreleaser.com"

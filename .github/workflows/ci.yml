@@ -12,6 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: ironsh/iron-proxy-action@v1
+        with:
+          egress-rules: egress-rules.yaml
+
       - uses: actions/setup-go@v6.4.0
         with:
           go-version: "1.26"
@@ -19,10 +23,17 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
+      - uses: ironsh/iron-proxy-action/summary@v1
+        if: always()
+
   vet:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: ironsh/iron-proxy-action@v1
+        with:
+          egress-rules: egress-rules.yaml
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -31,10 +42,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - uses: ironsh/iron-proxy-action/summary@v1
+        if: always()
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: ironsh/iron-proxy-action@v1
+        with:
+          egress-rules: egress-rules.yaml
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -45,10 +63,17 @@ jobs:
           version: latest
           install-mode: binary
 
+      - uses: ironsh/iron-proxy-action/summary@v1
+        if: always()
+
   tidy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: ironsh/iron-proxy-action@v1
+        with:
+          egress-rules: egress-rules.yaml
 
       - uses: actions/setup-go@v6.4.0
         with:
@@ -58,3 +83,6 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+      - uses: ironsh/iron-proxy-action/summary@v1
+        if: always()
