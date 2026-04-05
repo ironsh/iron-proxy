@@ -11,6 +11,8 @@ domains:
 
   # golangci-lint
   - "*.golangci.com"
+  - "golangci-lint.run"
+  - "*.golangci-lint.run"
 
   # Go toolchain
   - "go.dev"
