@@ -272,7 +272,6 @@ func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret) string {
 	}
 
 	replaced := bytes.ReplaceAll(data, []byte(sec.proxyValue), []byte(sec.realValue))
-	req.Body = transform.NewBufferedBody(replaced)
-	req.ContentLength = int64(len(replaced))
+	req.Body = transform.NewBufferedBodyFromBytes(replaced)
 	return "body"
 }

@@ -122,7 +122,7 @@ func TestTransformRequest_Reject(t *testing.T) {
 
 	gt := newTestTransform(t, "test", addr, true, false)
 	req, _ := http.NewRequest("POST", "https://api.example.com/v1", nil)
-	req.Body = transform.NewReplayableBody(io.NopCloser(bytes.NewReader([]byte("body"))), 1<<20)
+	req.Body = transform.NewBufferedBody(io.NopCloser(bytes.NewReader([]byte("body"))), 1<<20)
 
 	result, err := gt.TransformRequest(context.Background(), testContext(), req)
 	require.NoError(t, err)
@@ -183,7 +183,7 @@ func TestTransformResponse_Continue(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: 200,
 		Header:     http.Header{"Content-Type": {"application/json"}},
-		Body:       transform.NewReplayableBody(io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`))), 1<<20),
+		Body:       transform.NewBufferedBody(io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`))), 1<<20),
 	}
 
 	result, err := gt.TransformResponse(context.Background(), testContext(), req, resp)
@@ -253,7 +253,7 @@ func TestSendRequestBody_True(t *testing.T) {
 
 	gt := newTestTransform(t, "test", addr, true, false)
 	req, _ := http.NewRequest("POST", "https://example.com/", nil)
-	req.Body = transform.NewReplayableBody(io.NopCloser(bytes.NewReader([]byte("payload"))), 1<<20)
+	req.Body = transform.NewBufferedBody(io.NopCloser(bytes.NewReader([]byte("payload"))), 1<<20)
 
 	_, err := gt.TransformRequest(context.Background(), testContext(), req)
 	require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestSendResponseBody_True(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: 200,
 		Header:     make(http.Header),
-		Body:       transform.NewReplayableBody(io.NopCloser(bytes.NewReader([]byte("response data"))), 1<<20),
+		Body:       transform.NewBufferedBody(io.NopCloser(bytes.NewReader([]byte("response data"))), 1<<20),
 	}
 
 	_, err := gt.TransformResponse(context.Background(), testContext(), req, resp)
@@ -534,11 +534,11 @@ func TestSendResponseBody_UncappedDefault(t *testing.T) {
 	gt := newTestTransform(t, "test", addr, false, true)
 	req, _ := http.NewRequest("GET", "https://example.com/", nil)
 	bigBody := bytes.Repeat([]byte("x"), 2<<20) // 2 MiB
-	// Wrap in ReplayableBody with 0 maxBytes (uncapped).
+	// Wrap in BufferedBody with 0 maxBytes (uncapped).
 	resp := &http.Response{
 		StatusCode: 200,
 		Header:     make(http.Header),
-		Body:       transform.NewReplayableBody(io.NopCloser(bytes.NewReader(bigBody)), 0),
+		Body:       transform.NewBufferedBody(io.NopCloser(bytes.NewReader(bigBody)), 0),
 	}
 
 	_, err := gt.TransformResponse(context.Background(), testContext(), req, resp)

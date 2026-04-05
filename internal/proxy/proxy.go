@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"net"
 	"net/http"
 	"strings"
@@ -150,8 +151,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.pipeline.EmitAudit(result)
 	}()
 
-	// Wrap request body for transform replayability.
-	r.Body = transform.NewReplayableBody(r.Body, bodyLimits.MaxRequestBodyBytes)
+	// Wrap request body for lazy buffering by transforms.
+	r.Body = transform.NewBufferedBody(r.Body, bodyLimits.MaxRequestBodyBytes)
 
 	// Run request transforms
 	if rejectResp, err := p.pipeline.ProcessRequest(r.Context(), tctx, r, &reqTraces); err != nil {
@@ -182,7 +183,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		path = path + "?" + r.URL.RawQuery
 	}
 	upstreamURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, r.Body)
+
+	// Use StreamingReader for the upstream body: streams directly from the
+	// client if no transform touched the body, reads from buffer otherwise.
+	var upstreamBody io.Reader
+	if buf, ok := r.Body.(*transform.BufferedBody); ok {
+		upstreamBody = buf.StreamingReader()
+	} else {
+		upstreamBody = r.Body
+	}
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, io.NopCloser(upstreamBody))
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
@@ -191,6 +201,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copyHeaders(upstreamReq.Header, r.Header)
+	// If a transform buffered the request body, set ContentLength so the
+	// upstream receives a Content-Length header instead of chunked encoding.
+	if buf, ok := r.Body.(*transform.BufferedBody); ok {
+		if n := buf.Len(); n >= 0 {
+			upstreamReq.ContentLength = int64(n)
+		}
+	}
 
 	resp, err := p.doUpstream(upstreamReq)
 	if err != nil {
@@ -202,8 +219,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Wrap response body for transform replayability.
-	resp.Body = transform.NewReplayableBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
+	// Wrap response body for lazy buffering by transforms.
+	resp.Body = transform.NewBufferedBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
 
 	// Run response transforms
 	finalResp, err := p.pipeline.ProcessResponse(r.Context(), tctx, r, resp, &respTraces)
@@ -358,19 +375,24 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
-	// Remove Content-Length since transforms may have changed the body size.
-	// Go's HTTP server will set it or use chunked encoding.
-	w.Header().Del("Content-Length")
+	// If a transform buffered the response body, set Content-Length from
+	// the buffered data. Otherwise preserve the upstream header as-is so
+	// clients that require Content-Length (e.g. Docker) work correctly.
+	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
+		if n := buf.Len(); n >= 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(int64(n), 10))
+		}
+	}
 	w.WriteHeader(resp.StatusCode)
 	if resp.Body != nil {
 		_, _ = io.Copy(w, streamBody(resp.Body))
 	}
 }
 
-// streamBody returns a streaming reader if the body supports it, avoiding
-// unnecessary buffering when writing the final response.
+// streamBody returns a streaming reader if the body is a BufferedBody,
+// avoiding unnecessary buffering when writing the final response.
 func streamBody(body io.ReadCloser) io.Reader {
-	if b, ok := body.(transform.Bufferable); ok {
+	if b, ok := body.(*transform.BufferedBody); ok {
 		return b.StreamingReader()
 	}
 	return body

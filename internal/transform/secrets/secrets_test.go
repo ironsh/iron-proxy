@@ -88,7 +88,7 @@ func TestSecrets_BodySwap(t *testing.T) {
 	}})
 
 	body := `{"api_key": "proxy-openai-abc123", "model": "gpt-4"}`
-	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(body)), 1<<20)
+	rb := transform.NewBufferedBody(io.NopCloser(strings.NewReader(body)), 1<<20)
 
 	req := httptest.NewRequest("POST", "http://api.openai.com/v1/chat", nil)
 	req.Host = "api.openai.com"
@@ -273,7 +273,7 @@ func TestSecrets_BodyTooLarge(t *testing.T) {
 
 	// Create a body larger than the max (1 MiB)
 	bigBody := strings.Repeat("x", (1<<20)+100)
-	rb := transform.NewReplayableBody(io.NopCloser(strings.NewReader(bigBody)), 1<<20)
+	rb := transform.NewBufferedBody(io.NopCloser(strings.NewReader(bigBody)), 1<<20)
 
 	req := httptest.NewRequest("POST", "http://api.openai.com/v1/chat", nil)
 	req.Host = "api.openai.com"
@@ -283,7 +283,7 @@ func TestSecrets_BodyTooLarge(t *testing.T) {
 	doTransform(t, s, req)
 
 	// Body should be unchanged (not buffered, so reads from original)
-	// The ReplayableBody couldn't buffer, so reading it gives nothing useful
+	// The BufferedBody couldn't buffer, so reading it gives nothing useful
 	// since the original reader was partially consumed by the Buffer attempt.
 	// The key assertion is that the transform didn't error or reject.
 }

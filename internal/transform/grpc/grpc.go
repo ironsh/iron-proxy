@@ -273,7 +273,7 @@ func protoToHTTPResponse(pb *transformv1.HttpResponse, req *http.Request) *http.
 	resp := &http.Response{
 		StatusCode: int(pb.GetStatusCode()),
 		Header:     protoToHeaders(pb.GetHeaders()),
-		Body:       transform.NewBufferedBody(pb.GetBody()),
+		Body:       transform.NewBufferedBodyFromBytes(pb.GetBody()),
 		Request:    req,
 	}
 	if resp.StatusCode == 0 {
@@ -298,7 +298,7 @@ func applyModifiedRequest(pb *transformv1.HttpRequest, req *http.Request) {
 		req.Header = protoToHeaders(pb.GetHeaders())
 	}
 	if pb.GetBody() != nil {
-		req.Body = transform.NewBufferedBody(pb.GetBody())
+		req.Body = transform.NewBufferedBodyFromBytes(pb.GetBody())
 		req.ContentLength = int64(len(pb.GetBody()))
 	}
 }
@@ -311,8 +311,7 @@ func applyModifiedResponse(pb *transformv1.HttpResponse, resp *http.Response) {
 		resp.Header = protoToHeaders(pb.GetHeaders())
 	}
 	if pb.GetBody() != nil {
-		resp.Body = transform.NewBufferedBody(pb.GetBody())
-		resp.ContentLength = int64(len(pb.GetBody()))
+		resp.Body = transform.NewBufferedBodyFromBytes(pb.GetBody())
 	}
 }
 
