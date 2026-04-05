@@ -2,6 +2,7 @@ package transform
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -116,4 +117,15 @@ func (b *BufferedBody) Close() error {
 		return err
 	}
 	return nil
+}
+
+// RequireBufferedBody asserts that body is a *BufferedBody and returns it.
+// Panics otherwise. The proxy must wrap all request and response bodies
+// before they enter the pipeline or are forwarded.
+func RequireBufferedBody(body io.ReadCloser) *BufferedBody {
+	b, ok := body.(*BufferedBody)
+	if !ok {
+		panic(fmt.Sprintf("expected *BufferedBody, got %T", body))
+	}
+	return b
 }

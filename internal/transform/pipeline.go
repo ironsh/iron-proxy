@@ -3,7 +3,6 @@ package transform
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -52,7 +51,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, tctx *TransformContext, r
 		dur := time.Since(start)
 
 		// Reset body for the next transform.
-		requireBufferedBody(req.Body).Reset()
+		RequireBufferedBody(req.Body).Reset()
 
 		trace := TransformTrace{
 			Name:        t.Name(),
@@ -89,8 +88,8 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, tctx *TransformContext, 
 		dur := time.Since(start)
 
 		// Reset bodies for the next transform.
-		requireBufferedBody(req.Body).Reset()
-		requireBufferedBody(resp.Body).Reset()
+		RequireBufferedBody(req.Body).Reset()
+		RequireBufferedBody(resp.Body).Reset()
 
 		trace := TransformTrace{
 			Name:        t.Name(),
@@ -122,16 +121,6 @@ func (p *Pipeline) EmitAudit(result *PipelineResult) {
 	if p.onComplete != nil {
 		p.onComplete(result)
 	}
-}
-
-// requireBufferedBody asserts that body is a *BufferedBody. The proxy must
-// wrap all request and response bodies before entering the pipeline.
-func requireBufferedBody(body io.ReadCloser) *BufferedBody {
-	b, ok := body.(*BufferedBody)
-	if !ok {
-		panic(fmt.Sprintf("pipeline: expected *BufferedBody, got %T", body))
-	}
-	return b
 }
 
 func forbiddenResponse(req *http.Request) *http.Response {

@@ -184,15 +184,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
 
-	// Use StreamingReader for the upstream body: streams directly from the
-	// client if no transform touched the body, reads from buffer otherwise.
-	var upstreamBody io.Reader
-	if buf, ok := r.Body.(*transform.BufferedBody); ok {
-		upstreamBody = buf.StreamingReader()
-	} else {
-		upstreamBody = r.Body
-	}
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, io.NopCloser(upstreamBody))
+	reqBody := transform.RequireBufferedBody(r.Body)
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, io.NopCloser(reqBody.StreamingReader()))
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
@@ -203,10 +196,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(upstreamReq.Header, r.Header)
 	// If a transform buffered the request body, set ContentLength so the
 	// upstream receives a Content-Length header instead of chunked encoding.
-	if buf, ok := r.Body.(*transform.BufferedBody); ok {
-		if n := buf.Len(); n >= 0 {
-			upstreamReq.ContentLength = int64(n)
-		}
+	if n := reqBody.Len(); n >= 0 {
+		upstreamReq.ContentLength = int64(n)
 	}
 
 	resp, err := p.doUpstream(upstreamReq)
@@ -352,7 +343,7 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	reader := streamBody(resp.Body)
+	reader := transform.RequireBufferedBody(resp.Body).StreamingReader()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -375,27 +366,23 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
-	// If a transform buffered the response body, set Content-Length from
-	// the buffered data. Otherwise preserve the upstream header as-is so
-	// clients that require Content-Length (e.g. Docker) work correctly.
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
+		// If a transform buffered the response body, set Content-Length
+		// from the buffered data. Otherwise preserve the upstream header
+		// as-is so clients that require Content-Length (e.g. Docker)
+		// work correctly.
 		if n := buf.Len(); n >= 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(n), 10))
 		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, buf.StreamingReader())
+	} else {
+		// Synthetic responses (e.g. reject) with plain bodies.
+		w.WriteHeader(resp.StatusCode)
+		if resp.Body != nil {
+			_, _ = io.Copy(w, resp.Body)
+		}
 	}
-	w.WriteHeader(resp.StatusCode)
-	if resp.Body != nil {
-		_, _ = io.Copy(w, streamBody(resp.Body))
-	}
-}
-
-// streamBody returns a streaming reader if the body is a BufferedBody,
-// avoiding unnecessary buffering when writing the final response.
-func streamBody(body io.ReadCloser) io.Reader {
-	if b, ok := body.(*transform.BufferedBody); ok {
-		return b.StreamingReader()
-	}
-	return body
 }
 
 // buildTransport creates the HTTP transport used for upstream requests.
