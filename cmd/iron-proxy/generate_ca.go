@@ -14,7 +14,10 @@ func runGenerateCA(args []string) {
 	name := fs.String("name", "iron-proxy CA", "common name of the CA")
 	expiryHours := fs.Int("expiry-hours", 8760, "number of hours the CA is valid for")
 	algStr := fs.String("alg", "rsa4096", "key algorithm: rsa4096 or ed25519")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	alg, err := cagen.ParseAlgorithm(*algStr)
 	if err != nil {
