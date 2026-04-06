@@ -567,9 +567,7 @@ gpg --import public-key.asc
 gpg --verify checksums.txt.asc checksums.txt
 ```
 
-If verification succeeds, GPG will report a good signature from:
-
-- `Matthew Slipper <matt@iron.sh>`
+If verification succeeds, GPG will report a good signature from `Matthew Slipper <matt@iron.sh>`.
 
 You can optionally inspect the imported key fingerprint and confirm it matches your trusted source before verification.
 
