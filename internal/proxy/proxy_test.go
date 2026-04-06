@@ -375,6 +375,34 @@ func TestHTTPProxy_SSEStreaming(t *testing.T) {
 	require.Contains(t, string(body), "data: event3")
 }
 
+func TestHTTPProxy_RequestContentLengthPreserved(t *testing.T) {
+	const requestBody = "fixed-size request body"
+	var gotContentLength int64
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentLength = r.ContentLength
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, httpAddr, _, _ := startProxy(t)
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/test", httpAddr),
+		strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Host = upstream.Listener.Addr().String()
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, int64(len(requestBody)), gotContentLength)
+	require.Equal(t, requestBody, gotBody)
+}
+
 func TestHTTPProxy_ContentLengthPreserved(t *testing.T) {
 	const responseBody = "fixed-size body"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -185,6 +185,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
 
 	reqBody := transform.RequireBufferedBody(r.Body)
+	// Check Len() before StreamingReader(), which clears the original reader.
+	reqBodyLen := reqBody.Len()
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, io.NopCloser(reqBody.StreamingReader()))
 	if err != nil {
 		result.Action = transform.ActionContinue
@@ -196,8 +198,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(upstreamReq.Header, r.Header)
 	// If a transform buffered the request body, set ContentLength so the
 	// upstream receives a Content-Length header instead of chunked encoding.
-	if n := reqBody.Len(); n >= 0 {
-		upstreamReq.ContentLength = int64(n)
+	// Otherwise, preserve the original Content-Length from the client.
+	if reqBodyLen >= 0 {
+		upstreamReq.ContentLength = int64(reqBodyLen)
+	} else {
+		upstreamReq.ContentLength = r.ContentLength
 	}
 
 	resp, err := p.doUpstream(upstreamReq)
