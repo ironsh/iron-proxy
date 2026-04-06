@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -109,16 +110,29 @@ func main() {
 	// Initialize proxy
 	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, resolver, logger)
 
+	// Initialize health check server
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+	})
+	healthServer := &http.Server{
+		Addr:    cfg.Metrics.Listen,
+		Handler: healthMux,
+	}
+
 	// Start services
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 
 	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
+	go func() { errc <- fmt.Errorf("health: %w", healthServer.ListenAndServe()) }()
 
 	logger.Info("iron-proxy starting",
 		slog.String("dns_listen", cfg.DNS.Listen),
 		slog.String("http_listen", cfg.Proxy.HTTPListen),
 		slog.String("https_listen", cfg.Proxy.HTTPSListen),
+		slog.String("metrics_listen", cfg.Metrics.Listen),
 	)
 	if !pipeline.Empty() {
 		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
@@ -144,6 +158,9 @@ func main() {
 	}
 	if err := p.Shutdown(ctx); err != nil {
 		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
+	}
+	if err := healthServer.Shutdown(ctx); err != nil {
+		logger.Error("health server shutdown error", slog.String("error", err.Error()))
 	}
 
 	logger.Info("iron-proxy stopped")
