@@ -56,23 +56,23 @@ Or build from source:
 ```bash
 go build -o iron-proxy ./cmd/iron-proxy
 ```
- 
+
 ## Quick start
- 
+
 ```bash
 cd examples/docker-compose
 docker compose up
 ```
- 
+
 This starts iron-proxy and a demo client that fires five requests through the
 proxy. Check the logs to see allowed, blocked, and secret-rewritten requests:
- 
+
 ```bash
 docker compose logs proxy
 ```
- 
+
 Every request produces a structured JSON audit entry:
- 
+
 ```json
 {
   "host": "httpbin.org",
@@ -91,7 +91,7 @@ Every request produces a structured JSON audit entry:
   ]
 }
 ```
- 
+
 Rejected requests include a `rejected_by` field and log at WARN level. See
 [Audit log format](#audit-log-format) for the full schema.
 
@@ -214,8 +214,8 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
-  max_request_body_bytes: 1048576  # 1 MiB (default)
-  max_response_body_bytes: 0       # uncapped (default)
+  max_request_body_bytes: 1048576 # 1 MiB (default)
+  max_response_body_bytes: 0 # uncapped (default)
 
 tls:
   ca_cert: "/etc/iron-proxy/ca.crt" # Required
@@ -545,3 +545,36 @@ Rejected requests include a `rejected_by` field and log at WARN level.
 Need Vault/KMS secret backends, a Kubernetes operator, or centralized policy
 management? [iron.sh](https://iron.sh) builds on iron-proxy with enterprise
 features for teams running this at scale.
+
+## Verify release signatures
+
+Release artifacts include a signed checksum manifest:
+
+- `checksums.txt`
+- `checksums.txt.asc` (ASCII-armored detached signature)
+
+Use the included public key at [`public-key.asc`](public-key.asc) to verify:
+
+```bash
+# 1) Download release artifacts for a tag
+TAG=vX.Y.Z
+gh release download "$TAG" --pattern "checksums.txt" --pattern "checksums.txt.asc"
+
+# 2) Import the project signing key
+gpg --import public-key.asc
+
+# 3) Verify the signature over checksums.txt
+gpg --verify checksums.txt.asc checksums.txt
+```
+
+If verification succeeds, GPG will report a good signature from:
+
+- `Matthew Slipper <matt@iron.sh>`
+
+You can optionally inspect the imported key fingerprint and confirm it matches your trusted source before verification.
+
+To verify a specific binary against the signed checksum list (example: `iron-proxy-linux-amd64`):
+
+```bash
+shasum -a 256 iron-proxy-linux-amd64 | grep -F "$(grep -F 'iron-proxy-linux-amd64' checksums.txt | awk '{print $1}')"
+```
