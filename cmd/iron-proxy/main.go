@@ -15,6 +15,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
+	"github.com/ironsh/iron-proxy/internal/metrics"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
 
@@ -109,16 +110,21 @@ func main() {
 	// Initialize proxy
 	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, resolver, logger)
 
+	// Initialize metrics server
+	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
+
 	// Start services
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 
 	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
+	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
 
 	logger.Info("iron-proxy starting",
 		slog.String("dns_listen", cfg.DNS.Listen),
 		slog.String("http_listen", cfg.Proxy.HTTPListen),
 		slog.String("https_listen", cfg.Proxy.HTTPSListen),
+		slog.String("metrics_listen", cfg.Metrics.Listen),
 	)
 	if !pipeline.Empty() {
 		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
@@ -144,6 +150,9 @@ func main() {
 	}
 	if err := p.Shutdown(ctx); err != nil {
 		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
+	}
+	if err := metricsServer.Shutdown(ctx); err != nil {
+		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
 	}
 
 	logger.Info("iron-proxy stopped")
