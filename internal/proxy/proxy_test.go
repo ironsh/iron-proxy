@@ -57,37 +57,7 @@ func generateTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 
 func startProxy(t *testing.T) (*Proxy, string, string, *x509.CertPool) {
 	t.Helper()
-
-	caCert, caKey := generateTestCA(t)
-	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
-	require.NoError(t, err)
-
-	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
-	p := New("127.0.0.1:0", "127.0.0.1:0", cache, pipeline, nil, testLogger())
-
-	// Start HTTP listener manually to get random port
-	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	httpAddr := httpLn.Addr().String()
-
-	// Start HTTPS listener manually
-	httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	tlsLn := tls.NewListener(httpsLn, p.httpsServer.TLSConfig)
-	httpsAddr := httpsLn.Addr().String()
-
-	go func() { _ = p.httpServer.Serve(httpLn) }()
-	go func() { _ = p.httpsServer.Serve(tlsLn) }()
-
-	t.Cleanup(func() {
-		_ = p.httpServer.Close()
-		_ = p.httpsServer.Close()
-	})
-
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-
-	return p, httpAddr, httpsAddr, pool
+	return startProxyWithTransforms(t, nil)
 }
 
 // replacerTransform replaces request and response bodies with fixed-size padding.
