@@ -101,7 +101,9 @@ func (r *replacerTransform) Name() string { return "replacer" }
 func (r *replacerTransform) TransformRequest(_ context.Context, _ *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	if r.reqBody != nil {
 		// Read the original body to trigger buffering, then replace it.
-		_, _ = io.ReadAll(req.Body)
+		if _, err := io.ReadAll(req.Body); err != nil {
+			return nil, err
+		}
 		req.Body = transform.NewBufferedBodyFromBytes(r.reqBody)
 		req.ContentLength = int64(len(r.reqBody))
 	}
@@ -110,7 +112,9 @@ func (r *replacerTransform) TransformRequest(_ context.Context, _ *transform.Tra
 
 func (r *replacerTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, resp *http.Response) (*transform.TransformResult, error) {
 	if r.respBody != nil {
-		_, _ = io.ReadAll(resp.Body)
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			return nil, err
+		}
 		resp.Body = transform.NewBufferedBodyFromBytes(r.respBody)
 		resp.ContentLength = int64(len(r.respBody))
 	}
@@ -523,7 +527,6 @@ func TestHTTPProxy_TransformReplacesRequestBody(t *testing.T) {
 func TestHTTPProxy_TransformReplacesResponseBody(t *testing.T) {
 	replacedBody := strings.Repeat("Y", 37)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "16")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "original response")
 	}))
