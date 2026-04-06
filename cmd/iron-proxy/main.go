@@ -114,7 +114,7 @@ func main() {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "OK")
+		_, _ = fmt.Fprint(w, "OK")
 	})
 	healthServer := &http.Server{
 		Addr:    cfg.Metrics.Listen,
