@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
+	"github.com/ironsh/iron-proxy/internal/metrics"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
 
@@ -110,23 +110,15 @@ func main() {
 	// Initialize proxy
 	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, resolver, logger)
 
-	// Initialize health check server
-	healthMux := http.NewServeMux()
-	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "OK")
-	})
-	healthServer := &http.Server{
-		Addr:    cfg.Metrics.Listen,
-		Handler: healthMux,
-	}
+	// Initialize metrics server
+	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
 
 	// Start services
 	errc := make(chan error, 3)
 
 	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
-	go func() { errc <- fmt.Errorf("health: %w", healthServer.ListenAndServe()) }()
+	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
 
 	logger.Info("iron-proxy starting",
 		slog.String("dns_listen", cfg.DNS.Listen),
@@ -159,8 +151,8 @@ func main() {
 	if err := p.Shutdown(ctx); err != nil {
 		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
 	}
-	if err := healthServer.Shutdown(ctx); err != nil {
-		logger.Error("health server shutdown error", slog.String("error", err.Error()))
+	if err := metricsServer.Shutdown(ctx); err != nil {
+		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
 	}
 
 	logger.Info("iron-proxy stopped")
