@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ironsh/iron-proxy-action@v0.1.0
+      - uses: ironsh/iron-proxy-action@v0.1.1
         with:
           egress-rules: egress-rules.yaml
 
@@ -23,7 +23,7 @@ jobs:
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
-      - uses: ironsh/iron-proxy-action/summary@v0.1.0
+      - uses: ironsh/iron-proxy-action/summary@v0.1.1
         if: always()
 
   vet:
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ironsh/iron-proxy-action@v0.1.0
+      - uses: ironsh/iron-proxy-action@v0.1.1
         with:
           egress-rules: egress-rules.yaml
 
@@ -42,7 +42,7 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - uses: ironsh/iron-proxy-action/summary@v0.1.0
+      - uses: ironsh/iron-proxy-action/summary@v0.1.1
         if: always()
 
   lint:
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ironsh/iron-proxy-action@v0.1.0
+      - uses: ironsh/iron-proxy-action@v0.1.1
         with:
           egress-rules: egress-rules.yaml
 
@@ -63,7 +63,7 @@ jobs:
           version: latest
           install-mode: binary
 
-      - uses: ironsh/iron-proxy-action/summary@v0.1.0
+      - uses: ironsh/iron-proxy-action/summary@v0.1.1
         if: always()
 
   tidy:
@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ironsh/iron-proxy-action@v0.1.0
+      - uses: ironsh/iron-proxy-action@v0.1.1
         with:
           egress-rules: egress-rules.yaml
 
@@ -84,5 +84,5 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - uses: ironsh/iron-proxy-action/summary@v0.1.0
+      - uses: ironsh/iron-proxy-action/summary@v0.1.1
         if: always()

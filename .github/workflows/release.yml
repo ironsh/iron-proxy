@@ -18,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: ironsh/iron-proxy-action@v0.1.0
+      - uses: ironsh/iron-proxy-action@v0.1.1
         with:
           egress-rules: egress-rules.yaml
           disable-docker: false
@@ -51,5 +51,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: ironsh/iron-proxy-action/summary@v0.1.0
+      - uses: ironsh/iron-proxy-action/summary@v0.1.1
         if: always()
