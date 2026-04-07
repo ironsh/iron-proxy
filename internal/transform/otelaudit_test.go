@@ -1,0 +1,195 @@
+package transform
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/log"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+)
+
+// recordProcessor is an in-memory OTEL log processor for testing.
+type recordProcessor struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func (p *recordProcessor) OnEmit(_ context.Context, r *sdklog.Record) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.records = append(p.records, *r)
+	return nil
+}
+
+func (p *recordProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
+func (p *recordProcessor) Shutdown(context.Context) error              { return nil }
+func (p *recordProcessor) ForceFlush(context.Context) error            { return nil }
+
+func (p *recordProcessor) Records() []sdklog.Record {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]sdklog.Record{}, p.records...)
+}
+
+func TestOTELAuditFunc_AllowedRequest(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:      "httpbin.org",
+		Method:    "GET",
+		Path:      "/headers",
+		RemoteAddr: "172.20.0.4:54321",
+		SNI:       "httpbin.org",
+		StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Duration:  142 * time.Millisecond,
+		Action:    ActionContinue,
+		StatusCode: 200,
+		RequestTransforms: []TransformTrace{
+			{
+				Name:     "allowlist",
+				Action:   ActionContinue,
+				Duration: 500 * time.Microsecond,
+			},
+			{
+				Name:     "secrets",
+				Action:   ActionContinue,
+				Duration: 1200 * time.Microsecond,
+				Annotations: map[string]any{
+					"swapped": []any{
+						map[string]any{
+							"secret":    "OPENAI_API_KEY",
+							"locations": []string{"header:Authorization"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	rec := records[0]
+	assert.Equal(t, log.SeverityInfo1, rec.Severity())
+	assert.Equal(t, "INFO", rec.SeverityText())
+	assert.Equal(t, "request", rec.Body().AsString())
+
+	attrs := recordAttrs(rec)
+	assert.Equal(t, "httpbin.org", attrs["host"].AsString())
+	assert.Equal(t, "GET", attrs["method"].AsString())
+	assert.Equal(t, "/headers", attrs["path"].AsString())
+	assert.Equal(t, "allow", attrs["action"].AsString())
+	assert.Equal(t, int64(200), attrs["status_code"].AsInt64())
+	assert.InDelta(t, 142.0, attrs["duration_ms"].AsFloat64(), 0.1)
+
+	// Verify request_transforms is a slice
+	transforms := attrs["request_transforms"]
+	require.Equal(t, log.KindSlice, transforms.Kind())
+	transformSlice := transforms.AsSlice()
+	require.Len(t, transformSlice, 2)
+
+	// First transform: allowlist
+	t0 := mapFromValue(transformSlice[0])
+	assert.Equal(t, "allowlist", t0["name"].AsString())
+	assert.Equal(t, "allow", t0["action"].AsString())
+
+	// Second transform: secrets with annotations
+	t1 := mapFromValue(transformSlice[1])
+	assert.Equal(t, "secrets", t1["name"].AsString())
+	assert.Contains(t, t1["annotations"].AsString(), "OPENAI_API_KEY")
+}
+
+func TestOTELAuditFunc_RejectedRequest(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:       "malicious.example.com",
+		Method:     "GET",
+		Path:       "/",
+		Action:     ActionReject,
+		StatusCode: 403,
+		Duration:   1 * time.Millisecond,
+		RequestTransforms: []TransformTrace{
+			{
+				Name:   "allowlist",
+				Action: ActionReject,
+			},
+		},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	rec := records[0]
+	assert.Equal(t, log.SeverityWarn1, rec.Severity())
+	assert.Equal(t, "WARN", rec.SeverityText())
+
+	attrs := recordAttrs(rec)
+	assert.Equal(t, "reject", attrs["action"].AsString())
+	assert.Equal(t, "allowlist", attrs["rejected_by"].AsString())
+}
+
+func TestOTELAuditFunc_ErroredRequest(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:     "api.example.com",
+		Method:   "POST",
+		Path:     "/v1/test",
+		Action:   ActionContinue,
+		Duration: 5 * time.Millisecond,
+		Err:      errors.New("connection reset"),
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	rec := records[0]
+	assert.Equal(t, log.SeverityError1, rec.Severity())
+	assert.Equal(t, "ERROR", rec.SeverityText())
+
+	attrs := recordAttrs(rec)
+	assert.Equal(t, "error", attrs["action"].AsString())
+	assert.Equal(t, "connection reset", attrs["error"].AsString())
+}
+
+func TestChainAuditFuncs(t *testing.T) {
+	var calls []string
+	f1 := AuditFunc(func(_ *PipelineResult) { calls = append(calls, "f1") })
+	f2 := AuditFunc(func(_ *PipelineResult) { calls = append(calls, "f2") })
+
+	chained := ChainAuditFuncs(f1, f2)
+	chained(&PipelineResult{})
+
+	assert.Equal(t, []string{"f1", "f2"}, calls)
+}
+
+// recordAttrs extracts attributes from an OTEL log record into a map.
+func recordAttrs(rec sdklog.Record) map[string]log.Value {
+	attrs := make(map[string]log.Value)
+	rec.WalkAttributes(func(kv log.KeyValue) bool {
+		attrs[kv.Key] = kv.Value
+		return true
+	})
+	return attrs
+}
+
+// mapFromValue extracts key-value pairs from a Map log.Value.
+func mapFromValue(v log.Value) map[string]log.Value {
+	m := make(map[string]log.Value)
+	for _, kv := range v.AsMap() {
+		m[kv.Key] = kv.Value
+	}
+	return m
+}

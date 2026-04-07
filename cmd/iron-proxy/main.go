@@ -16,6 +16,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/config"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
 	"github.com/ironsh/iron-proxy/internal/metrics"
+	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
 
@@ -85,7 +86,24 @@ func main() {
 		MaxRequestBodyBytes:  cfg.Proxy.MaxRequestBodyBytes,
 		MaxResponseBodyBytes: cfg.Proxy.MaxResponseBodyBytes,
 	}, logger)
-	pipeline.SetAuditFunc(transform.NewAuditLogger(logger))
+	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
+	if iotel.Enabled() {
+		otelProvider, err := iotel.NewLoggerProvider(context.Background())
+		if err != nil {
+			logger.Error("initializing OTEL log provider", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := otelProvider.Shutdown(ctx); err != nil {
+				logger.Error("shutting down OTEL log provider", slog.String("error", err.Error()))
+			}
+		}()
+		auditFunc = transform.ChainAuditFuncs(auditFunc, transform.NewOTELAuditFunc(otelProvider))
+		logger.Info("OTEL audit export enabled")
+	}
+	pipeline.SetAuditFunc(auditFunc)
 
 	// Build upstream resolver
 	resolver := net.DefaultResolver
