@@ -119,6 +119,9 @@ transforms:
       send_request_body: true
       send_response_body: true
 
+metrics:
+  listen: "127.0.0.1:0"
+
 log:
   level: error
 `, caCertPath, caKeyPath, grpcAddr1, grpcAddr2)
