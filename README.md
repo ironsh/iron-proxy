@@ -1,6 +1,6 @@
 # iron-proxy
 
-[![Docs](https://img.shields.io/badge/docs-iron--proxy-blue)](https://docs.ironsh.dev)
+[![Docs](https://img.shields.io/badge/docs-iron--proxy-blue)](https://docs.iron.sh)
 [![Latest Release](https://img.shields.io/github/v/release/ironsh/iron-proxy)](https://github.com/ironsh/iron-proxy/releases/latest)
 [![Docker Pulls](https://img.shields.io/docker/pulls/ironsh/iron-proxy)](https://hub.docker.com/r/ironsh/iron-proxy)
 
