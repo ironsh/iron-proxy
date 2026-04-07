@@ -540,6 +540,38 @@ Every proxied request produces a structured JSON log entry:
 
 Rejected requests include a `rejected_by` field and log at WARN level.
 
+## OpenTelemetry export
+
+Audit events can be exported as OpenTelemetry structured log records for
+offline analysis in backends like Axiom, ClickHouse, or Logfire. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to enable:
+
+```bash
+docker run -d --name iron-proxy \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=https://logfire-us.pydantic.dev \
+  -e OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
+  -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>" \
+  -e OTEL_SERVICE_NAME=iron-proxy \
+  -e OTEL_RESOURCE_ATTRIBUTES="deployment.environment=staging" \
+  # ... other flags ...
+  ironsh/iron-proxy:latest -config /etc/iron-proxy/proxy.yaml
+```
+
+All configuration uses standard OTEL environment variables:
+
+| Variable                       | Description                                             | Default          |
+| ------------------------------ | ------------------------------------------------------- | ---------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector URL. OTEL export is disabled when unset. | (disabled)       |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` or `grpc`.                              | `http/protobuf`  |
+| `OTEL_EXPORTER_OTLP_HEADERS`  | Comma-separated `key=value` pairs for auth headers.     | (none)           |
+| `OTEL_SERVICE_NAME`            | Service name attached to all log records.                | `iron-proxy`     |
+| `OTEL_RESOURCE_ATTRIBUTES`    | Comma-separated `key=value` resource attributes.        | (none)           |
+
+When enabled, every audit event is emitted as an OTEL log record alongside the
+existing JSON stderr logs. The log record carries the same schema as the JSON
+audit entry: `host`, `method`, `path`, `action`, `status_code`, `duration_ms`,
+and the full `request_transforms`/`response_transforms` arrays with annotations.
+
 ## iron.sh
 
 Need Vault/KMS secret backends, a Kubernetes operator, or centralized policy
