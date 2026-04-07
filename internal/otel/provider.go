@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 
-	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -76,43 +75,3 @@ func Enabled() bool {
 	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
 }
 
-// ResourceAttrs parses OTEL_RESOURCE_ATTRIBUTES into attribute.KeyValue pairs.
-// This is handled automatically by resource.WithFromEnv(), exposed here only
-// for testing.
-func ResourceAttrs() []attribute.KeyValue {
-	raw := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
-	if raw == "" {
-		return nil
-	}
-	var attrs []attribute.KeyValue
-	for _, pair := range splitComma(raw) {
-		k, v, ok := splitKV(pair)
-		if !ok {
-			continue
-		}
-		attrs = append(attrs, attribute.String(k, v))
-	}
-	return attrs
-}
-
-func splitComma(s string) []string {
-	var parts []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			parts = append(parts, s[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, s[start:])
-	return parts
-}
-
-func splitKV(s string) (string, string, bool) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '=' {
-			return s[:i], s[i+1:], true
-		}
-	}
-	return "", "", false
-}
