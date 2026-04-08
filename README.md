@@ -272,6 +272,33 @@ annotated with `"action": "warn"` in the transform trace. This is useful for
 rolling out new allowlist rules or auditing existing traffic before switching
 to enforcement.
 
+### Annotate
+
+Captures HTTP request headers into audit log annotations based on
+host/method/path rules. This is useful for enriching audit logs with
+request-specific context like request IDs or API keys without modifying the
+proxy core.
+
+Each annotation group specifies rules to match and headers to capture. When a
+request matches any rule in a group, the specified header values are written as
+`header:<Name>` entries in the transform trace annotations. Requests that don't
+match are passed through unchanged. This transform never rejects requests.
+
+```yaml
+transforms:
+  - name: annotate
+    config:
+      annotations:
+        - rules:
+            - host: "api.openai.com"
+              methods: ["POST"]
+              paths: ["/v1/*"]
+          headers: ["x-request-id", "authorization"]
+        - rules:
+            - host: "*.anthropic.com"
+          headers: ["x-api-key"]
+```
+
 ### Secrets
 
 The sandbox never holds real credentials. Instead:
