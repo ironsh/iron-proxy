@@ -15,7 +15,8 @@ Requirements:
   - gpg configured with a default secret key (or set GPG_KEY_ID)
 
 Environment variables:
-  GPG_KEY_ID   Optional key id/fingerprint to use for signing
+  GPG_KEY_ID   Key id/fingerprint to use for signing
+               (default: 7969C7E131F29652C601752C64D88022DBC645D1)
 EOF
 }
 
@@ -55,12 +56,10 @@ if [[ ! -s "$CHECKSUMS_FILE" ]]; then
   exit 1
 fi
 
-echo "Signing checksums.txt with GPG..."
-if [[ -n "${GPG_KEY_ID:-}" ]]; then
-  gpg --batch --yes --armor --detach-sign --local-user "$GPG_KEY_ID" --output "$SIG_FILE" "$CHECKSUMS_FILE"
-else
-  gpg --batch --yes --armor --detach-sign --output "$SIG_FILE" "$CHECKSUMS_FILE"
-fi
+GPG_KEY_ID="${GPG_KEY_ID:-7969C7E131F29652C601752C64D88022DBC645D1}"
+
+echo "Signing checksums.txt with GPG (key: $GPG_KEY_ID)..."
+gpg --batch --yes --armor --detach-sign --local-user "$GPG_KEY_ID" --output "$SIG_FILE" "$CHECKSUMS_FILE"
 
 if [[ ! -s "$SIG_FILE" ]]; then
   echo "Error: failed to create signature file."
