@@ -276,13 +276,16 @@ to enforcement.
 
 Captures HTTP request headers into audit log annotations based on
 host/method/path rules. This is useful for enriching audit logs with
-request-specific context like request IDs or API keys without modifying the
-proxy core.
+request-specific context like request IDs without modifying the proxy core.
 
 Each annotation group specifies rules to match and headers to capture. When a
 request matches any rule in a group, the specified header values are written as
 `header:<Name>` entries in the transform trace annotations. Requests that don't
 match are passed through unchanged. This transform never rejects requests.
+
+> **Warning:** Header values are emitted in plain text in the audit log. Only
+> log headers that are safe to expose, such as request IDs or headers containing
+> proxy secret tokens. Do not log headers that contain raw secrets.
 
 ```yaml
 transforms:
@@ -293,10 +296,10 @@ transforms:
             - host: "api.openai.com"
               methods: ["POST"]
               paths: ["/v1/*"]
-          headers: ["x-request-id", "authorization"]
+          headers: ["x-request-id"]
         - rules:
             - host: "*.anthropic.com"
-          headers: ["x-api-key"]
+          headers: ["x-request-id"]
 ```
 
 ### Secrets

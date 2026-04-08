@@ -106,16 +106,16 @@ func TestAnnotate_HeaderNormalization(t *testing.T) {
 func TestAnnotate_WildcardHost(t *testing.T) {
 	a := makeAnnotate(t, []annotationGroup{{
 		Rules:   []hostmatch.RuleConfig{{Host: "*.anthropic.com"}},
-		Headers: []string{"x-api-key"},
+		Headers: []string{"x-request-id"},
 	}})
 
 	ann, _ := annotate(t, a, "GET", "api.anthropic.com", "/", map[string]string{
-		"X-Api-Key": "key-123",
+		"X-Request-Id": "req-123",
 	})
-	require.Equal(t, "key-123", ann["header:X-Api-Key"])
+	require.Equal(t, "req-123", ann["header:X-Request-Id"])
 
 	ann2, _ := annotate(t, a, "GET", "other.com", "/", map[string]string{
-		"X-Api-Key": "key-123",
+		"X-Request-Id": "req-123",
 	})
 	require.Nil(t, ann2)
 }
