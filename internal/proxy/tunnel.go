@@ -79,7 +79,7 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
 	}
 
 	if req.Method != http.MethodConnect {
-		fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+		_, _ = fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\n\r\n")
 		return
 	}
 
@@ -91,12 +91,12 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
 	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host) {
-		fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
+		_, _ = fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		return
 	}
 
 	// Send 200 to signal tunnel established
-	fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 
 	p.serveTunnel(conn, host)
 }
@@ -136,11 +136,11 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	}
 	if !hasNoAuth {
 		// Reply with 0xFF = no acceptable methods
-		conn.Write([]byte{0x05, 0xFF})
+		_, _ = conn.Write([]byte{0x05, 0xFF})
 		return
 	}
 	// Reply: use no-auth
-	conn.Write([]byte{0x05, 0x00})
+	_, _ = conn.Write([]byte{0x05, 0x00})
 
 	// --- Connect request ---
 	// +----+-----+-------+------+----------+----------+
@@ -209,7 +209,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	// |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 	// +----+-----+-------+------+----------+----------+
 	reply := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	conn.Write(reply)
+	_, _ = conn.Write(reply)
 
 	p.serveTunnel(conn, target)
 }
@@ -217,7 +217,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 // socks5Reply sends a SOCKS5 reply with the given status code.
 func (p *Proxy) socks5Reply(conn net.Conn, status byte) {
 	reply := []byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	conn.Write(reply)
+	_, _ = conn.Write(reply)
 }
 
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
@@ -325,7 +325,7 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) {
 	tlsConn := tls.Server(clientConn, &tls.Config{
 		GetCertificate: p.getCertificate,
 	})
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
 		p.logger.Debug("tunnel MITM TLS handshake failed",
@@ -339,7 +339,7 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) {
 	srv := &http.Server{
 		Handler: http.HandlerFunc(p.handleHTTP),
 	}
-	srv.Serve(ln)
+	_ = srv.Serve(ln)
 }
 
 // serveTunnelHTTP serves plain HTTP requests through the normal handleHTTP handler.
@@ -350,7 +350,7 @@ func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string) {
 	srv := &http.Server{
 		Handler: http.HandlerFunc(p.handleHTTP),
 	}
-	srv.Serve(ln)
+	_ = srv.Serve(ln)
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.

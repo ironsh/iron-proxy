@@ -165,7 +165,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream", "true")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "connect integration response")
+		_, _ = fmt.Fprint(w, "connect integration response")
 	}))
 	defer upstream.Close()
 	upstreamAddr := upstream.Listener.Addr().String()
@@ -238,7 +238,8 @@ func TestIntegration_CONNECT(t *testing.T) {
 		defer conn.Close()
 
 		// Send CONNECT
-		fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", allowedHost, allowedHost)
+		_, err = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", allowedHost, allowedHost)
+		require.NoError(t, err)
 
 		br := bufio.NewReader(conn)
 		resp, err := http.ReadResponse(br, nil)
@@ -250,7 +251,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 			RootCAs:    caPool,
 			ServerName: allowedHost,
 		})
-		defer tlsConn.Close()
+		defer func() { _ = tlsConn.Close() }()
 		require.NoError(t, tlsConn.Handshake())
 
 		// HTTP request over the TLS tunnel
@@ -275,7 +276,8 @@ func TestIntegration_CONNECT(t *testing.T) {
 		require.NoError(t, err)
 		defer conn.Close()
 
-		fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", deniedHost, deniedHost)
+		_, err = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", deniedHost, deniedHost)
+		require.NoError(t, err)
 
 		br := bufio.NewReader(conn)
 		resp, err := http.ReadResponse(br, nil)
@@ -288,7 +290,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 		// Start a plain HTTP upstream
 		plainUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, "plain http response")
+			_, _ = fmt.Fprint(w, "plain http response")
 		}))
 		defer plainUpstream.Close()
 		plainAddr := plainUpstream.Listener.Addr().String()
@@ -306,7 +308,8 @@ func TestIntegration_CONNECT(t *testing.T) {
 		require.NoError(t, err)
 		defer conn.Close()
 
-		fmt.Fprintf(conn, "CONNECT %s:80 HTTP/1.1\r\nHost: %s:80\r\n\r\n", allowedHost, allowedHost)
+		_, err = fmt.Fprintf(conn, "CONNECT %s:80 HTTP/1.1\r\nHost: %s:80\r\n\r\n", allowedHost, allowedHost)
+		require.NoError(t, err)
 
 		br := bufio.NewReader(conn)
 		resp, err := http.ReadResponse(br, nil)
@@ -314,7 +317,8 @@ func TestIntegration_CONNECT(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		// Send plain HTTP through the tunnel
-		fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", allowedHost)
+		_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", allowedHost)
+		require.NoError(t, err)
 
 		resp2, err := http.ReadResponse(br, nil)
 		require.NoError(t, err)
@@ -340,7 +344,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream", "true")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "socks5 integration response")
+		_, _ = fmt.Fprint(w, "socks5 integration response")
 	}))
 	defer upstream.Close()
 	upstreamAddr := upstream.Listener.Addr().String()
@@ -454,7 +458,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 			RootCAs:    caPool,
 			ServerName: allowedHost,
 		})
-		defer tlsConn.Close()
+		defer func() { _ = tlsConn.Close() }()
 		require.NoError(t, tlsConn.Handshake())
 
 		// HTTP request
@@ -488,7 +492,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 	t.Run("allowed_plain_http", func(t *testing.T) {
 		plainUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, "socks5 plain http")
+			_, _ = fmt.Fprint(w, "socks5 plain http")
 		}))
 		defer plainUpstream.Close()
 		plainAddr := plainUpstream.Listener.Addr().String()
@@ -510,7 +514,8 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.Equal(t, byte(0x00), status, "expected SOCKS5 success")
 
 		// Send plain HTTP
-		fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", allowedHost)
+		_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", allowedHost)
+		require.NoError(t, err)
 
 		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 		require.NoError(t, err)
@@ -538,7 +543,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.NoError(t, err)
 
 		// The proxy should close the connection without forwarding anything.
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
 		buf := make([]byte, 1)
 		_, err = conn.Read(buf)
 		require.ErrorIs(t, err, io.EOF, "expected proxy to close the connection")

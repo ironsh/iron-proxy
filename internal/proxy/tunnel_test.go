@@ -62,7 +62,7 @@ func TestTunnel_CONNECT_HTTP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Tunnel", "true")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "hello from tunnel")
+		_, _ = fmt.Fprint(w, "hello from tunnel")
 	}))
 	defer upstream.Close()
 
@@ -74,7 +74,8 @@ func TestTunnel_CONNECT_HTTP(t *testing.T) {
 	defer conn.Close()
 
 	target := upstream.Listener.Addr().String()
-	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	require.NoError(t, err)
 
 	// Read 200 Connection Established
 	br := bufio.NewReader(conn)
@@ -83,7 +84,8 @@ func TestTunnel_CONNECT_HTTP(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Now send an HTTP request through the tunnel (raw tunnel, not MITM)
-	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	require.NoError(t, err)
 
 	resp2, err := http.ReadResponse(br, nil)
 	require.NoError(t, err)
@@ -101,7 +103,7 @@ func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
 	// Start an upstream HTTPS server
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "hello from tls tunnel")
+		_, _ = fmt.Fprint(w, "hello from tls tunnel")
 	}))
 	defer upstream.Close()
 
@@ -125,7 +127,8 @@ func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", fakeHost, fakeHost)
+	_, err = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", fakeHost, fakeHost)
+	require.NoError(t, err)
 
 	// Read 200 Connection Established
 	br := bufio.NewReader(conn)
@@ -138,7 +141,7 @@ func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
 		RootCAs:    caPool,
 		ServerName: fakeHost,
 	})
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	err = tlsConn.Handshake()
 	require.NoError(t, err)
@@ -169,7 +172,8 @@ func TestTunnel_CONNECT_MethodNotAllowed(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	require.NoError(t, err)
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
@@ -181,7 +185,7 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Socks", "true")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "hello from socks5")
+		_, _ = fmt.Fprint(w, "hello from socks5")
 	}))
 	defer upstream.Close()
 
@@ -194,7 +198,8 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	upstreamHost, upstreamPortStr, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 
 	// SOCKS5 auth negotiation: version 5, 1 method (no auth)
-	conn.Write([]byte{0x05, 0x01, 0x00})
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	require.NoError(t, err)
 
 	// Read auth response
 	authResp := make([]byte, 2)
@@ -208,7 +213,8 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	require.NotNil(t, ip)
 
 	var port uint16
-	fmt.Sscanf(upstreamPortStr, "%d", &port)
+	_, err = fmt.Sscanf(upstreamPortStr, "%d", &port)
+	require.NoError(t, err)
 
 	connectReq := []byte{0x05, 0x01, 0x00, 0x01} // ver, cmd=connect, rsv, atyp=IPv4
 	connectReq = append(connectReq, ip...)
@@ -216,7 +222,8 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	binary.BigEndian.PutUint16(portBuf, port)
 	connectReq = append(connectReq, portBuf...)
 
-	conn.Write(connectReq)
+	_, err = conn.Write(connectReq)
+	require.NoError(t, err)
 
 	// Read connect response
 	connectResp := make([]byte, 10)
@@ -227,7 +234,8 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 
 	// Now send HTTP through the tunnel
 	target := upstream.Listener.Addr().String()
-	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	require.NoError(t, err)
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
@@ -245,7 +253,7 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 func TestTunnel_SOCKS5_DomainName(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "domain ok")
+		_, _ = fmt.Fprint(w, "domain ok")
 	}))
 	defer upstream.Close()
 
@@ -257,12 +265,15 @@ func TestTunnel_SOCKS5_DomainName(t *testing.T) {
 
 	_, upstreamPortStr, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 	var port uint16
-	fmt.Sscanf(upstreamPortStr, "%d", &port)
+	_, err = fmt.Sscanf(upstreamPortStr, "%d", &port)
+	require.NoError(t, err)
 
 	// Auth negotiation
-	conn.Write([]byte{0x05, 0x01, 0x00})
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	require.NoError(t, err)
 	authResp := make([]byte, 2)
-	io.ReadFull(conn, authResp)
+	_, err = io.ReadFull(conn, authResp)
+	require.NoError(t, err)
 
 	// Connect with domain name type (0x03) pointing to 127.0.0.1
 	domain := "127.0.0.1" // using IP as "domain" for test simplicity
@@ -272,7 +283,8 @@ func TestTunnel_SOCKS5_DomainName(t *testing.T) {
 	binary.BigEndian.PutUint16(portBuf, port)
 	connectReq = append(connectReq, portBuf...)
 
-	conn.Write(connectReq)
+	_, err = conn.Write(connectReq)
+	require.NoError(t, err)
 
 	connectResp := make([]byte, 10)
 	_, err = io.ReadFull(conn, connectResp)
@@ -281,7 +293,8 @@ func TestTunnel_SOCKS5_DomainName(t *testing.T) {
 
 	// Send HTTP request
 	target := upstream.Listener.Addr().String()
-	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	_, err = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	require.NoError(t, err)
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
@@ -299,7 +312,8 @@ func TestTunnel_SOCKS5_NoAuth_Required(t *testing.T) {
 	defer conn.Close()
 
 	// Offer only username/password auth (0x02), no no-auth
-	conn.Write([]byte{0x05, 0x01, 0x02})
+	_, err = conn.Write([]byte{0x05, 0x01, 0x02})
+	require.NoError(t, err)
 
 	resp := make([]byte, 2)
 	_, err = io.ReadFull(conn, resp)
@@ -319,7 +333,8 @@ func TestTunnel_TransformReject(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	fmt.Fprintf(conn, "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n")
+	_, err = fmt.Fprintf(conn, "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n")
+	require.NoError(t, err)
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
@@ -337,13 +352,16 @@ func TestTunnel_SOCKS5_TransformReject(t *testing.T) {
 	defer conn.Close()
 
 	// Auth
-	conn.Write([]byte{0x05, 0x01, 0x00})
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	require.NoError(t, err)
 	authResp := make([]byte, 2)
-	io.ReadFull(conn, authResp)
+	_, err = io.ReadFull(conn, authResp)
+	require.NoError(t, err)
 
 	// Connect to some target
 	connectReq := []byte{0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50} // 127.0.0.1:80
-	conn.Write(connectReq)
+	_, err = conn.Write(connectReq)
+	require.NoError(t, err)
 
 	connectResp := make([]byte, 10)
 	_, err = io.ReadFull(conn, connectResp)
