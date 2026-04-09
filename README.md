@@ -35,6 +35,8 @@ Single binary. Single YAML config.
 - **Streaming-aware.** WebSocket upgrades and Server-Sent Events are proxied
   natively. No special configuration for agent workloads that hold long-lived
   connections.
+- **CONNECT and SOCKS5 support.** Optional tunnel listener for tools that
+  natively support proxy configuration via `HTTPS_PROXY` or SOCKS5 settings.
 
 Built for CI pipelines, GitHub Actions, AI agents (Claude Code, Cursor,
 Codex), and any environment where you run code you don't fully trust.
@@ -216,6 +218,7 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
+  tunnel_listen: ":8080" # Optional CONNECT/SOCKS5 listener
   max_request_body_bytes: 1048576 # 1 MiB (default)
   max_response_body_bytes: 0 # uncapped (default)
 
@@ -339,6 +342,63 @@ control the maximum buffer sizes:
 Bodies are buffered incrementally as transforms read them, and automatically
 rewound between pipeline stages. If a transform doesn't read the body, no
 buffering occurs and the body streams through untouched.
+
+### Tunnel listener (CONNECT/SOCKS5)
+
+The tunnel listener accepts HTTP CONNECT and SOCKS5 connections on a
+dedicated port. This is useful for tools that natively support proxy
+configuration via `HTTPS_PROXY`/`ALL_PROXY` environment variables or
+SOCKS5 settings, rather than relying on DNS-based routing.
+
+To enable it, set `tunnel_listen` under `proxy`:
+
+```yaml
+proxy:
+  tunnel_listen: ":8080"
+```
+
+When omitted, the tunnel listener is disabled.
+
+Both protocols go through the same transform pipeline as regular HTTP/HTTPS
+requests. The proxy evaluates a synthetic CONNECT request against your
+allowlist and secrets transforms, so tunnel connections are subject to the
+same default-deny policy.
+
+After the CONNECT or SOCKS5 handshake, the proxy peeks at the first byte to
+detect the inner protocol:
+
+- **TLS (0x16):** performs MITM the same way as the HTTPS listener,
+  generating a leaf cert on the fly so transforms can inspect and rewrite
+  the request.
+- **Plain HTTP:** serves the request directly through the transform
+  pipeline.
+
+**HTTP CONNECT example:**
+
+```bash
+curl -x http://172.20.0.2:8080 \
+  --cacert /certs/ca.crt \
+  https://httpbin.org/get
+```
+
+**SOCKS5 example:**
+
+```bash
+curl --socks5-hostname 172.20.0.2:8080 \
+  --cacert /certs/ca.crt \
+  https://httpbin.org/get
+```
+
+You can also set the standard environment variables so all tools route
+through the tunnel automatically:
+
+```bash
+export HTTPS_PROXY=http://172.20.0.2:8080
+export ALL_PROXY=socks5h://172.20.0.2:8080
+```
+
+The SOCKS5 implementation supports no-auth only and accepts IPv4, IPv6,
+and domain name address types.
 
 ### TLS
 
