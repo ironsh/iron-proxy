@@ -79,7 +79,9 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
 	}
 
 	if req.Method != http.MethodConnect {
-		_, _ = fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+		if _, err := fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\n\r\n"); err != nil {
+			p.logger.Debug("tunnel write 405 error", slog.String("error", err.Error()))
+		}
 		return
 	}
 
@@ -91,12 +93,17 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
 	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host) {
-		_, _ = fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n")
+		if _, err := fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n"); err != nil {
+			p.logger.Debug("tunnel write 403 error", slog.String("error", err.Error()))
+		}
 		return
 	}
 
 	// Send 200 to signal tunnel established
-	_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	if _, err := fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		p.logger.Warn("tunnel write 200 error", slog.String("target", host), slog.String("error", err.Error()))
+		return
+	}
 
 	p.serveTunnel(conn, host)
 }
@@ -136,11 +143,16 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	}
 	if !hasNoAuth {
 		// Reply with 0xFF = no acceptable methods
-		_, _ = conn.Write([]byte{0x05, 0xFF})
+		if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
+			p.logger.Debug("socks5 write no-acceptable-methods error", slog.String("error", err.Error()))
+		}
 		return
 	}
 	// Reply: use no-auth
-	_, _ = conn.Write([]byte{0x05, 0x00})
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		p.logger.Debug("socks5 write auth reply error", slog.String("error", err.Error()))
+		return
+	}
 
 	// --- Connect request ---
 	// +----+-----+-------+------+----------+----------+
@@ -209,7 +221,10 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	// |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 	// +----+-----+-------+------+----------+----------+
 	reply := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	_, _ = conn.Write(reply)
+	if _, err := conn.Write(reply); err != nil {
+		p.logger.Warn("socks5 write success reply error", slog.String("target", target), slog.String("error", err.Error()))
+		return
+	}
 
 	p.serveTunnel(conn, target)
 }
@@ -217,7 +232,9 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 // socks5Reply sends a SOCKS5 reply with the given status code.
 func (p *Proxy) socks5Reply(conn net.Conn, status byte) {
 	reply := []byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	_, _ = conn.Write(reply)
+	if _, err := conn.Write(reply); err != nil {
+		p.logger.Debug("socks5 write reply error", slog.Int("status", int(status)), slog.String("error", err.Error()))
+	}
 }
 
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
