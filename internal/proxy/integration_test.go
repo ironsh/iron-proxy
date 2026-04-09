@@ -3,16 +3,11 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +21,61 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
+
+// integrationCA bundles the test CA certificate, cert cache, and trust pool.
+type integrationCA struct {
+	certCache *certcache.Cache
+	caPool    *x509.CertPool
+}
+
+// newIntegrationCA generates a test CA and returns the cert cache and CA pool.
+func newIntegrationCA(t *testing.T) integrationCA {
+	t.Helper()
+
+	caCert, caKey := generateTestCA(t)
+	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
+	require.NoError(t, err)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+
+	return integrationCA{certCache: cache, caPool: pool}
+}
+
+// startTunnelIntegrationProxy creates a proxy with an allowlist and tunnel
+// listener, returning the proxy, tunnel address, and CA pool.
+func startTunnelIntegrationProxy(t *testing.T, allowedHosts []string, logger *slog.Logger) (*Proxy, string, *x509.CertPool) {
+	t.Helper()
+
+	ca := newIntegrationCA(t)
+
+	al, err := allowlist.New(allowedHosts, nil, &staticResolver{})
+	require.NoError(t, err)
+	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
+
+	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", ca.certCache, pipeline, nil, logger)
+
+	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tunnelAddr := tunnelLn.Addr().String()
+	p.tunnelListener = tunnelLn
+
+	go func() {
+		for {
+			conn, err := tunnelLn.Accept()
+			if err != nil {
+				return
+			}
+			go p.handleTunnel(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		tunnelLn.Close()
+		close(p.tunnelDone)
+	})
+
+	return p, tunnelAddr, ca.caPool
+}
 
 // TestIntegration_DNSToProxyToUpstream is an end-to-end test that exercises:
 // DNS interception -> TLS MITM -> allowlist transform -> upstream -> response.
@@ -50,25 +100,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	const fakeHost = "test-upstream.example.com"
 
 	// 2. Generate CA and cert cache
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Integration Test CA"},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caCertDER)
-	require.NoError(t, err)
-
-	certCache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
-	require.NoError(t, err)
+	ca := newIntegrationCA(t)
 
 	// 3. Build transform pipeline with allowlist
 	al, err := allowlist.New(
@@ -81,7 +113,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
 	// 4. Start proxy with HTTPS
-	p := New("127.0.0.1:0", "127.0.0.1:0", "", certCache, pipeline, nil, logger)
+	p := New("127.0.0.1:0", "127.0.0.1:0", "", ca.certCache, pipeline, nil, logger)
 
 	// Start HTTP listener
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -113,13 +145,10 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	}
 
 	// 7. Test: allowed request through HTTPS proxy
-	caPool := x509.NewCertPool()
-	caPool.AddCert(caCert)
-
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs:    caPool,
+				RootCAs:    ca.caPool,
 				ServerName: fakeHost,
 			},
 		},
@@ -173,52 +202,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 	const allowedHost = "allowed.example.com"
 	const deniedHost = "denied.example.com"
 
-	// 2. Generate CA
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(2),
-		Subject:               pkix.Name{CommonName: "CONNECT Integration Test CA"},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caCertDER)
-	require.NoError(t, err)
-
-	certCache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
-	require.NoError(t, err)
-
-	// 3. Build allowlist pipeline
-	al, err := allowlist.New([]string{allowedHost}, nil, &staticResolver{})
-	require.NoError(t, err)
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
-
-	// 4. Start proxy with tunnel listener
-	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", certCache, pipeline, nil, logger)
-
-	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	tunnelAddr := tunnelLn.Addr().String()
-	p.tunnelListener = tunnelLn
-
-	go func() {
-		for {
-			conn, err := tunnelLn.Accept()
-			if err != nil {
-				return
-			}
-			go p.handleTunnel(conn)
-		}
-	}()
-	t.Cleanup(func() {
-		tunnelLn.Close()
-		close(p.tunnelDone)
-	})
+	p, tunnelAddr, caPool := startTunnelIntegrationProxy(t, []string{allowedHost}, logger)
 
 	// Override transport to route all dials to the real upstream
 	p.transport = &http.Transport{
@@ -228,10 +212,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 		},
 	}
 
-	caPool := x509.NewCertPool()
-	caPool.AddCert(caCert)
-
-	// 5. Test: allowed CONNECT -> TLS MITM -> success
+	// 2. Test: allowed CONNECT -> TLS MITM -> success
 	t.Run("allowed", func(t *testing.T) {
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 		require.NoError(t, err)
@@ -270,7 +251,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 		require.Equal(t, "connect integration response", string(body))
 	})
 
-	// 6. Test: denied CONNECT -> 403
+	// 3. Test: denied CONNECT -> 403
 	t.Run("denied", func(t *testing.T) {
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 		require.NoError(t, err)
@@ -285,7 +266,7 @@ func TestIntegration_CONNECT(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
-	// 7. Test: allowed CONNECT -> plain HTTP (non-TLS)
+	// 4. Test: allowed CONNECT -> plain HTTP (non-TLS)
 	t.Run("allowed_plain_http", func(t *testing.T) {
 		// Start a plain HTTP upstream
 		plainUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,52 +333,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 	const allowedHost = "allowed.example.com"
 	const deniedHost = "denied.example.com"
 
-	// 2. Generate CA
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(3),
-		Subject:               pkix.Name{CommonName: "SOCKS5 Integration Test CA"},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caCertDER)
-	require.NoError(t, err)
-
-	certCache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
-	require.NoError(t, err)
-
-	// 3. Build allowlist pipeline
-	al, err := allowlist.New([]string{allowedHost}, nil, &staticResolver{})
-	require.NoError(t, err)
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
-
-	// 4. Start proxy with tunnel listener
-	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", certCache, pipeline, nil, logger)
-
-	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	tunnelAddr := tunnelLn.Addr().String()
-	p.tunnelListener = tunnelLn
-
-	go func() {
-		for {
-			conn, err := tunnelLn.Accept()
-			if err != nil {
-				return
-			}
-			go p.handleTunnel(conn)
-		}
-	}()
-	t.Cleanup(func() {
-		tunnelLn.Close()
-		close(p.tunnelDone)
-	})
+	p, tunnelAddr, caPool := startTunnelIntegrationProxy(t, []string{allowedHost}, logger)
 
 	// Override transport to route all dials to the real upstream
 	p.transport = &http.Transport{
@@ -406,9 +342,6 @@ func TestIntegration_SOCKS5(t *testing.T) {
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
 		},
 	}
-
-	caPool := x509.NewCertPool()
-	caPool.AddCert(caCert)
 
 	// Helper: perform SOCKS5 handshake with domain-name address type
 	socks5Connect := func(t *testing.T, conn net.Conn, host string, port uint16) {
@@ -443,7 +376,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		return reply[1] // status
 	}
 
-	// 5. Test: allowed SOCKS5 -> TLS MITM -> success
+	// 2. Test: allowed SOCKS5 -> TLS MITM -> success
 	t.Run("allowed_tls", func(t *testing.T) {
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 		require.NoError(t, err)
@@ -477,7 +410,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.Equal(t, "socks5 integration response", string(body))
 	})
 
-	// 6. Test: denied SOCKS5 -> connection not allowed
+	// 3. Test: denied SOCKS5 -> connection not allowed
 	t.Run("denied", func(t *testing.T) {
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 		require.NoError(t, err)
@@ -488,7 +421,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.Equal(t, byte(0x02), status, "expected SOCKS5 connection not allowed")
 	})
 
-	// 7. Test: allowed SOCKS5 -> plain HTTP
+	// 4. Test: allowed SOCKS5 -> plain HTTP
 	t.Run("allowed_plain_http", func(t *testing.T) {
 		plainUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -527,7 +460,7 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.Equal(t, "socks5 plain http", string(body))
 	})
 
-	// 8. Test: non-HTTP/TLS protocol -> proxy closes the connection
+	// 5. Test: non-HTTP/TLS protocol -> proxy closes the connection
 	t.Run("unsupported_protocol", func(t *testing.T) {
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 		require.NoError(t, err)
