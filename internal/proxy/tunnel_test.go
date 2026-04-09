@@ -1,0 +1,365 @@
+package proxy
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/transform"
+)
+
+func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy, string, *x509.CertPool) {
+	t.Helper()
+
+	caCert, caKey := generateTestCA(t)
+	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
+	require.NoError(t, err)
+
+	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
+	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", cache, pipeline, nil, testLogger())
+
+	// Start tunnel listener
+	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tunnelAddr := tunnelLn.Addr().String()
+	p.tunnelListener = tunnelLn
+
+	go func() {
+		for {
+			conn, err := tunnelLn.Accept()
+			if err != nil {
+				return
+			}
+			go p.handleTunnel(conn)
+		}
+	}()
+
+	t.Cleanup(func() {
+		tunnelLn.Close()
+		close(p.tunnelDone)
+	})
+
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+
+	return p, tunnelAddr, pool
+}
+
+func TestTunnel_CONNECT_HTTP(t *testing.T) {
+	// Start an upstream HTTP server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Tunnel", "true")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "hello from tunnel")
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	// Send CONNECT request
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	target := upstream.Listener.Addr().String()
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+
+	// Read 200 Connection Established
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Now send an HTTP request through the tunnel (raw tunnel, not MITM)
+	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+
+	resp2, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+	require.Equal(t, "true", resp2.Header.Get("X-Tunnel"))
+
+	body, err := io.ReadAll(resp2.Body)
+	require.NoError(t, err)
+	require.Equal(t, "hello from tunnel", string(body))
+}
+
+func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
+	// Start an upstream HTTPS server
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "hello from tls tunnel")
+	}))
+	defer upstream.Close()
+
+	p, tunnelAddr, caPool := startTunnelProxy(t, nil)
+
+	// Override transport to route to the upstream
+	upstreamAddr := upstream.Listener.Addr().String()
+	p.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
+		},
+	}
+
+	const fakeHost = "mitm.example.com"
+
+	// Send CONNECT to port 443 (triggers MITM)
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", fakeHost, fakeHost)
+
+	// Read 200 Connection Established
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Now do TLS handshake on the tunneled connection
+	tlsConn := tls.Client(conn, &tls.Config{
+		RootCAs:    caPool,
+		ServerName: fakeHost,
+	})
+	defer tlsConn.Close()
+
+	err = tlsConn.Handshake()
+	require.NoError(t, err)
+
+	// Send HTTP request through the TLS tunnel
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/test", fakeHost), nil)
+	require.NoError(t, err)
+
+	err = req.Write(tlsConn)
+	require.NoError(t, err)
+
+	tlsBr := bufio.NewReader(tlsConn)
+	resp2, err := http.ReadResponse(tlsBr, req)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	body, err := io.ReadAll(resp2.Body)
+	require.NoError(t, err)
+	require.Equal(t, "hello from tls tunnel", string(body))
+}
+
+func TestTunnel_CONNECT_MethodNotAllowed(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+func TestTunnel_SOCKS5_HTTP(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Socks", "true")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "hello from socks5")
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	upstreamHost, upstreamPortStr, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+
+	// SOCKS5 auth negotiation: version 5, 1 method (no auth)
+	conn.Write([]byte{0x05, 0x01, 0x00})
+
+	// Read auth response
+	authResp := make([]byte, 2)
+	_, err = io.ReadFull(conn, authResp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x05), authResp[0])
+	require.Equal(t, byte(0x00), authResp[1])
+
+	// SOCKS5 connect request: IPv4
+	ip := net.ParseIP(upstreamHost).To4()
+	require.NotNil(t, ip)
+
+	var port uint16
+	fmt.Sscanf(upstreamPortStr, "%d", &port)
+
+	connectReq := []byte{0x05, 0x01, 0x00, 0x01} // ver, cmd=connect, rsv, atyp=IPv4
+	connectReq = append(connectReq, ip...)
+	portBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBuf, port)
+	connectReq = append(connectReq, portBuf...)
+
+	conn.Write(connectReq)
+
+	// Read connect response
+	connectResp := make([]byte, 10)
+	_, err = io.ReadFull(conn, connectResp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x05), connectResp[0]) // version
+	require.Equal(t, byte(0x00), connectResp[1]) // success
+
+	// Now send HTTP through the tunnel
+	target := upstream.Listener.Addr().String()
+	fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "true", resp.Header.Get("X-Socks"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "hello from socks5", string(body))
+}
+
+func TestTunnel_SOCKS5_DomainName(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "domain ok")
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, upstreamPortStr, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	var port uint16
+	fmt.Sscanf(upstreamPortStr, "%d", &port)
+
+	// Auth negotiation
+	conn.Write([]byte{0x05, 0x01, 0x00})
+	authResp := make([]byte, 2)
+	io.ReadFull(conn, authResp)
+
+	// Connect with domain name type (0x03) pointing to 127.0.0.1
+	domain := "127.0.0.1" // using IP as "domain" for test simplicity
+	connectReq := []byte{0x05, 0x01, 0x00, 0x03, byte(len(domain))}
+	connectReq = append(connectReq, []byte(domain)...)
+	portBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBuf, port)
+	connectReq = append(connectReq, portBuf...)
+
+	conn.Write(connectReq)
+
+	connectResp := make([]byte, 10)
+	_, err = io.ReadFull(conn, connectResp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x00), connectResp[1]) // success
+
+	// Send HTTP request
+	target := upstream.Listener.Addr().String()
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestTunnel_SOCKS5_NoAuth_Required(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Offer only username/password auth (0x02), no no-auth
+	conn.Write([]byte{0x05, 0x01, 0x02})
+
+	resp := make([]byte, 2)
+	_, err = io.ReadFull(conn, resp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x05), resp[0])
+	require.Equal(t, byte(0xFF), resp[1]) // no acceptable methods
+}
+
+func TestTunnel_TransformReject(t *testing.T) {
+	// Use a transform that rejects everything
+	rejecter := &rejectTransform{}
+
+	_, tunnelAddr, _ := startTunnelProxy(t, []transform.Transformer{rejecter})
+
+	// Test CONNECT rejection
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n")
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestTunnel_SOCKS5_TransformReject(t *testing.T) {
+	rejecter := &rejectTransform{}
+
+	_, tunnelAddr, _ := startTunnelProxy(t, []transform.Transformer{rejecter})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Auth
+	conn.Write([]byte{0x05, 0x01, 0x00})
+	authResp := make([]byte, 2)
+	io.ReadFull(conn, authResp)
+
+	// Connect to some target
+	connectReq := []byte{0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50} // 127.0.0.1:80
+	conn.Write(connectReq)
+
+	connectResp := make([]byte, 10)
+	_, err = io.ReadFull(conn, connectResp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x02), connectResp[1]) // connection not allowed
+}
+
+// rejectTransform rejects all requests.
+type rejectTransform struct{}
+
+func (r *rejectTransform) Name() string { return "rejecter" }
+
+func (r *rejectTransform) TransformRequest(_ context.Context, _ *transform.TransformContext, _ *http.Request) (*transform.TransformResult, error) {
+	return &transform.TransformResult{Action: transform.ActionReject}, nil
+}
+
+func (r *rejectTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}

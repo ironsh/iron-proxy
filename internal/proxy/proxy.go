@@ -20,23 +20,28 @@ import (
 
 // Proxy is the HTTP/HTTPS MITM proxy server.
 type Proxy struct {
-	httpServer  *http.Server
-	httpsServer *http.Server
-	tlsListener net.Listener
-	certCache   *certcache.Cache
-	pipeline    *transform.Pipeline
-	transport   *http.Transport
-	logger      *slog.Logger
+	httpServer      *http.Server
+	httpsServer     *http.Server
+	tlsListener     net.Listener
+	tunnelAddr      string
+	tunnelListener  net.Listener
+	tunnelDone      chan struct{}
+	certCache       *certcache.Cache
+	pipeline        *transform.Pipeline
+	transport       *http.Transport
+	logger          *slog.Logger
 }
 
 // New creates a new Proxy. If resolver is non-nil, it is used to resolve
 // upstream hostnames instead of the OS default resolver.
-func New(httpAddr, httpsAddr string, certCache *certcache.Cache, pipeline *transform.Pipeline, resolver *net.Resolver, logger *slog.Logger) *Proxy {
+func New(httpAddr, httpsAddr, tunnelAddr string, certCache *certcache.Cache, pipeline *transform.Pipeline, resolver *net.Resolver, logger *slog.Logger) *Proxy {
 	p := &Proxy{
-		certCache: certCache,
-		pipeline:  pipeline,
-		transport: buildTransport(resolver),
-		logger:    logger,
+		tunnelAddr: tunnelAddr,
+		tunnelDone: make(chan struct{}),
+		certCache:  certCache,
+		pipeline:   pipeline,
+		transport:  buildTransport(resolver),
+		logger:     logger,
 	}
 
 	p.httpServer = &http.Server{
@@ -55,10 +60,14 @@ func New(httpAddr, httpsAddr string, certCache *certcache.Cache, pipeline *trans
 	return p
 }
 
-// ListenAndServe starts both HTTP and HTTPS listeners. It blocks until
-// both servers have stopped.
+// ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners.
+// It blocks until any server has stopped.
 func (p *Proxy) ListenAndServe() error {
-	errc := make(chan error, 2)
+	n := 2
+	if p.tunnelAddr != "" {
+		n = 3
+	}
+	errc := make(chan error, n)
 
 	go func() {
 		p.logger.Info("http proxy starting", slog.String("addr", p.httpServer.Addr))
@@ -77,13 +86,26 @@ func (p *Proxy) ListenAndServe() error {
 		errc <- fmt.Errorf("https: %w", p.httpsServer.Serve(tlsLn))
 	}()
 
+	if p.tunnelAddr != "" {
+		go func() {
+			errc <- fmt.Errorf("tunnel: %w", p.listenTunnel())
+		}()
+	}
+
 	return <-errc
 }
 
-// Shutdown gracefully stops both servers.
+// Shutdown gracefully stops all servers.
 func (p *Proxy) Shutdown(ctx context.Context) error {
 	errHTTP := p.httpServer.Shutdown(ctx)
 	errHTTPS := p.httpsServer.Shutdown(ctx)
+
+	// Signal tunnel accept loop to stop, then close the listener.
+	close(p.tunnelDone)
+	if p.tunnelListener != nil {
+		p.tunnelListener.Close()
+	}
+
 	if errHTTP != nil {
 		return errHTTP
 	}

@@ -127,7 +127,7 @@ func main() {
 	}
 
 	// Initialize proxy
-	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, certCache, pipeline, resolver, logger)
+	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, pipeline, resolver, logger)
 
 	// Initialize metrics server
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
@@ -139,12 +139,16 @@ func main() {
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
 
-	logger.Info("iron-proxy starting",
+	startAttrs := []any{
 		slog.String("dns_listen", cfg.DNS.Listen),
 		slog.String("http_listen", cfg.Proxy.HTTPListen),
 		slog.String("https_listen", cfg.Proxy.HTTPSListen),
 		slog.String("metrics_listen", cfg.Metrics.Listen),
-	)
+	}
+	if cfg.Proxy.TunnelListen != "" {
+		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
+	}
+	logger.Info("iron-proxy starting", startAttrs...)
 	if !pipeline.Empty() {
 		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
 	}

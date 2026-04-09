@@ -39,6 +39,7 @@ type DNSRecord struct {
 type Proxy struct {
 	HTTPListen           string `yaml:"http_listen"`
 	HTTPSListen          string `yaml:"https_listen"`
+	TunnelListen         string `yaml:"tunnel_listen"`
 	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
 	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
 }
