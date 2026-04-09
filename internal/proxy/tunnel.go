@@ -43,6 +43,7 @@ func (p *Proxy) listenTunnel() error {
 }
 
 // handleTunnel peeks at the first byte to dispatch to CONNECT or SOCKS5.
+// This is the single logging point for tunnel connection errors.
 func (p *Proxy) handleTunnel(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -60,29 +61,32 @@ func (p *Proxy) handleTunnel(conn net.Conn) {
 
 	// SOCKS5 starts with version byte 0x05
 	if first[0] == 0x05 {
-		p.handleSOCKS5(conn, br)
+		if err := p.handleSOCKS5(conn, br); err != nil {
+			p.logger.Debug("tunnel socks5 error", slog.String("error", err.Error()))
+		}
 		return
 	}
 
 	// Otherwise assume HTTP CONNECT
-	p.handleCONNECT(conn, br)
+	if err := p.handleCONNECT(conn, br); err != nil {
+		p.logger.Debug("tunnel connect error", slog.String("error", err.Error()))
+	}
 }
 
 // handleCONNECT handles HTTP CONNECT tunnel requests.
-func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
+func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 	defer conn.Close()
 
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		p.logger.Debug("tunnel CONNECT read error", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("read request: %w", err)
 	}
 
 	if req.Method != http.MethodConnect {
 		if _, err := fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\n\r\n"); err != nil {
-			p.logger.Debug("tunnel write 405 error", slog.String("error", err.Error()))
+			return fmt.Errorf("write 405: %w", err)
 		}
-		return
+		return nil
 	}
 
 	host := req.Host
@@ -94,43 +98,39 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) {
 
 	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host) {
 		if _, err := fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n"); err != nil {
-			p.logger.Debug("tunnel write 403 error", slog.String("error", err.Error()))
+			return fmt.Errorf("write 403: %w", err)
 		}
-		return
+		return nil
 	}
 
 	// Send 200 to signal tunnel established
 	if _, err := fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		p.logger.Warn("tunnel write 200 error", slog.String("target", host), slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("write 200: %w", err)
 	}
 
-	p.serveTunnel(conn, host)
+	return p.serveTunnel(conn, host)
 }
 
 // handleSOCKS5 handles SOCKS5 tunnel requests.
-func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
+func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 	defer conn.Close()
 
 	// --- Auth negotiation ---
-	// +----+----------+----------+
-	// |VER | NMETHODS | METHODS  |
-	// +----+----------+----------+
-	// | 1  |    1     | 1 to 255 |
-	// +----+----------+----------+
 	ver, err := br.ReadByte()
-	if err != nil || ver != 0x05 {
-		p.logger.Debug("socks5 bad version", slog.Any("ver", ver))
-		return
+	if err != nil {
+		return fmt.Errorf("read version: %w", err)
+	}
+	if ver != 0x05 {
+		return fmt.Errorf("unsupported socks version: %d", ver)
 	}
 
 	nmethods, err := br.ReadByte()
 	if err != nil {
-		return
+		return fmt.Errorf("read nmethods: %w", err)
 	}
 	methods := make([]byte, nmethods)
 	if _, err := io.ReadFull(br, methods); err != nil {
-		return
+		return fmt.Errorf("read methods: %w", err)
 	}
 
 	// We only support no-auth (0x00)
@@ -142,34 +142,29 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 		}
 	}
 	if !hasNoAuth {
-		// Reply with 0xFF = no acceptable methods
-		if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
-			p.logger.Debug("socks5 write no-acceptable-methods error", slog.String("error", err.Error()))
+		if err := p.socks5Reply(conn, 0xFF); err != nil {
+			return fmt.Errorf("write no-acceptable-methods: %w", err)
 		}
-		return
+		return nil
 	}
 	// Reply: use no-auth
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		p.logger.Debug("socks5 write auth reply error", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("write auth reply: %w", err)
 	}
 
 	// --- Connect request ---
-	// +----+-----+-------+------+----------+----------+
-	// |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-	// +----+-----+-------+------+----------+----------+
-	// | 1  |  1  | X'00' |  1   | Variable |    2     |
-	// +----+-----+-------+------+----------+----------+
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(br, header); err != nil {
-		return
+		return fmt.Errorf("read connect header: %w", err)
 	}
 	if header[0] != 0x05 {
-		return
+		return fmt.Errorf("unexpected socks version in connect: %d", header[0])
 	}
 	if header[1] != 0x01 { // only CONNECT supported
-		p.socks5Reply(conn, 0x07) // command not supported
-		return
+		if err := p.socks5Reply(conn, 0x07); err != nil {
+			return fmt.Errorf("write command-not-supported: %w", err)
+		}
+		return nil
 	}
 
 	var targetHost string
@@ -178,33 +173,35 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	case 0x01: // IPv4
 		addr := make([]byte, 4)
 		if _, err := io.ReadFull(br, addr); err != nil {
-			return
+			return fmt.Errorf("read ipv4 addr: %w", err)
 		}
 		targetHost = net.IP(addr).String()
 	case 0x03: // Domain name
 		domainLen, err := br.ReadByte()
 		if err != nil {
-			return
+			return fmt.Errorf("read domain length: %w", err)
 		}
 		domain := make([]byte, domainLen)
 		if _, err := io.ReadFull(br, domain); err != nil {
-			return
+			return fmt.Errorf("read domain: %w", err)
 		}
 		targetHost = string(domain)
 	case 0x04: // IPv6
 		addr := make([]byte, 16)
 		if _, err := io.ReadFull(br, addr); err != nil {
-			return
+			return fmt.Errorf("read ipv6 addr: %w", err)
 		}
 		targetHost = net.IP(addr).String()
 	default:
-		p.socks5Reply(conn, 0x08) // address type not supported
-		return
+		if err := p.socks5Reply(conn, 0x08); err != nil {
+			return fmt.Errorf("write address-type-not-supported: %w", err)
+		}
+		return nil
 	}
 
 	portBuf := make([]byte, 2)
 	if _, err := io.ReadFull(br, portBuf); err != nil {
-		return
+		return fmt.Errorf("read port: %w", err)
 	}
 	port := binary.BigEndian.Uint16(portBuf)
 	target := net.JoinHostPort(targetHost, strconv.Itoa(int(port)))
@@ -212,29 +209,26 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
 	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), target) {
-		p.socks5Reply(conn, 0x02) // connection not allowed by ruleset
-		return
+		if err := p.socks5Reply(conn, 0x02); err != nil {
+			return fmt.Errorf("write connection-not-allowed: %w", err)
+		}
+		return nil
 	}
 
 	// Success reply
-	// +----+-----+-------+------+----------+----------+
-	// |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
-	// +----+-----+-------+------+----------+----------+
 	reply := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
 	if _, err := conn.Write(reply); err != nil {
-		p.logger.Warn("socks5 write success reply error", slog.String("target", target), slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("write success reply: %w", err)
 	}
 
-	p.serveTunnel(conn, target)
+	return p.serveTunnel(conn, target)
 }
 
 // socks5Reply sends a SOCKS5 reply with the given status code.
-func (p *Proxy) socks5Reply(conn net.Conn, status byte) {
+func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 	reply := []byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	if _, err := conn.Write(reply); err != nil {
-		p.logger.Debug("socks5 write reply error", slog.Int("status", int(status)), slog.String("error", err.Error()))
-	}
+	_, err := conn.Write(reply)
+	return err
 }
 
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
@@ -304,15 +298,11 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 // serveTunnel peeks at the client's first byte after the CONNECT/SOCKS5
 // handshake to detect TLS (0x16) vs plain HTTP. TLS connections get MITM'd;
 // plain HTTP is served directly through handleHTTP. Anything else is rejected.
-func (p *Proxy) serveTunnel(clientConn net.Conn, target string) {
+func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 	br := bufio.NewReader(clientConn)
 	first, err := br.Peek(1)
 	if err != nil {
-		p.logger.Debug("tunnel client peek error",
-			slog.String("target", target),
-			slog.String("error", err.Error()),
-		)
-		return
+		return fmt.Errorf("peek client protocol: %w", err)
 	}
 
 	// Wrap the conn so the peeked byte is not lost.
@@ -320,54 +310,45 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) {
 
 	if first[0] == 0x16 {
 		// TLS ClientHello: MITM
-		p.serveTunnelTLS(peekedConn, target)
-		return
+		return p.serveTunnelTLS(peekedConn, target)
 	}
 
 	if isHTTPMethodByte(first[0]) {
 		// Plain HTTP request
-		p.serveTunnelHTTP(peekedConn, target)
-		return
+		return p.serveTunnelHTTP(peekedConn, target)
 	}
 
-	p.logger.Warn("tunnel unsupported protocol",
-		slog.String("target", target),
-		slog.Int("first_byte", int(first[0])),
-	)
+	return fmt.Errorf("unsupported protocol (first byte 0x%02x) for target %s", first[0], target)
 }
 
 // serveTunnelTLS performs TLS MITM on the client connection, then serves
 // HTTP requests through the normal handleHTTP handler.
-func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) {
+func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
 	tlsConn := tls.Server(clientConn, &tls.Config{
 		GetCertificate: p.getCertificate,
 	})
 	defer func() { _ = tlsConn.Close() }()
 
 	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-		p.logger.Debug("tunnel MITM TLS handshake failed",
-			slog.String("target", target),
-			slog.String("error", err.Error()),
-		)
-		return
+		return fmt.Errorf("TLS handshake for %s: %w", target, err)
 	}
 
 	ln := newOneConnListener(tlsConn)
 	srv := &http.Server{
 		Handler: http.HandlerFunc(p.handleHTTP),
 	}
-	_ = srv.Serve(ln)
+	return srv.Serve(ln)
 }
 
 // serveTunnelHTTP serves plain HTTP requests through the normal handleHTTP handler.
-func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string) {
+func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string) error {
 	defer clientConn.Close()
 
 	ln := newOneConnListener(clientConn)
 	srv := &http.Server{
 		Handler: http.HandlerFunc(p.handleHTTP),
 	}
-	_ = srv.Serve(ln)
+	return srv.Serve(ln)
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.
@@ -430,4 +411,3 @@ func newPeekedConn(conn net.Conn, r *bufio.Reader) *peekedConn {
 func (c *peekedConn) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
-
