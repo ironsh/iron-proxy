@@ -32,14 +32,15 @@ func (t *hmacTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	dot := []byte(".")
 
+	// hash.Hash.Write never returns an error.
 	mac := hmac.New(sha256.New, t.cred.Secret)
-	mac.Write([]byte(timestamp))
-	mac.Write(dot)
-	mac.Write([]byte(req.Method))
-	mac.Write(dot)
-	mac.Write([]byte(req.URL.Path))
-	mac.Write(dot)
-	mac.Write(body)
+	_, _ = mac.Write([]byte(timestamp))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write([]byte(req.Method))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write([]byte(req.URL.Path))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write(body)
 	signature := hex.EncodeToString(mac.Sum(nil))
 
 	req.Header.Set("X-Iron-Proxy-Id", t.cred.ProxyID)
@@ -53,13 +54,14 @@ func (t *hmacTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // Exported for testing.
 func ComputeSignature(secret []byte, timestamp, method, path string, body []byte) string {
 	dot := []byte(".")
+	// hash.Hash.Write never returns an error.
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(timestamp))
-	mac.Write(dot)
-	mac.Write([]byte(method))
-	mac.Write(dot)
-	mac.Write([]byte(path))
-	mac.Write(dot)
-	mac.Write(body)
+	_, _ = mac.Write([]byte(timestamp))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write([]byte(method))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write([]byte(path))
+	_, _ = mac.Write(dot)
+	_, _ = mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
 }
