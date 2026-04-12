@@ -19,7 +19,7 @@ func TestPollerInitialSync(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		syncCalls.Add(1)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{
+		_ = json.NewEncoder(w).Encode(SyncResponse{
 			ConfigHash: "sha256:initial",
 			Rules:      json.RawMessage(`[{"name":"test"}]`),
 		})
@@ -39,7 +39,7 @@ func TestPollerInitialSync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	poller.Run(ctx)
+	_ = poller.Run(ctx)
 
 	require.GreaterOrEqual(t, syncCalls.Load(), int32(1))
 	require.GreaterOrEqual(t, updateCalled.Load(), int32(1))
@@ -48,7 +48,7 @@ func TestPollerInitialSync(t *testing.T) {
 func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:same"})
+		_ = json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:same"})
 	}))
 	defer server.Close()
 
@@ -64,14 +64,14 @@ func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	poller.Run(ctx)
+	_ = poller.Run(ctx)
 	require.Equal(t, int32(0), updateCalled.Load())
 }
 
 func TestPollerStopsOnRevocation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "proxy_revoked"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "proxy_revoked"}})
 	}))
 	defer server.Close()
 
@@ -94,11 +94,11 @@ func TestPollerContinuesOnTransientError(t *testing.T) {
 		n := calls.Add(1)
 		if n <= 2 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":{"code":"internal_error"}}`))
+			_, _ = w.Write([]byte(`{"error":{"code":"internal_error"}}`))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:recovered"})
+		_ = json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:recovered"})
 	}))
 	defer server.Close()
 
@@ -120,7 +120,7 @@ func TestPollerContinuesOnTransientError(t *testing.T) {
 func TestPollerGracefulShutdown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:ok"})
+		_ = json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:ok"})
 	}))
 	defer server.Close()
 

@@ -39,7 +39,7 @@ func TestRegisterSuccess(t *testing.T) {
 		require.Equal(t, "1.0.0", body.Version)
 
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(registerResponse{
+		_ = json.NewEncoder(w).Encode(registerResponse{
 			ProxyID: "irnp_01JX",
 			Secret:  hex.EncodeToString(secret),
 		})
@@ -59,7 +59,7 @@ func TestRegisterSuccess(t *testing.T) {
 func TestRegisterExpiredToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(apiError("token_expired", "token expired at 2025-01-01"))
+		_ = json.NewEncoder(w).Encode(apiError("token_expired", "token expired at 2025-01-01"))
 	}))
 	defer server.Close()
 
@@ -76,7 +76,7 @@ func TestRegisterExpiredToken(t *testing.T) {
 func TestRegisterExhaustedToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(apiError("token_exhausted", ""))
+		_ = json.NewEncoder(w).Encode(apiError("token_exhausted", ""))
 	}))
 	defer server.Close()
 
@@ -91,7 +91,7 @@ func TestRegisterExhaustedToken(t *testing.T) {
 func TestRegisterLabelNotPermitted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(apiError("tag_not_permitted", "tag 'admin' is not allowed"))
+		_ = json.NewEncoder(w).Encode(apiError("tag_not_permitted", "tag 'admin' is not allowed"))
 	}))
 	defer server.Close()
 
@@ -111,11 +111,11 @@ func TestRegisterRateLimitedThenSuccess(t *testing.T) {
 		calls++
 		if calls == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			json.NewEncoder(w).Encode(apiError("rate_limited", ""))
+			_ = json.NewEncoder(w).Encode(apiError("rate_limited", ""))
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(registerResponse{
+		_ = json.NewEncoder(w).Encode(registerResponse{
 			ProxyID: "irnp_retry",
 			Secret:  hex.EncodeToString(secret),
 		})
@@ -155,7 +155,7 @@ func TestSyncSuccess(t *testing.T) {
 		require.Equal(t, "sha256:abc", body.ConfigHash)
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{
+		_ = json.NewEncoder(w).Encode(SyncResponse{
 			ConfigHash: "sha256:def",
 			Rules:      json.RawMessage(`[{"name":"allowlist"}]`),
 			Secrets:    json.RawMessage(`{"API_KEY":"secret"}`),
@@ -179,7 +179,7 @@ func TestSyncSuccess(t *testing.T) {
 func TestSyncUnchanged(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{
+		_ = json.NewEncoder(w).Encode(SyncResponse{
 			ConfigHash: "sha256:abc",
 		})
 	}))
@@ -198,7 +198,7 @@ func TestSyncUnchanged(t *testing.T) {
 func TestSyncRevoked(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(apiError("proxy_revoked", ""))
+		_ = json.NewEncoder(w).Encode(apiError("proxy_revoked", ""))
 	}))
 	defer server.Close()
 
@@ -227,7 +227,7 @@ func TestSyncHMACSignatureValid(t *testing.T) {
 		require.Equal(t, expected, sig, "HMAC signature mismatch")
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:ok"})
+		_ = json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:ok"})
 	}))
 	defer server.Close()
 

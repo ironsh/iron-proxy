@@ -100,7 +100,7 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 		var apiErr *controlplane.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == controlplane.ErrProxyRevoked {
 			logger.Error("proxy has been revoked, deleting credential and exiting")
-			controlplane.DeleteCredential(stateStore)
+			_ = controlplane.DeleteCredential(stateStore)
 			os.Exit(1)
 		}
 		logger.Warn("initial sync failed, will retry in background", slog.String("error", err.Error()))
