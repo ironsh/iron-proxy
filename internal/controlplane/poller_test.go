@@ -39,7 +39,8 @@ func TestPollerInitialSync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_ = poller.Run(ctx)
+	err := poller.Run(ctx)
+	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, syncCalls.Load(), int32(1))
 	require.GreaterOrEqual(t, updateCalled.Load(), int32(1))
@@ -64,7 +65,8 @@ func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_ = poller.Run(ctx)
+	err := poller.Run(ctx)
+	require.NoError(t, err)
 	require.Equal(t, int32(0), updateCalled.Load())
 }
 
