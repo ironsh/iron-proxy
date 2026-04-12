@@ -3,17 +3,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
+	"github.com/ironsh/iron-proxy/internal/controlplane"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
 	"github.com/ironsh/iron-proxy/internal/metrics"
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
@@ -27,6 +31,9 @@ import (
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
+// version is set at build time via -ldflags.
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -36,6 +43,113 @@ func main() {
 		}
 	}
 
+	stateStore := envOrDefault("IRON_STATE_STORE", "/etc/iron-proxy/state")
+	bootstrapToken := os.Getenv("IRON_BOOTSTRAP_TOKEN")
+
+	cred, _ := controlplane.LoadCredential(stateStore)
+	managed := cred != nil || bootstrapToken != ""
+
+	if managed {
+		runManaged(stateStore, bootstrapToken, cred)
+	} else {
+		runStandalone()
+	}
+}
+
+func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential) {
+	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
+	tags := parseTags(os.Getenv("IRON_TAGS"))
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
+
+	client := controlplane.NewClient(cpURL, logger)
+
+	// Register if we don't have a credential yet.
+	if cred == nil {
+		logger.Info("registering with control plane")
+		var err error
+		err = controlplane.Retry(context.Background(), controlplane.DefaultRegisterRetry, func() error {
+			cred, err = client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
+				Tags:    tags,
+				Version: version,
+			})
+			return err
+		})
+		if err != nil {
+			logger.Error("registration failed", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.Info("registered successfully", slog.String("proxy_id", cred.ProxyID))
+
+		if err := controlplane.SaveCredential(stateStore, cred); err != nil {
+			logger.Error("saving credential", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+	} else {
+		logger.Info("loaded existing credential", slog.String("proxy_id", cred.ProxyID))
+	}
+
+	client.SetCredential(cred)
+
+	// Initial sync.
+	syncResp, err := client.Sync(context.Background(), "")
+	if err != nil {
+		var apiErr *controlplane.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == controlplane.ErrProxyRevoked {
+			logger.Error("proxy has been revoked, deleting credential and exiting")
+			controlplane.DeleteCredential(stateStore)
+			os.Exit(1)
+		}
+		logger.Warn("initial sync failed, will retry in background", slog.String("error", err.Error()))
+	}
+
+	configHash := ""
+	if syncResp != nil {
+		configHash = syncResp.ConfigHash
+		if syncResp.Rules != nil || syncResp.Secrets != nil {
+			logger.Info("received initial config from control plane",
+				slog.String("config_hash", syncResp.ConfigHash),
+				slog.Bool("has_rules", syncResp.Rules != nil),
+				slog.Bool("has_secrets", syncResp.Secrets != nil),
+			)
+		}
+	}
+
+	// Start poller in background.
+	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	defer pollerCancel()
+
+	poller := controlplane.NewPoller(client, configHash, func(rules json.RawMessage, secrets json.RawMessage) error {
+		logger.Info("config update callback invoked (wiring not yet implemented)")
+		return nil
+	}, logger)
+
+	pollerErrC := make(chan error, 1)
+	go func() {
+		pollerErrC <- poller.Run(pollerCtx)
+	}()
+
+	// Wait for shutdown signal or poller fatal error.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigc:
+		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
+	case err := <-pollerErrC:
+		if err != nil {
+			logger.Error("poller stopped with error", slog.String("error", err.Error()))
+		}
+	}
+
+	pollerCancel()
+	logger.Info("iron-proxy stopped")
+}
+
+func runStandalone() {
 	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
 	flag.Parse()
 
@@ -179,4 +293,26 @@ func main() {
 	}
 
 	logger.Info("iron-proxy stopped")
+}
+
+func parseTags(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	tags := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			tags = append(tags, p)
+		}
+	}
+	return tags
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
