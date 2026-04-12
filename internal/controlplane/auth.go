@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
 )
 
 // hmacTransport is an http.RoundTripper that signs requests with HMAC-SHA256.
@@ -30,18 +31,7 @@ func (t *hmacTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	dot := []byte(".")
-
-	// hash.Hash.Write never returns an error.
-	mac := hmac.New(sha256.New, t.cred.Secret)
-	_, _ = mac.Write([]byte(timestamp))
-	_, _ = mac.Write(dot)
-	_, _ = mac.Write([]byte(req.Method))
-	_, _ = mac.Write(dot)
-	_, _ = mac.Write([]byte(req.URL.Path))
-	_, _ = mac.Write(dot)
-	_, _ = mac.Write(body)
-	signature := hex.EncodeToString(mac.Sum(nil))
+	signature := ComputeSignature(t.cred.Secret, timestamp, req.Method, req.URL.Path, body)
 
 	req.Header.Set("X-Iron-Proxy-Id", t.cred.ProxyID)
 	req.Header.Set("X-Iron-Timestamp", timestamp)
