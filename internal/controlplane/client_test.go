@@ -28,7 +28,7 @@ func apiError(code, message string) map[string]any {
 func TestRegisterSuccess(t *testing.T) {
 	secret := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/register", r.URL.Path)
+		require.Equal(t, "/v1/proxies/register", r.URL.Path)
 		require.Equal(t, http.MethodPost, r.Method)
 
 		var body registerRequest

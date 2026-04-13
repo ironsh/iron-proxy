@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -43,7 +44,12 @@ func main() {
 		}
 	}
 
-	stateStore := envOrDefault("IRON_STATE_STORE", "/etc/iron-proxy/state")
+	stateStore, err := resolveStateStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
 	bootstrapToken := os.Getenv("IRON_BOOTSTRAP_TOKEN")
 
 	cred, err := controlplane.LoadCredential(stateStore)
@@ -110,11 +116,11 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	configHash := ""
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
-		if syncResp.Rules != nil || syncResp.Secrets != nil {
+		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
-				slog.Bool("has_rules", syncResp.Rules != nil),
-				slog.Bool("has_secrets", syncResp.Secrets != nil),
+				slog.Bool("has_rules", len(syncResp.Rules) > 0),
+				slog.Bool("has_secrets", len(syncResp.Secrets) > 0),
 			)
 		}
 	}
@@ -309,6 +315,25 @@ func parseTags(s string) []string {
 		}
 	}
 	return tags
+}
+
+// resolveStateStore returns the state store path, creating its parent directory
+// if needed. It honors IRON_STATE_STORE and falls back to the XDG config directory.
+func resolveStateStore() (string, error) {
+	stateStore := os.Getenv("IRON_STATE_STORE")
+	if stateStore == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("determining config directory: %w", err)
+		}
+		stateStore = filepath.Join(configDir, "iron-proxy", "state")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(stateStore), 0o700); err != nil {
+		return "", fmt.Errorf("creating state store directory: %w", err)
+	}
+
+	return stateStore, nil
 }
 
 func envOrDefault(key, def string) string {

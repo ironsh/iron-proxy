@@ -106,7 +106,7 @@ func (c *Client) register(ctx context.Context, token string, meta RegisterMetada
 		return nil, fmt.Errorf("marshaling register request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/register", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/proxies/register", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("building register request: %w", err)
 	}
