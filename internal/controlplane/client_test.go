@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,21 +123,9 @@ func TestRegisterRateLimitedThenSuccess(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, testLogger())
-	b := backoff.NewExponentialBackOff()
-	b.InitialInterval = 1
-	b.MaxInterval = 1
-	b.RandomizationFactor = 0
-	b.Multiplier = 2
-	cred, err := backoff.Retry(context.Background(), func() (*Credential, error) {
-		c, regErr := client.Register(context.Background(), "irbs_test", RegisterMetadata{})
-		if regErr != nil {
-			if apiErr, ok := regErr.(*APIError); ok && !apiErr.IsRetryable() {
-				return nil, backoff.Permanent(regErr)
-			}
-			return nil, regErr
-		}
-		return c, nil
-	}, backoff.WithBackOff(b), backoff.WithMaxTries(3), backoff.WithMaxElapsedTime(0))
+	cred, err := WithRetry(context.Background(), 3, func() (*Credential, error) {
+		return client.Register(context.Background(), "irbs_test", RegisterMetadata{})
+	})
 	require.NoError(t, err)
 	require.Equal(t, "irnp_retry", cred.ProxyID)
 	require.Equal(t, 2, calls)
