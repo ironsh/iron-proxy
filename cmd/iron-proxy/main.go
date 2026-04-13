@@ -44,31 +44,30 @@ func main() {
 		}
 	}
 
+	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
+	flag.Parse()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stateStore, err := resolveStateStore()
+	// Mode is determined exclusively by how config is provided:
+	//   -config flag  → standalone (YAML file)
+	//   no flag       → managed (env vars + control plane)
+	managed := *configPath == ""
+
+	var cfg *config.Config
+	var err error
+	if managed {
+		cfg, err = config.FromEnv()
+	} else {
+		cfg, err = config.LoadFile(*configPath)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	bootstrapToken := os.Getenv("IRON_BOOTSTRAP_TOKEN")
-
-	cred, err := controlplane.LoadCredential(stateStore)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "error: loading credential: %v\n", err)
-		os.Exit(1)
-	}
-	managed := cred != nil || bootstrapToken != ""
-
-	// Load config: from env vars in managed mode, from YAML file in standalone.
-	var cfg *config.Config
-	if managed {
-		cfg, err = config.FromEnv()
-	} else {
-		cfg, err = loadStandaloneConfig()
-	}
+	stateStore, err := resolveStateStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -94,7 +93,7 @@ func main() {
 	var holder *transform.PipelineHolder
 
 	if managed {
-		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, logger)
 	} else {
 		holder = initStandalone(cfg, bodyLimits, logger)
 	}
@@ -202,24 +201,18 @@ func main() {
 	logger.Info("iron-proxy stopped")
 }
 
-// loadStandaloneConfig parses the -config flag and loads the YAML config file.
-func loadStandaloneConfig() (*config.Config, error) {
-	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
-	flag.Parse()
-
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "error: -config flag is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	return config.LoadFile(*configPath)
-}
-
 // initManaged registers with the control plane, performs an initial sync, builds
 // the initial pipeline, and starts the config poller. The poller runs until ctx
 // is canceled and sends fatal errors on errc.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) *transform.PipelineHolder {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore string, logger *slog.Logger) *transform.PipelineHolder {
+	bootstrapToken := os.Getenv("IRON_BOOTSTRAP_TOKEN")
+
+	cred, err := controlplane.LoadCredential(stateStore)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Error("loading credential", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	tags := parseTags(os.Getenv("IRON_TAGS"))
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
