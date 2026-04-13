@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/controlplane"
@@ -70,14 +71,25 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	// Register if we don't have a credential yet.
 	if cred == nil {
 		logger.Info("registering with control plane")
+		b := backoff.NewExponentialBackOff()
+		b.InitialInterval = 1 * time.Second
+		b.MaxInterval = 30 * time.Second
+		b.RandomizationFactor = 0.1
+		b.Multiplier = 2
 		var err error
-		err = controlplane.Retry(context.Background(), controlplane.DefaultRegisterRetry, func() error {
-			cred, err = client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
+		cred, err = backoff.Retry(context.Background(), func() (*controlplane.Credential, error) {
+			c, err := client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
 				Tags:    tags,
 				Version: version,
 			})
-			return err
-		})
+			if err != nil {
+				if apiErr, ok := err.(*controlplane.APIError); ok && !apiErr.IsRetryable() {
+					return nil, backoff.Permanent(err)
+				}
+				return nil, err
+			}
+			return c, nil
+		}, backoff.WithBackOff(b), backoff.WithMaxTries(5), backoff.WithMaxElapsedTime(0))
 		if err != nil {
 			logger.Error("registration failed", slog.String("error", err.Error()))
 			os.Exit(1)
