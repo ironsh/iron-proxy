@@ -24,21 +24,24 @@ transforms:
 
   - name: secrets
     config:
-      source: env
       secrets:
-        - var: OPENAI_API_KEY
+        - source:
+            type: env
+            var: OPENAI_API_KEY
           proxy_value: "proxy-openai-abc123"
           match_headers: ["Authorization"]
           match_body: false
-          hosts:
-            - name: "httpbin.org"
+          rules:
+            - host: "httpbin.org"
 
-        - var: INTERNAL_TOKEN
+        - source:
+            type: env
+            var: INTERNAL_TOKEN
           proxy_value: "proxy-internal-tok"
           match_headers: []
           match_body: false
-          hosts:
-            - name: "httpbin.org"
+          rules:
+            - host: "httpbin.org"
 
 log:
   level: "info"

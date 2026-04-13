@@ -239,15 +239,16 @@ transforms:
 
   - name: secrets
     config:
-      source: env
       secrets:
-        - var: OPENAI_API_KEY # Env var holding the real secret
+        - source:
+            type: env
+            var: OPENAI_API_KEY # Env var holding the real secret
           proxy_value: "proxy-token-123" # Token the sandbox sends
           match_headers: ["Authorization"]
           match_body: false
           require: true # Reject requests without the proxy token
-          hosts:
-            - name: "api.openai.com"
+          rules:
+            - host: "api.openai.com"
 
 log:
   level: "info" # debug, info, warn, error
@@ -571,19 +572,22 @@ transforms:
 
   - name: secrets
     config:
-      source: env
       secrets:
-        - var: OPENAI_API_KEY
+        - source:
+            type: env
+            var: OPENAI_API_KEY
           proxy_value: "proxy-openai-abc123"
           match_headers: ["Authorization"]
-          hosts:
-            - name: "httpbin.org"
+          rules:
+            - host: "httpbin.org"
 
-        - var: INTERNAL_TOKEN
+        - source:
+            type: env
+            var: INTERNAL_TOKEN
           proxy_value: "proxy-internal-tok"
           match_headers: [] # scan all headers
-          hosts:
-            - name: "httpbin.org"
+          rules:
+            - host: "httpbin.org"
 ```
 
 The client script sends five requests to demonstrate each behavior:

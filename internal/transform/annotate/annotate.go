@@ -5,6 +5,7 @@ package annotate
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"gopkg.in/yaml.v3"
@@ -37,7 +38,7 @@ type Annotate struct {
 	groups []compiledGroup
 }
 
-func factory(cfg yaml.Node) (transform.Transformer, error) {
+func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
 	var c annotateConfig
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing annotate config: %w", err)

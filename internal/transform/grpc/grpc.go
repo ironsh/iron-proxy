@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,7 +52,7 @@ type GRPCTransform struct {
 	client           transformv1.TransformServiceClient
 }
 
-func factory(cfg yaml.Node) (transform.Transformer, error) {
+func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
 	var c grpcConfig
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing grpc config: %w", err)

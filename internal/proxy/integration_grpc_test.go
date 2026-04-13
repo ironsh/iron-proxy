@@ -97,13 +97,14 @@ transforms:
 
   - name: secrets
     config:
-      source: env
       secrets:
-        - var: TEST_SECRET
+        - source:
+            type: env
+            var: TEST_SECRET
           proxy_value: "proxy-token"
           match_headers: ["Authorization"]
-          hosts:
-            - name: "127.0.0.1"
+          rules:
+            - host: "127.0.0.1"
 
   - name: grpc
     config:

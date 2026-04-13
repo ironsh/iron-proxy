@@ -23,7 +23,12 @@ func (h *PipelineHolder) Load() *Pipeline {
 	return h.p.Load()
 }
 
-// Store atomically replaces the current pipeline with next.
+// Store atomically replaces the current pipeline with next. The previous
+// pipeline is closed to release resources (background goroutines, connections).
 func (h *PipelineHolder) Store(next *Pipeline) {
-	h.p.Store(next)
+	old := h.p.Swap(next)
+	if old != nil {
+		// Best-effort close; errors are not actionable here.
+		_ = old.Close()
+	}
 }

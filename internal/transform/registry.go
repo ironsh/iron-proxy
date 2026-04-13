@@ -2,13 +2,14 @@ package transform
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Factory creates a Transformer from a raw YAML config node.
-type Factory func(cfg yaml.Node) (Transformer, error)
+type Factory func(cfg yaml.Node, logger *slog.Logger) (Transformer, error)
 
 var (
 	registryMu sync.RWMutex

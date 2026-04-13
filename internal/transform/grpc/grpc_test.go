@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"testing"
@@ -326,7 +327,7 @@ send_request_body: true`, addr)
 	var node yaml.Node
 	require.NoError(t, yaml.Unmarshal([]byte(cfgYAML), &node))
 
-	tr, err := f(*node.Content[0])
+	tr, err := f(*node.Content[0], slog.Default())
 	require.NoError(t, err)
 	require.Equal(t, "test-svc", tr.Name())
 }
@@ -338,7 +339,7 @@ func TestFactory_MissingName(t *testing.T) {
 	var node yaml.Node
 	require.NoError(t, yaml.Unmarshal([]byte(`target: "localhost:9500"`), &node))
 
-	_, err = f(*node.Content[0])
+	_, err = f(*node.Content[0], slog.Default())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "name is required")
 }
@@ -350,7 +351,7 @@ func TestFactory_MissingTarget(t *testing.T) {
 	var node yaml.Node
 	require.NoError(t, yaml.Unmarshal([]byte(`name: test`), &node))
 
-	_, err = f(*node.Content[0])
+	_, err = f(*node.Content[0], slog.Default())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "target is required")
 }
@@ -368,7 +369,7 @@ tls:
 	var node yaml.Node
 	require.NoError(t, yaml.Unmarshal([]byte(cfgYAML), &node))
 
-	_, err = f(*node.Content[0])
+	_, err = f(*node.Content[0], slog.Default())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "both cert and key are required")
 }
@@ -386,7 +387,7 @@ tls:
 	var node yaml.Node
 	require.NoError(t, yaml.Unmarshal([]byte(cfgYAML), &node))
 
-	_, err = f(*node.Content[0])
+	_, err = f(*node.Content[0], slog.Default())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reading ca_cert")
 }
