@@ -8,12 +8,15 @@ import (
 )
 
 // TransformsFromSync builds a []Transform from the control plane's rules JSON
-// payload. If rules is nil or JSON null, an empty slice is returned.
+// payload. The rules payload is a JSON array of rule objects that gets wrapped
+// into {"rules": [...]} to match the allowlist transform's expected config
+// shape. If rules is nil or JSON null, an empty slice is returned.
 func TransformsFromSync(rules json.RawMessage) ([]Transform, error) {
 	var transforms []Transform
 
 	if isNonNullJSON(rules) {
-		node, err := yamlNodeFromJSON(rules)
+		wrapped := map[string]json.RawMessage{"rules": rules}
+		node, err := yamlNodeFromJSON(wrapped)
 		if err != nil {
 			return nil, fmt.Errorf("parsing rules: %w", err)
 		}
@@ -26,9 +29,13 @@ func TransformsFromSync(rules json.RawMessage) ([]Transform, error) {
 	return transforms, nil
 }
 
-// yamlNodeFromJSON converts a JSON byte slice into a yaml.Node. This works
+// yamlNodeFromJSON marshals v to JSON, then parses as a yaml.Node. This works
 // because JSON is valid YAML, and gopkg.in/yaml.v3 handles it natively.
-func yamlNodeFromJSON(data json.RawMessage) (yaml.Node, error) {
+func yamlNodeFromJSON(v any) (yaml.Node, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return yaml.Node{}, fmt.Errorf("marshaling to JSON: %w", err)
+	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return yaml.Node{}, fmt.Errorf("unmarshaling JSON as YAML: %w", err)
