@@ -75,11 +75,9 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	if cred == nil {
 		logger.Info("registering with control plane")
 		var err error
-		cred, err = controlplane.WithRetry(context.Background(), 5, func() (*controlplane.Credential, error) {
-			return client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
-				Tags:    tags,
-				Version: version,
-			})
+		cred, err = client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
+			Tags:    tags,
+			Version: version,
 		})
 		if err != nil {
 			logger.Error("registration failed", slog.String("error", err.Error()))

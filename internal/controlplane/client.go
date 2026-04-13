@@ -80,7 +80,14 @@ type registerResponse struct {
 }
 
 // Register exchanges a bootstrap token for a persistent credential.
+// Retries up to 5 times with exponential backoff on transient errors.
 func (c *Client) Register(ctx context.Context, token string, meta RegisterMetadata) (*Credential, error) {
+	return WithRetry(ctx, 5, func() (*Credential, error) {
+		return c.register(ctx, token, meta)
+	})
+}
+
+func (c *Client) register(ctx context.Context, token string, meta RegisterMetadata) (*Credential, error) {
 	hostname, _ := os.Hostname()
 
 	body := registerRequest{
@@ -141,7 +148,14 @@ type syncRequest struct {
 }
 
 // Sync polls the control plane for config updates.
+// Retries indefinitely with exponential backoff on transient errors.
 func (c *Client) Sync(ctx context.Context, configHash string) (*SyncResponse, error) {
+	return WithRetry(ctx, 0, func() (*SyncResponse, error) {
+		return c.sync(ctx, configHash)
+	})
+}
+
+func (c *Client) sync(ctx context.Context, configHash string) (*SyncResponse, error) {
 	data, err := json.Marshal(syncRequest{ConfigHash: configHash})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling sync request: %w", err)

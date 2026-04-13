@@ -123,9 +123,7 @@ func TestRegisterRateLimitedThenSuccess(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, testLogger())
-	cred, err := WithRetry(context.Background(), 3, func() (*Credential, error) {
-		return client.Register(context.Background(), "irbs_test", RegisterMetadata{})
-	})
+	cred, err := client.Register(context.Background(), "irbs_test", RegisterMetadata{})
 	require.NoError(t, err)
 	require.Equal(t, "irnp_retry", cred.ProxyID)
 	require.Equal(t, 2, calls)
