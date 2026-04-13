@@ -99,7 +99,8 @@ func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) 
 	require.NoError(t, err)
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
-	p := New("127.0.0.1:0", "127.0.0.1:0", "", cache, pipeline, nil, testLogger())
+	holder := transform.NewPipelineHolder(pipeline)
+	p := New("127.0.0.1:0", "127.0.0.1:0", "", cache, holder, nil, testLogger())
 
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

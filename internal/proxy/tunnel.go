@@ -248,6 +248,8 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 	}
 	req.Body = transform.NewBufferedBody(http.NoBody, 0)
 
+	pl := p.pipeline.Load()
+
 	startedAt := time.Now()
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
@@ -266,10 +268,10 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 	defer func() {
 		result.Duration = time.Since(startedAt)
 		result.RequestTransforms = reqTraces
-		p.pipeline.EmitAudit(result)
+		pl.EmitAudit(result)
 	}()
 
-	rejectResp, err := p.pipeline.ProcessRequest(req.Context(), tctx, req, &reqTraces)
+	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &reqTraces)
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway

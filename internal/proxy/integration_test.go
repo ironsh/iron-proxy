@@ -52,8 +52,9 @@ func startTunnelIntegrationProxy(t *testing.T, allowedHosts []string, logger *sl
 	al, err := allowlist.New(allowedHosts, nil, &staticResolver{})
 	require.NoError(t, err)
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
+	holder := transform.NewPipelineHolder(pipeline)
 
-	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", ca.certCache, pipeline, nil, logger)
+	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", ca.certCache, holder, nil, logger)
 
 	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -111,9 +112,10 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	require.NoError(t, err)
 
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
+	holder := transform.NewPipelineHolder(pipeline)
 
 	// 4. Start proxy with HTTPS
-	p := New("127.0.0.1:0", "127.0.0.1:0", "", ca.certCache, pipeline, nil, logger)
+	p := New("127.0.0.1:0", "127.0.0.1:0", "", ca.certCache, holder, nil, logger)
 
 	// Start HTTP listener
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")

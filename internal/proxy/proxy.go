@@ -27,14 +27,14 @@ type Proxy struct {
 	tunnelListener  net.Listener
 	tunnelDone      chan struct{}
 	certCache       *certcache.Cache
-	pipeline        *transform.Pipeline
+	pipeline        *transform.PipelineHolder
 	transport       *http.Transport
 	logger          *slog.Logger
 }
 
 // New creates a new Proxy. If resolver is non-nil, it is used to resolve
 // upstream hostnames instead of the OS default resolver.
-func New(httpAddr, httpsAddr, tunnelAddr string, certCache *certcache.Cache, pipeline *transform.Pipeline, resolver *net.Resolver, logger *slog.Logger) *Proxy {
+func New(httpAddr, httpsAddr, tunnelAddr string, certCache *certcache.Cache, pipeline *transform.PipelineHolder, resolver *net.Resolver, logger *slog.Logger) *Proxy {
 	p := &Proxy{
 		tunnelAddr: tunnelAddr,
 		tunnelDone: make(chan struct{}),
@@ -147,9 +147,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Snapshot the pipeline for this request so a concurrent swap does not
+	// affect in-flight processing.
+	pl := p.pipeline.Load()
+
 	// Build transform context and audit state
 	startedAt := time.Now()
-	bodyLimits := p.pipeline.BodyLimits()
+	bodyLimits := pl.BodyLimits()
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
 	}
@@ -170,14 +174,14 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		result.Duration = time.Since(startedAt)
 		result.RequestTransforms = reqTraces
 		result.ResponseTransforms = respTraces
-		p.pipeline.EmitAudit(result)
+		pl.EmitAudit(result)
 	}()
 
 	// Wrap request body for lazy buffering by transforms.
 	r.Body = transform.NewBufferedBody(r.Body, bodyLimits.MaxRequestBodyBytes)
 
 	// Run request transforms
-	if rejectResp, err := p.pipeline.ProcessRequest(r.Context(), tctx, r, &reqTraces); err != nil {
+	if rejectResp, err := pl.ProcessRequest(r.Context(), tctx, r, &reqTraces); err != nil {
 		result.Action = transform.ActionContinue // error, not reject
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
@@ -241,7 +245,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	resp.Body = transform.NewBufferedBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
 
 	// Run response transforms
-	finalResp, err := p.pipeline.ProcessResponse(r.Context(), tctx, r, resp, &respTraces)
+	finalResp, err := pl.ProcessResponse(r.Context(), tctx, r, resp, &respTraces)
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway

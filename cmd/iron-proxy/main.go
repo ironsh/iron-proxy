@@ -187,27 +187,15 @@ func runStandalone() {
 	}
 
 	// Build transform pipeline
-	var transformers []transform.Transformer
-	for _, tc := range cfg.Transforms {
-		factory, err := transform.Lookup(tc.Name)
-		if err != nil {
-			logger.Error("unknown transform", slog.String("name", tc.Name))
-			os.Exit(1)
-		}
-		t, err := factory(tc.Config)
-		if err != nil {
-			logger.Error("initializing transform",
-				slog.String("name", tc.Name),
-				slog.String("error", err.Error()),
-			)
-			os.Exit(1)
-		}
-		transformers = append(transformers, t)
-	}
-	pipeline := transform.NewPipeline(transformers, transform.BodyLimits{
+	bodyLimits := transform.BodyLimits{
 		MaxRequestBodyBytes:  cfg.Proxy.MaxRequestBodyBytes,
 		MaxResponseBodyBytes: cfg.Proxy.MaxResponseBodyBytes,
-	}, logger)
+	}
+	pipeline, err := buildPipeline(cfg.Transforms, bodyLimits, logger)
+	if err != nil {
+		logger.Error("building transform pipeline", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
 	if iotel.Enabled() {
 		otelProvider, err := iotel.NewLoggerProvider(context.Background())
@@ -226,6 +214,7 @@ func runStandalone() {
 		logger.Info("OTEL audit export enabled")
 	}
 	pipeline.SetAuditFunc(auditFunc)
+	holder := transform.NewPipelineHolder(pipeline)
 
 	// Build upstream resolver
 	resolver := net.DefaultResolver
@@ -248,7 +237,7 @@ func runStandalone() {
 	}
 
 	// Initialize proxy
-	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, pipeline, resolver, logger)
+	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, holder, resolver, logger)
 
 	// Initialize metrics server
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
@@ -334,6 +323,23 @@ func resolveStateStore() (string, error) {
 	}
 
 	return stateStore, nil
+}
+
+// buildPipeline creates a transform.Pipeline from config transforms.
+func buildPipeline(transforms []config.Transform, bodyLimits transform.BodyLimits, logger *slog.Logger) (*transform.Pipeline, error) {
+	var transformers []transform.Transformer
+	for _, tc := range transforms {
+		factory, err := transform.Lookup(tc.Name)
+		if err != nil {
+			return nil, fmt.Errorf("unknown transform %q: %w", tc.Name, err)
+		}
+		t, err := factory(tc.Config)
+		if err != nil {
+			return nil, fmt.Errorf("initializing transform %q: %w", tc.Name, err)
+		}
+		transformers = append(transformers, t)
+	}
+	return transform.NewPipeline(transformers, bodyLimits, logger), nil
 }
 
 func envOrDefault(key, def string) string {
