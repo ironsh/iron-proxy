@@ -356,7 +356,7 @@ func buildPipeline(transforms []config.Transform, bodyLimits transform.BodyLimit
 		if err != nil {
 			return nil, fmt.Errorf("unknown transform %q: %w", tc.Name, err)
 		}
-		t, err := factory(tc.Config)
+		t, err := factory(tc.Config, logger)
 		if err != nil {
 			return nil, fmt.Errorf("initializing transform %q: %w", tc.Name, err)
 		}

@@ -8,10 +8,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -25,33 +26,27 @@ func init() {
 
 // secretsConfig is the YAML config structure.
 type secretsConfig struct {
-	Source  string        `yaml:"source"`
 	Secrets []secretEntry `yaml:"secrets"`
 }
 
 type secretEntry struct {
-	Var          string      `yaml:"var"`
-	ProxyValue   string      `yaml:"proxy_value"`
-	MatchHeaders []string    `yaml:"match_headers"`
-	MatchBody    bool        `yaml:"match_body"`
-	Require      bool        `yaml:"require"`
-	Hosts        []hostMatch `yaml:"hosts"`
+	Source       yaml.Node              `yaml:"source"`
+	ProxyValue   string                 `yaml:"proxy_value"`
+	MatchHeaders []string               `yaml:"match_headers"`
+	MatchBody    bool                   `yaml:"match_body"`
+	Require      bool                   `yaml:"require"`
+	Rules        []hostmatch.RuleConfig `yaml:"rules"`
 }
 
-type hostMatch struct {
-	Name string `yaml:"name,omitempty"`
-	CIDR string `yaml:"cidr,omitempty"`
-}
-
-// resolvedSecret is a secret ready for use after config parsing and env lookup.
+// resolvedSecret is a secret ready for use after config parsing and source resolution.
 type resolvedSecret struct {
-	name         string // env var name, for logging/metrics
+	name         string // source name, for logging/metrics
 	proxyValue   string
-	realValue    string
+	getValue     func(ctx context.Context) (string, error)
 	matchHeaders []string // empty = all headers
 	matchBody    bool
 	require      bool
-	matcher      *hostmatch.Matcher
+	rules        []hostmatch.Rule
 }
 
 // Secrets is the transform that swaps proxy tokens for real secrets.
@@ -59,63 +54,61 @@ type Secrets struct {
 	secrets []resolvedSecret
 }
 
-// envLookup is the function used to read environment variables.
-// Overridable in tests.
-var envLookup = os.Getenv
-
-func factory(cfg yaml.Node) (transform.Transformer, error) {
+func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) {
 	var c secretsConfig
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing secrets config: %w", err)
 	}
-	return newFromConfig(c, envLookup)
+	registry := resolverRegistry{
+		"env":    newEnvResolver(),
+		"aws_sm": newAWSSMResolver(logger),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return newFromConfig(ctx, c, registry)
 }
 
-// newFromConfig creates a Secrets transform from a parsed config, using the
-// given env lookup function. Exported-via-test only.
-func newFromConfig(cfg secretsConfig, getenv func(string) string) (*Secrets, error) {
-	if cfg.Source != "env" {
-		return nil, fmt.Errorf("unsupported secrets source: %q (only \"env\" is supported)", cfg.Source)
-	}
-
+// newFromConfig creates a Secrets transform from a parsed config.
+func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegistry) (*Secrets, error) {
 	resolved := make([]resolvedSecret, 0, len(cfg.Secrets))
+
 	for i, entry := range cfg.Secrets {
 		if entry.ProxyValue == "" {
-			return nil, fmt.Errorf("secrets[%d] (%s): proxy_value is required", i, entry.Var)
+			return nil, fmt.Errorf("secrets[%d]: proxy_value is required", i)
 		}
 
-		realValue := getenv(entry.Var)
-		if realValue == "" {
-			return nil, fmt.Errorf("secrets[%d]: env var %q is not set or empty", i, entry.Var)
+		// Peek at source type to dispatch to the right resolver.
+		var hint sourceTypeHint
+		if err := entry.Source.Decode(&hint); err != nil {
+			return nil, fmt.Errorf("secrets[%d]: parsing source type: %w", i, err)
+		}
+		if hint.Type == "" {
+			return nil, fmt.Errorf("secrets[%d]: source.type is required", i)
 		}
 
-		var domains []string
-		var cidrs []string
-		for _, h := range entry.Hosts {
-			if h.Name != "" {
-				domains = append(domains, h.Name)
-			}
-			if h.CIDR != "" {
-				cidrs = append(cidrs, h.CIDR)
-			}
+		resolver, ok := registry[hint.Type]
+		if !ok {
+			return nil, fmt.Errorf("secrets[%d]: unsupported source type %q", i, hint.Type)
 		}
 
-		// Host matching doesn't need DNS resolution for the secrets transform —
-		// we only match against the request Host header, not resolved IPs,
-		// unless CIDRs are configured.
-		matcher, err := hostmatch.New(domains, cidrs, hostmatch.NullResolver{})
+		result, err := resolver.Resolve(ctx, entry.Source)
 		if err != nil {
-			return nil, fmt.Errorf("secrets[%d] (%s): %w", i, entry.Var, err)
+			return nil, fmt.Errorf("secrets[%d]: %w", i, err)
+		}
+
+		rules, err := hostmatch.CompileRules(entry.Rules, hostmatch.NullResolver{}, fmt.Sprintf("secrets[%d]", i))
+		if err != nil {
+			return nil, err
 		}
 
 		resolved = append(resolved, resolvedSecret{
-			name:         entry.Var,
+			name:         result.Name,
 			proxyValue:   entry.ProxyValue,
-			realValue:    realValue,
+			getValue:     result.GetValue,
 			matchHeaders: entry.MatchHeaders,
 			matchBody:    entry.MatchBody,
 			require:      entry.Require,
-			matcher:      matcher,
+			rules:        rules,
 		})
 	}
 
@@ -125,8 +118,6 @@ func newFromConfig(cfg secretsConfig, getenv func(string) string) (*Secrets, err
 func (s *Secrets) Name() string { return "secrets" }
 
 func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	host := hostmatch.StripPort(req.Host)
-
 	type swapRecord struct {
 		Secret    string   `json:"secret"`
 		Locations []string `json:"locations"`
@@ -134,16 +125,21 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	var swapped []swapRecord
 
 	for _, sec := range s.secrets {
-		if !sec.matcher.Matches(ctx, host) {
+		if !hostmatch.MatchAnyRule(ctx, sec.rules, req) {
 			continue
 		}
 
+		realValue, err := sec.getValue(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("resolving secret %q: %w", sec.name, err)
+		}
+
 		var locations []string
-		locations = append(locations, s.swapHeaders(req, &sec)...)
-		locations = append(locations, s.swapQuery(req, &sec)...)
+		locations = append(locations, s.swapHeaders(req, &sec, realValue)...)
+		locations = append(locations, s.swapQuery(req, &sec, realValue)...)
 
 		if sec.matchBody {
-			if loc := s.swapBody(req, &sec); loc != "" {
+			if loc := s.swapBody(req, &sec, realValue); loc != "" {
 				locations = append(locations, loc)
 			}
 		}
@@ -167,7 +163,7 @@ func (s *Secrets) TransformResponse(_ context.Context, _ *transform.TransformCon
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
-func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret) []string {
+func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue string) []string {
 	var locations []string
 	if len(sec.matchHeaders) > 0 {
 		for _, name := range sec.matchHeaders {
@@ -180,7 +176,7 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret) []string {
 				}
 				req.Header.Del(name)
 				for _, v := range vals {
-					req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, sec.realValue))
+					req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, realValue))
 				}
 			}
 		}
@@ -188,7 +184,7 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret) []string {
 		for name, vals := range req.Header {
 			for i, v := range vals {
 				if headerContains(name, v, sec.proxyValue) {
-					req.Header[name][i] = replaceInHeader(name, v, sec.proxyValue, sec.realValue)
+					req.Header[name][i] = replaceInHeader(name, v, sec.proxyValue, realValue)
 					locations = append(locations, "header:"+name)
 				}
 			}
@@ -236,7 +232,7 @@ func decodeBasicAuth(value string) (string, bool) {
 	return string(decoded), true
 }
 
-func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret) []string {
+func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret, realValue string) []string {
 	raw := req.URL.RawQuery
 	if raw == "" || !strings.Contains(raw, sec.proxyValue) {
 		return nil
@@ -251,7 +247,7 @@ func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret) []string {
 	for key, vals := range params {
 		for i, v := range vals {
 			if strings.Contains(v, sec.proxyValue) {
-				params[key][i] = strings.ReplaceAll(v, sec.proxyValue, sec.realValue)
+				params[key][i] = strings.ReplaceAll(v, sec.proxyValue, realValue)
 				locations = append(locations, "query:"+key)
 			}
 		}
@@ -263,7 +259,7 @@ func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret) []string {
 	return locations
 }
 
-func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret) string {
+func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret, realValue string) string {
 	if req.Body == nil {
 		return ""
 	}
@@ -277,7 +273,7 @@ func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret) string {
 		return ""
 	}
 
-	replaced := bytes.ReplaceAll(data, []byte(sec.proxyValue), []byte(sec.realValue))
+	replaced := bytes.ReplaceAll(data, []byte(sec.proxyValue), []byte(realValue))
 	req.Body = transform.NewBufferedBodyFromBytes(replaced)
 	return "body"
 }

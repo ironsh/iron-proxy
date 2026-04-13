@@ -4,6 +4,7 @@ package allowlist
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"gopkg.in/yaml.v3"
@@ -30,7 +31,7 @@ type allowlistConfig struct {
 	Warn    bool                   `yaml:"warn"`
 }
 
-func factory(cfg yaml.Node) (transform.Transformer, error) {
+func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
 	var c allowlistConfig
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing allowlist config: %w", err)

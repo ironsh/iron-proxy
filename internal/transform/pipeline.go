@@ -3,6 +3,7 @@ package transform
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -150,6 +151,21 @@ func (p *Pipeline) BodyLimits() BodyLimits {
 // Empty returns true if the pipeline has no transforms.
 func (p *Pipeline) Empty() bool {
 	return len(p.transforms) == 0
+}
+
+// Close closes any transforms that implement io.Closer (e.g. to stop background
+// goroutines or release connections). Should be called when a pipeline is being
+// replaced.
+func (p *Pipeline) Close() error {
+	var firstErr error
+	for _, t := range p.transforms {
+		if c, ok := t.(io.Closer); ok {
+			if err := c.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 // Names returns the names of all transforms in the pipeline, for logging.

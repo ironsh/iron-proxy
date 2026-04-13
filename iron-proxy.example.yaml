@@ -61,9 +61,10 @@ transforms:
 
   - name: secrets
     config:
-      source: env
       secrets:
-        - var: OPENAI_API_KEY
+        - source:
+            type: env
+            var: OPENAI_API_KEY
           proxy_value: "proxy-token-123"
           match_headers: ["Authorization"]
           match_body: false
@@ -71,8 +72,24 @@ transforms:
           # token are rejected (403). Prevents workloads from bypassing the
           # secret-swap mechanism with alternative credentials.
           require: true
-          hosts:
-            - name: "api.openai.com"
+          rules:
+            - host: "api.openai.com"
+              methods: ["POST"]
+              paths: ["/v1/*"]
+
+        # Example: secret from AWS Secrets Manager with background refresh
+        # - source:
+        #     type: aws_sm
+        #     secret_id: "arn:aws:secretsmanager:us-east-1:123456:secret:my-api-key"
+        #     region: "us-east-1"      # optional, falls back to AWS SDK default
+        #     json_key: "api_key"      # optional, extract a field from a JSON secret
+        #     ttl: "15m"               # optional, re-fetch interval; 0 = no refresh
+        #   proxy_value: "proxy-token-456"
+        #   match_headers: ["Authorization"]
+        #   rules:
+        #     - host: "*.anthropic.com"
+        #       methods: ["POST"]
+        #       paths: ["/v1/messages", "/v1/complete"]
 
   # gRPC transforms: each entry delegates to one external TransformService server.
   # Use multiple entries for multiple servers; they run in pipeline order.
