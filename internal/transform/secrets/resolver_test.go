@@ -23,6 +23,33 @@ func yamlNode(t *testing.T, v any) yaml.Node {
 	return *node.Content[0]
 }
 
+// mockSMClient is a configurable mock for the AWS Secrets Manager client.
+type mockSMClient struct {
+	fn func(ctx context.Context, input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error)
+}
+
+func (m *mockSMClient) GetSecretValue(ctx context.Context, input *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
+	return m.fn(ctx, input)
+}
+
+// staticSMClient returns a mockSMClient that always returns the given output/error.
+func staticSMClient(out *secretsmanager.GetSecretValueOutput, err error) *mockSMClient {
+	return &mockSMClient{fn: func(_ context.Context, _ *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error) {
+		return out, err
+	}}
+}
+
+func newTestAWSSMResolver(client smClient) *awsSMResolver {
+	r := &awsSMResolver{
+		clients: make(map[string]smClient),
+		logger:  slog.Default(),
+	}
+	r.clientFor = func(_ context.Context, _ string) (smClient, error) {
+		return client, nil
+	}
+	return r
+}
+
 // --- envResolver tests ---
 
 func TestEnvResolver_HappyPath(t *testing.T) {
@@ -42,48 +69,40 @@ func TestEnvResolver_HappyPath(t *testing.T) {
 	require.Equal(t, "real-value", val)
 }
 
-func TestEnvResolver_MissingVar(t *testing.T) {
-	r := &envResolver{getenv: func(string) string { return "" }}
-	node := yamlNode(t, map[string]string{"type": "env"})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "\"var\" field")
-}
-
-func TestEnvResolver_EmptyValue(t *testing.T) {
-	r := &envResolver{getenv: func(string) string { return "" }}
-	node := yamlNode(t, map[string]string{"type": "env", "var": "EMPTY_VAR"})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not set or empty")
+func TestEnvResolver_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   map[string]string
+		errMsg  string
+	}{
+		{
+			name:   "missing var field",
+			input:  map[string]string{"type": "env"},
+			errMsg: "\"var\" field",
+		},
+		{
+			name:   "empty value",
+			input:  map[string]string{"type": "env", "var": "EMPTY_VAR"},
+			errMsg: "not set or empty",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &envResolver{getenv: func(string) string { return "" }}
+			node := yamlNode(t, tt.input)
+			_, err := r.Resolve(context.Background(), node)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
 }
 
 // --- awsSMResolver tests ---
 
-type mockSMClient struct {
-	out *secretsmanager.GetSecretValueOutput
-	err error
-}
-
-func (m *mockSMClient) GetSecretValue(_ context.Context, _ *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
-	return m.out, m.err
-}
-
-func newTestAWSSMResolver(client smClient) *awsSMResolver {
-	r := &awsSMResolver{
-		clients: make(map[string]smClient),
-		logger:  slog.Default(),
-	}
-	r.clientFor = func(_ context.Context, _ string) (smClient, error) {
-		return client, nil
-	}
-	return r
-}
-
 func TestAWSSMResolver_PlainString(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
+	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String("my-secret-value"),
-	}}
+	}, nil)
 	r := newTestAWSSMResolver(client)
 	node := yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:aws:sm:us-east-1:123:secret:foo"})
 	result, err := r.Resolve(context.Background(), node)
@@ -96,9 +115,9 @@ func TestAWSSMResolver_PlainString(t *testing.T) {
 }
 
 func TestAWSSMResolver_JSONKey(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
+	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String(`{"api_key": "sk-abc123", "other": "val"}`),
-	}}
+	}, nil)
 	r := newTestAWSSMResolver(client)
 	node := yamlNode(t, map[string]string{
 		"type":      "aws_sm",
@@ -114,9 +133,9 @@ func TestAWSSMResolver_JSONKey(t *testing.T) {
 }
 
 func TestAWSSMResolver_TTLReturnsCachedValue(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
+	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String("value"),
-	}}
+	}, nil)
 	r := newTestAWSSMResolver(client)
 	node := yamlNode(t, map[string]string{
 		"type":      "aws_sm",
@@ -132,118 +151,124 @@ func TestAWSSMResolver_TTLReturnsCachedValue(t *testing.T) {
 	require.Equal(t, "value", val)
 }
 
-func TestAWSSMResolver_MissingSecretID(t *testing.T) {
-	r := newTestAWSSMResolver(&mockSMClient{})
-	node := yamlNode(t, map[string]string{"type": "aws_sm"})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "\"secret_id\" field")
-}
-
-func TestAWSSMResolver_AWSError(t *testing.T) {
-	client := &mockSMClient{err: fmt.Errorf("access denied")}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:foo"})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "access denied")
-}
-
-func TestAWSSMResolver_EmptySecretValue(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
-		SecretString: aws.String(""),
-	}}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:foo"})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "empty value")
-}
-
-func TestAWSSMResolver_InvalidTTL(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
-		SecretString: aws.String("value"),
-	}}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{
-		"type":      "aws_sm",
-		"secret_id": "arn:foo",
-		"ttl":       "not-a-duration",
-	})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "parsing ttl")
+func TestAWSSMResolver_Errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		client *mockSMClient
+		input  map[string]string
+		errMsg string
+	}{
+		{
+			name:   "missing secret_id",
+			client: staticSMClient(nil, nil),
+			input:  map[string]string{"type": "aws_sm"},
+			errMsg: "\"secret_id\" field",
+		},
+		{
+			name:   "aws error",
+			client: staticSMClient(nil, fmt.Errorf("access denied")),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo"},
+			errMsg: "access denied",
+		},
+		{
+			name: "empty secret value",
+			client: staticSMClient(&secretsmanager.GetSecretValueOutput{
+				SecretString: aws.String(""),
+			}, nil),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo"},
+			errMsg: "empty value",
+		},
+		{
+			name: "invalid TTL",
+			client: staticSMClient(&secretsmanager.GetSecretValueOutput{
+				SecretString: aws.String("value"),
+			}, nil),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo", "ttl": "not-a-duration"},
+			errMsg: "parsing ttl",
+		},
+		{
+			name: "json_key with invalid JSON",
+			client: staticSMClient(&secretsmanager.GetSecretValueOutput{
+				SecretString: aws.String("not-json"),
+			}, nil),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo", "json_key": "api_key"},
+			errMsg: "not valid JSON",
+		},
+		{
+			name: "json_key not found",
+			client: staticSMClient(&secretsmanager.GetSecretValueOutput{
+				SecretString: aws.String(`{"other": "value"}`),
+			}, nil),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo", "json_key": "api_key"},
+			errMsg: "not found",
+		},
+		{
+			name: "json_key non-string value",
+			client: staticSMClient(&secretsmanager.GetSecretValueOutput{
+				SecretString: aws.String(`{"api_key": 123}`),
+			}, nil),
+			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo", "json_key": "api_key"},
+			errMsg: "not a string",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestAWSSMResolver(tt.client)
+			node := yamlNode(t, tt.input)
+			_, err := r.Resolve(context.Background(), node)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
 }
 
 // --- extractJSONKey tests ---
 
-func TestExtractJSONKey_Valid(t *testing.T) {
-	val, err := extractJSONKey(`{"key": "value", "other": "data"}`, "key")
-	require.NoError(t, err)
-	require.Equal(t, "value", val)
-}
-
-func TestExtractJSONKey_InvalidJSON(t *testing.T) {
-	_, err := extractJSONKey(`not json`, "key")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not valid JSON")
-}
-
-func TestExtractJSONKey_MissingKey(t *testing.T) {
-	_, err := extractJSONKey(`{"other": "value"}`, "key")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
-}
-
-func TestExtractJSONKey_NonStringValue(t *testing.T) {
-	_, err := extractJSONKey(`{"key": 42}`, "key")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not a string")
-}
-
-func TestAWSSMResolver_JSONKeyInvalidJSON(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
-		SecretString: aws.String("not-json"),
-	}}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{
-		"type":      "aws_sm",
-		"secret_id": "arn:foo",
-		"json_key":  "api_key",
-	})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not valid JSON")
-}
-
-func TestAWSSMResolver_JSONKeyMissing(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
-		SecretString: aws.String(`{"other": "value"}`),
-	}}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{
-		"type":      "aws_sm",
-		"secret_id": "arn:foo",
-		"json_key":  "api_key",
-	})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
-}
-
-func TestAWSSMResolver_JSONKeyNonString(t *testing.T) {
-	client := &mockSMClient{out: &secretsmanager.GetSecretValueOutput{
-		SecretString: aws.String(`{"api_key": 123}`),
-	}}
-	r := newTestAWSSMResolver(client)
-	node := yamlNode(t, map[string]string{
-		"type":      "aws_sm",
-		"secret_id": "arn:foo",
-		"json_key":  "api_key",
-	})
-	_, err := r.Resolve(context.Background(), node)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not a string")
+func TestExtractJSONKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		key     string
+		want    string
+		errMsg  string
+	}{
+		{
+			name: "valid",
+			json: `{"key": "value", "other": "data"}`,
+			key:  "key",
+			want: "value",
+		},
+		{
+			name:   "invalid JSON",
+			json:   `not json`,
+			key:    "key",
+			errMsg: "not valid JSON",
+		},
+		{
+			name:   "missing key",
+			json:   `{"other": "value"}`,
+			key:    "key",
+			errMsg: "not found",
+		},
+		{
+			name:   "non-string value",
+			json:   `{"key": 42}`,
+			key:    "key",
+			errMsg: "not a string",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, err := extractJSONKey(tt.json, tt.key)
+			if tt.errMsg != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, val)
+			}
+		})
+	}
 }
 
 // --- cachedValue tests ---
@@ -251,10 +276,10 @@ func TestAWSSMResolver_JSONKeyNonString(t *testing.T) {
 func TestCachedValue_ServesStaleOnError(t *testing.T) {
 	calls := 0
 	cv := &cachedValue{
-		value:     "initial",
-		ttl:       1, // expired immediately
-		logger:    slog.Default(),
-		name:      "test",
+		value:  "initial",
+		ttl:    1, // expired immediately
+		logger: slog.Default(),
+		name:   "test",
 		refresh: func(_ context.Context) (string, error) {
 			calls++
 			return "", fmt.Errorf("aws error")
