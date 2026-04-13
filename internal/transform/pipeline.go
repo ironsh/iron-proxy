@@ -137,6 +137,11 @@ func forbiddenResponse(req *http.Request) *http.Response {
 	}
 }
 
+// AuditFunc returns the registered audit callback, or nil.
+func (p *Pipeline) AuditFunc() AuditFunc {
+	return p.onComplete
+}
+
 // BodyLimits returns the global body size limits.
 func (p *Pipeline) BodyLimits() BodyLimits {
 	return p.bodyLimits

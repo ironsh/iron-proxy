@@ -44,6 +44,9 @@ func main() {
 		}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	stateStore, err := resolveStateStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -59,20 +62,166 @@ func main() {
 	}
 	managed := cred != nil || bootstrapToken != ""
 
+	// Load config: from env vars in managed mode, from YAML file in standalone.
+	var cfg *config.Config
 	if managed {
-		runManaged(stateStore, bootstrapToken, cred)
+		cfg, err = config.FromEnv()
 	} else {
-		runStandalone()
+		cfg, err = loadStandaloneConfig()
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger, err := config.NewLogger(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Both modes produce a pipeline holder. Managed mode populates the
+	// initial transforms from the control plane and starts a poller that
+	// hot-reloads the pipeline.
+	bodyLimits := transform.BodyLimits{
+		MaxRequestBodyBytes:  cfg.Proxy.MaxRequestBodyBytes,
+		MaxResponseBodyBytes: cfg.Proxy.MaxResponseBodyBytes,
+	}
+
+	// errc collects fatal errors from all background goroutines: servers
+	// and (in managed mode) the config poller.
+	errc := make(chan error, 4)
+	var holder *transform.PipelineHolder
+
+	if managed {
+		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+	} else {
+		holder = initStandalone(cfg, bodyLimits, logger)
+	}
+
+	// Set up audit function.
+	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
+	var otelShutdown func(context.Context) error
+	if iotel.Enabled() {
+		otelProvider, otelErr := iotel.NewLoggerProvider(ctx)
+		if otelErr != nil {
+			logger.Error("initializing OTEL log provider", slog.String("error", otelErr.Error()))
+			os.Exit(1)
+		}
+		otelShutdown = otelProvider.Shutdown
+		auditFunc = transform.ChainAuditFuncs(auditFunc, transform.NewOTELAuditFunc(otelProvider))
+		logger.Info("OTEL audit export enabled")
+	}
+	holder.Load().SetAuditFunc(auditFunc)
+
+	// Initialize cert cache.
+	leafExpiry := time.Duration(cfg.TLS.LeafCertExpiryHours) * time.Hour
+	certCache, err := certcache.New(cfg.TLS.CACert, cfg.TLS.CAKey, cfg.TLS.CertCacheSize, leafExpiry)
+	if err != nil {
+		logger.Error("initializing cert cache", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	// Build upstream resolver.
+	resolver := net.DefaultResolver
+	if cfg.DNS.UpstreamResolver != "" {
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 5 * time.Second}
+				return d.DialContext(ctx, "udp", cfg.DNS.UpstreamResolver)
+			},
+		}
+		logger.Info("using upstream resolver", slog.String("addr", cfg.DNS.UpstreamResolver))
+	}
+
+	// Initialize DNS server.
+	dnsServer, err := idns.New(cfg.DNS, resolver, logger)
+	if err != nil {
+		logger.Error("initializing DNS server", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	// Initialize proxy.
+	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, holder, resolver, logger)
+
+	// Initialize metrics server.
+	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
+
+	// Start services.
+	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
+	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
+	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
+
+	startAttrs := []any{
+		slog.String("dns_listen", cfg.DNS.Listen),
+		slog.String("http_listen", cfg.Proxy.HTTPListen),
+		slog.String("https_listen", cfg.Proxy.HTTPSListen),
+		slog.String("metrics_listen", cfg.Metrics.Listen),
+	}
+	if cfg.Proxy.TunnelListen != "" {
+		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
+	}
+	logger.Info("iron-proxy starting", startAttrs...)
+	if pipeline := holder.Load(); !pipeline.Empty() {
+		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
+	}
+
+	// Wait for shutdown signal or fatal error from any background goroutine.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigc:
+		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
+	case err := <-errc:
+		logger.Error("fatal error", slog.String("error", err.Error()))
+	}
+
+	// Cancel context to stop the poller, then shut down services.
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if otelShutdown != nil {
+		if err := otelShutdown(shutdownCtx); err != nil {
+			logger.Error("shutting down OTEL log provider", slog.String("error", err.Error()))
+		}
+	}
+	if err := dnsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("dns shutdown error", slog.String("error", err.Error()))
+	}
+	if err := p.Shutdown(shutdownCtx); err != nil {
+		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
+	}
+
+	logger.Info("iron-proxy stopped")
 }
 
-func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential) {
+// loadStandaloneConfig parses the -config flag and loads the YAML config file.
+func loadStandaloneConfig() (*config.Config, error) {
+	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
+	flag.Parse()
+
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "error: -config flag is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	return config.LoadFile(*configPath)
+}
+
+// initManaged registers with the control plane, performs an initial sync, builds
+// the initial pipeline, and starts the config poller. The poller runs until ctx
+// is canceled and sends fatal errors on errc.
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) *transform.PipelineHolder {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	tags := parseTags(os.Getenv("IRON_TAGS"))
-
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
 	client := controlplane.NewClient(cpURL, logger)
@@ -80,13 +229,13 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	// Register if we don't have a credential yet.
 	if cred == nil {
 		logger.Info("registering with control plane")
-		var err error
-		cred, err = client.Register(context.Background(), bootstrapToken, controlplane.RegisterMetadata{
+		var regErr error
+		cred, regErr = client.Register(ctx, bootstrapToken, controlplane.RegisterMetadata{
 			Tags:    tags,
 			Version: version,
 		})
-		if err != nil {
-			logger.Error("registration failed", slog.String("error", err.Error()))
+		if regErr != nil {
+			logger.Error("registration failed", slog.String("error", regErr.Error()))
 			os.Exit(1)
 		}
 		logger.Info("registered successfully", slog.String("proxy_id", cred.ProxyID))
@@ -102,7 +251,7 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	client.SetCredential(cred)
 
 	// Initial sync.
-	syncResp, err := client.Sync(context.Background(), "")
+	syncResp, err := client.Sync(ctx, "")
 	if err != nil {
 		var apiErr *controlplane.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == controlplane.ErrProxyRevoked {
@@ -114,181 +263,62 @@ func runManaged(stateStore, bootstrapToken string, cred *controlplane.Credential
 	}
 
 	configHash := ""
+	var initialRules json.RawMessage
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
-		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 {
+		initialRules = syncResp.Rules
+		if len(syncResp.Rules) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
-				slog.Bool("has_rules", len(syncResp.Rules) > 0),
-				slog.Bool("has_secrets", len(syncResp.Secrets) > 0),
 			)
 		}
 	}
 
-	// Start poller in background.
-	pollerCtx, pollerCancel := context.WithCancel(context.Background())
-	defer pollerCancel()
+	// Build initial pipeline from sync response.
+	initialTransforms, err := config.TransformsFromSync(initialRules)
+	if err != nil {
+		logger.Error("parsing initial config", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
+	pipeline, err := buildPipeline(initialTransforms, bodyLimits, logger)
+	if err != nil {
+		logger.Error("building initial pipeline", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	holder := transform.NewPipelineHolder(pipeline)
+
+	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(rules json.RawMessage, secrets json.RawMessage) error {
-		logger.Info("config update callback invoked (wiring not yet implemented)")
+		newTransforms, err := config.TransformsFromSync(rules)
+		if err != nil {
+			return fmt.Errorf("parsing config update: %w", err)
+		}
+		newPipeline, err := buildPipeline(newTransforms, bodyLimits, logger)
+		if err != nil {
+			return fmt.Errorf("building updated pipeline: %w", err)
+		}
+		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
+		holder.Store(newPipeline)
+		logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
 		return nil
 	}, logger)
 
-	pollerErrC := make(chan error, 1)
 	go func() {
-		pollerErrC <- poller.Run(pollerCtx)
+		errc <- poller.Run(ctx)
 	}()
 
-	// Wait for shutdown signal or poller fatal error.
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case sig := <-sigc:
-		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
-	case err := <-pollerErrC:
-		if err != nil {
-			logger.Error("poller stopped with error", slog.String("error", err.Error()))
-		}
-	}
-
-	pollerCancel()
-	logger.Info("iron-proxy stopped")
+	return holder
 }
 
-func runStandalone() {
-	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
-	flag.Parse()
-
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "error: -config flag is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	cfg, err := config.LoadFile(*configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	logger, err := config.NewLogger(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Initialize cert cache
-	leafExpiry := time.Duration(cfg.TLS.LeafCertExpiryHours) * time.Hour
-	certCache, err := certcache.New(cfg.TLS.CACert, cfg.TLS.CAKey, cfg.TLS.CertCacheSize, leafExpiry)
-	if err != nil {
-		logger.Error("initializing cert cache", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-
-	// Build transform pipeline
-	bodyLimits := transform.BodyLimits{
-		MaxRequestBodyBytes:  cfg.Proxy.MaxRequestBodyBytes,
-		MaxResponseBodyBytes: cfg.Proxy.MaxResponseBodyBytes,
-	}
+// initStandalone builds the pipeline from the YAML config's transforms.
+func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger *slog.Logger) *transform.PipelineHolder {
 	pipeline, err := buildPipeline(cfg.Transforms, bodyLimits, logger)
 	if err != nil {
 		logger.Error("building transform pipeline", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
-	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
-	if iotel.Enabled() {
-		otelProvider, err := iotel.NewLoggerProvider(context.Background())
-		if err != nil {
-			logger.Error("initializing OTEL log provider", slog.String("error", err.Error()))
-			os.Exit(1)
-		}
-		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := otelProvider.Shutdown(ctx); err != nil {
-				logger.Error("shutting down OTEL log provider", slog.String("error", err.Error()))
-			}
-		}()
-		auditFunc = transform.ChainAuditFuncs(auditFunc, transform.NewOTELAuditFunc(otelProvider))
-		logger.Info("OTEL audit export enabled")
-	}
-	pipeline.SetAuditFunc(auditFunc)
-	holder := transform.NewPipelineHolder(pipeline)
-
-	// Build upstream resolver
-	resolver := net.DefaultResolver
-	if cfg.DNS.UpstreamResolver != "" {
-		resolver = &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{Timeout: 5 * time.Second}
-				return d.DialContext(ctx, "udp", cfg.DNS.UpstreamResolver)
-			},
-		}
-		logger.Info("using upstream resolver", slog.String("addr", cfg.DNS.UpstreamResolver))
-	}
-
-	// Initialize DNS server
-	dnsServer, err := idns.New(cfg.DNS, resolver, logger)
-	if err != nil {
-		logger.Error("initializing DNS server", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-
-	// Initialize proxy
-	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, holder, resolver, logger)
-
-	// Initialize metrics server
-	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
-
-	// Start services
-	errc := make(chan error, 3)
-
-	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
-	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
-	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
-
-	startAttrs := []any{
-		slog.String("dns_listen", cfg.DNS.Listen),
-		slog.String("http_listen", cfg.Proxy.HTTPListen),
-		slog.String("https_listen", cfg.Proxy.HTTPSListen),
-		slog.String("metrics_listen", cfg.Metrics.Listen),
-	}
-	if cfg.Proxy.TunnelListen != "" {
-		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
-	}
-	logger.Info("iron-proxy starting", startAttrs...)
-	if !pipeline.Empty() {
-		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
-	}
-
-	// Wait for shutdown signal or fatal error
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case sig := <-sigc:
-		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
-	case err := <-errc:
-		logger.Error("service error", slog.String("error", err.Error()))
-	}
-
-	// Graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := dnsServer.Shutdown(ctx); err != nil {
-		logger.Error("dns shutdown error", slog.String("error", err.Error()))
-	}
-	if err := p.Shutdown(ctx); err != nil {
-		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
-	}
-	if err := metricsServer.Shutdown(ctx); err != nil {
-		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
-	}
-
-	logger.Info("iron-proxy stopped")
+	return transform.NewPipelineHolder(pipeline)
 }
 
 func parseTags(s string) []string {
