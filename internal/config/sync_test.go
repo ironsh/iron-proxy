@@ -8,7 +8,7 @@ import (
 )
 
 func TestTransformsFromSync_RulesPresent(t *testing.T) {
-	rules := json.RawMessage(`{"domains": ["*.example.com"], "warn": true}`)
+	rules := json.RawMessage(`[{"host":"example.com","methods":["GET"],"paths":["/api/*"]}]`)
 
 	transforms, err := TransformsFromSync(rules)
 	require.NoError(t, err)
@@ -33,18 +33,40 @@ func TestTransformsFromSync_InvalidJSON(t *testing.T) {
 	require.ErrorContains(t, err, "parsing rules")
 }
 
-func TestTransformsFromSync_RoundTrip_Allowlist(t *testing.T) {
-	rules := json.RawMessage(`{"domains": ["*.example.com", "api.test.io"], "warn": false}`)
+func TestTransformsFromSync_RoundTrip(t *testing.T) {
+	rules := json.RawMessage(`[{"host":"*.example.com","methods":["GET","POST"],"paths":["/api/*"]},{"host":"api.test.io","methods":["*"],"paths":["*"]}]`)
 
 	transforms, err := TransformsFromSync(rules)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 
 	var decoded struct {
-		Domains []string `yaml:"domains"`
-		Warn    bool     `yaml:"warn"`
+		Rules []struct {
+			Host    string   `yaml:"host"`
+			Methods []string `yaml:"methods"`
+			Paths   []string `yaml:"paths"`
+		} `yaml:"rules"`
 	}
 	require.NoError(t, transforms[0].Config.Decode(&decoded))
-	require.Equal(t, []string{"*.example.com", "api.test.io"}, decoded.Domains)
-	require.False(t, decoded.Warn)
+	require.Len(t, decoded.Rules, 2)
+	require.Equal(t, "*.example.com", decoded.Rules[0].Host)
+	require.Equal(t, []string{"GET", "POST"}, decoded.Rules[0].Methods)
+	require.Equal(t, []string{"/api/*"}, decoded.Rules[0].Paths)
+	require.Equal(t, "api.test.io", decoded.Rules[1].Host)
+}
+
+func TestTransformsFromSync_EmptyRules(t *testing.T) {
+	rules := json.RawMessage(`[]`)
+
+	transforms, err := TransformsFromSync(rules)
+	require.NoError(t, err)
+	require.Len(t, transforms, 1)
+
+	var decoded struct {
+		Rules []struct {
+			Host string `yaml:"host"`
+		} `yaml:"rules"`
+	}
+	require.NoError(t, transforms[0].Config.Decode(&decoded))
+	require.Empty(t, decoded.Rules)
 }
