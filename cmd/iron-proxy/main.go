@@ -47,7 +47,11 @@ func main() {
 	stateStore := envOrDefault("IRON_STATE_STORE", "/etc/iron-proxy/state")
 	bootstrapToken := os.Getenv("IRON_BOOTSTRAP_TOKEN")
 
-	cred, _ := controlplane.LoadCredential(stateStore)
+	cred, err := controlplane.LoadCredential(stateStore)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "error: loading credential: %v\n", err)
+		os.Exit(1)
+	}
 	managed := cred != nil || bootstrapToken != ""
 
 	if managed {
