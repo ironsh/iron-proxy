@@ -2,9 +2,9 @@ package controlplane
 
 import (
 	"context"
-	"math"
-	"math/rand/v2"
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
 )
 
 // RetryConfig controls exponential backoff behavior.
@@ -12,7 +12,7 @@ type RetryConfig struct {
 	MaxAttempts int           // 0 means unlimited
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration
-	Jitter      float64 // fraction of delay to add/subtract, e.g. 0.1 = ±10%
+	Jitter      float64 // randomization factor, e.g. 0.1 = ±10%
 }
 
 // DefaultRegisterRetry is the retry config for registration calls.
@@ -34,42 +34,30 @@ var DefaultSyncRetry = RetryConfig{
 // Retry executes fn with exponential backoff. It stops when fn returns nil,
 // the context is canceled, MaxAttempts is reached, or fn returns a non-retryable APIError.
 func Retry(ctx context.Context, cfg RetryConfig, fn func() error) error {
-	for attempt := 0; ; attempt++ {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = cfg.BaseDelay
+	b.MaxInterval = cfg.MaxDelay
+	b.RandomizationFactor = cfg.Jitter
+	b.Multiplier = 2
+
+	opts := []backoff.RetryOption{
+		backoff.WithBackOff(b),
+		backoff.WithMaxElapsedTime(0),
+	}
+	if cfg.MaxAttempts > 0 {
+		opts = append(opts, backoff.WithMaxTries(uint(cfg.MaxAttempts)))
+	}
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
 		err := fn()
 		if err == nil {
-			return nil
+			return struct{}{}, nil
 		}
-
 		if apiErr, ok := err.(*APIError); ok && !apiErr.IsRetryable() {
-			return err
+			return struct{}{}, backoff.Permanent(err)
 		}
+		return struct{}{}, err
+	}, opts...)
 
-		if cfg.MaxAttempts > 0 && attempt+1 >= cfg.MaxAttempts {
-			return err
-		}
-
-		delay := backoffDelay(cfg, attempt)
-
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func backoffDelay(cfg RetryConfig, attempt int) time.Duration {
-	delay := float64(cfg.BaseDelay) * math.Pow(2, float64(attempt))
-	if delay > float64(cfg.MaxDelay) {
-		delay = float64(cfg.MaxDelay)
-	}
-
-	if cfg.Jitter > 0 {
-		jitter := delay * cfg.Jitter
-		delay += (rand.Float64()*2 - 1) * jitter
-	}
-
-	return time.Duration(delay)
+	return err
 }

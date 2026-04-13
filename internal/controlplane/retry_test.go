@@ -89,31 +89,3 @@ func TestRetryContextCanceled(t *testing.T) {
 	})
 	require.ErrorIs(t, err, context.Canceled)
 }
-
-func TestBackoffDelay(t *testing.T) {
-	cfg := RetryConfig{
-		BaseDelay: 1 * time.Second,
-		MaxDelay:  30 * time.Second,
-		Jitter:    0,
-	}
-
-	require.Equal(t, 1*time.Second, backoffDelay(cfg, 0))
-	require.Equal(t, 2*time.Second, backoffDelay(cfg, 1))
-	require.Equal(t, 4*time.Second, backoffDelay(cfg, 2))
-	require.Equal(t, 8*time.Second, backoffDelay(cfg, 3))
-	require.Equal(t, 16*time.Second, backoffDelay(cfg, 4))
-	require.Equal(t, 30*time.Second, backoffDelay(cfg, 5)) // capped
-}
-
-func TestBackoffDelayWithJitter(t *testing.T) {
-	cfg := RetryConfig{
-		BaseDelay: 10 * time.Second,
-		MaxDelay:  60 * time.Second,
-		Jitter:    0.1,
-	}
-
-	for i := 0; i < 100; i++ {
-		d := backoffDelay(cfg, 0)
-		require.InDelta(t, float64(10*time.Second), float64(d), float64(1*time.Second)+1)
-	}
-}
