@@ -10,7 +10,7 @@ import (
 )
 
 // PollInterval is the base interval between sync calls.
-const PollInterval = 30 * time.Second
+const PollInterval = 5 * time.Second
 
 // Poller periodically calls Sync and applies config updates.
 type Poller struct {
