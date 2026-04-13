@@ -68,7 +68,7 @@ func CompileRules(configs []RuleConfig, resolver Resolver, prefix string) ([]Rul
 		}
 
 		r := Rule{Matcher: m}
-		if len(rc.Methods) > 0 {
+		if !isWildcard(rc.Methods) {
 			r.Methods = make(map[string]bool, len(rc.Methods))
 			for _, method := range rc.Methods {
 				r.Methods[strings.ToUpper(method)] = true
@@ -81,6 +81,10 @@ func CompileRules(configs []RuleConfig, resolver Resolver, prefix string) ([]Rul
 		rules = append(rules, r)
 	}
 	return rules, nil
+}
+
+func isWildcard(methods []string) bool {
+	return len(methods) == 0 || (len(methods) == 1 && methods[0] == "*")
 }
 
 // MatchAnyRule returns true if the request matches any rule in the list.
