@@ -69,6 +69,27 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
 fi
 echo "Checksum verified."
 
+# Verify GPG signature if gpg is available
+if command -v gpg &>/dev/null; then
+    echo "Verifying GPG signature..."
+    SIGNATURE_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt.asc"
+    if curl -fsSL -o "${TMPDIR}/checksums.txt.asc" "$SIGNATURE_URL" 2>/dev/null; then
+        # Import the iron-proxy public key
+        PUBLIC_KEY_URL="https://raw.githubusercontent.com/${REPO}/main/public-key.asc"
+        curl -fsSL "$PUBLIC_KEY_URL" | gpg --batch --import 2>/dev/null
+        if gpg --batch --verify "${TMPDIR}/checksums.txt.asc" "${TMPDIR}/checksums.txt" 2>/dev/null; then
+            echo "GPG signature verified."
+        else
+            echo "Error: GPG signature verification failed" >&2
+            exit 1
+        fi
+    else
+        echo "Warning: no GPG signature found for this release, skipping verification."
+    fi
+else
+    echo "Note: gpg not found, skipping signature verification."
+fi
+
 echo "Extracting..."
 tar -xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
 
