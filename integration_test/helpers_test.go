@@ -42,7 +42,7 @@ func startProxy(t *testing.T, binary, cfgPath string, env []string) *proxyInstan
 	t.Cleanup(func() {
 		cancel()
 		_ = cmd.Wait()
-		stderrW.Close()
+		_ = stderrW.Close()
 	})
 
 	// Tee stderr to os.Stderr so all log lines are visible while we scan

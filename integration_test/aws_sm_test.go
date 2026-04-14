@@ -37,7 +37,8 @@ func TestAWSSecretsManager(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		io.Copy(io.Discard, resp.Body)
+		_, err = io.Copy(io.Discard, resp.Body)
+		require.NoError(t, err)
 
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Equal(t, "example-value", resp.Header.Get("X-Got-Raw-Secret"))
@@ -52,7 +53,8 @@ func TestAWSSecretsManager(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		io.Copy(io.Discard, resp.Body)
+		_, err = io.Copy(io.Discard, resp.Body)
+		require.NoError(t, err)
 
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Equal(t, "example-value", resp.Header.Get("X-Got-KV-Secret"))
