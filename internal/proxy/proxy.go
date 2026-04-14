@@ -70,8 +70,13 @@ func (p *Proxy) ListenAndServe() error {
 	errc := make(chan error, n)
 
 	go func() {
-		p.logger.Info("http proxy starting", slog.String("addr", p.httpServer.Addr))
-		errc <- fmt.Errorf("http: %w", p.httpServer.ListenAndServe())
+		ln, err := net.Listen("tcp", p.httpServer.Addr)
+		if err != nil {
+			errc <- fmt.Errorf("http listen: %w", err)
+			return
+		}
+		p.logger.Info("http proxy starting", slog.String("addr", ln.Addr().String()))
+		errc <- fmt.Errorf("http: %w", p.httpServer.Serve(ln))
 	}()
 
 	go func() {

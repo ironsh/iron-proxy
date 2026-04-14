@@ -13,3 +13,5 @@
 
 # Test
 coverage.out
+/tmp/*
+!/tmp/.keep
