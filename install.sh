@@ -44,8 +44,30 @@ URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+
 echo "Downloading iron-proxy ${VERSION} for ${OS}/${ARCH}..."
 curl -fsSL -o "${TMPDIR}/${ARCHIVE}" "$URL"
+curl -fsSL -o "${TMPDIR}/checksums.txt" "$CHECKSUMS_URL"
+
+echo "Verifying checksum..."
+EXPECTED="$(grep "${ARCHIVE}" "${TMPDIR}/checksums.txt" | awk '{print $1}')"
+if [ -z "$EXPECTED" ]; then
+    echo "Error: no checksum found for ${ARCHIVE}" >&2
+    exit 1
+fi
+if command -v sha256sum &>/dev/null; then
+    ACTUAL="$(sha256sum "${TMPDIR}/${ARCHIVE}" | awk '{print $1}')"
+else
+    ACTUAL="$(shasum -a 256 "${TMPDIR}/${ARCHIVE}" | awk '{print $1}')"
+fi
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Error: checksum mismatch" >&2
+    echo "  expected: ${EXPECTED}" >&2
+    echo "  actual:   ${ACTUAL}" >&2
+    exit 1
+fi
+echo "Checksum verified."
 
 echo "Extracting..."
 tar -xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
