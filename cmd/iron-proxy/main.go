@@ -84,8 +84,8 @@ func main() {
 	}
 	cred, credErr := controlplane.LoadCredential(stateStore)
 	if credErr != nil && !errors.Is(credErr, os.ErrNotExist) {
-		logger.Error("loading credential", slog.String("error", credErr.Error()))
-		os.Exit(1)
+		logger.Warn("could not load credential, ignoring", slog.String("error", credErr.Error()))
+		cred = nil
 	}
 	managed := bootstrapToken != "" || cred != nil
 
