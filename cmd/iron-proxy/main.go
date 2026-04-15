@@ -61,12 +61,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	stateStore, err := resolveStateStore()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
 	logger, err := config.NewLogger(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -95,6 +89,11 @@ func main() {
 	var holder *transform.PipelineHolder
 
 	if managed {
+		stateStore, stateErr := resolveStateStore()
+		if stateErr != nil {
+			logger.Error("resolving state store", slog.String("error", stateErr.Error()))
+			os.Exit(1)
+		}
 		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, logger)
 	} else {
 		holder = initStandalone(cfg, bodyLimits, logger)
