@@ -1,0 +1,45 @@
+dns:
+  proxy_ip: "127.0.0.1"
+  listen: "127.0.0.1:0"
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  max_request_body_bytes: 1048576
+
+tls:
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
+
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "127.0.0.1"
+
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: aws_ssm
+            name: "/ironsh/exmaple-raw-param"
+            region: "us-west-1"
+            with_decryption: true
+          proxy_value: "proxy-raw-param"
+          match_headers: ["X-Raw-Param"]
+          rules:
+            - host: "127.0.0.1"
+
+        - source:
+            type: aws_ssm
+            name: "/ironsh/example-json-param"
+            region: "us-west-1"
+            with_decryption: true
+            json_key: "example_key"
+          proxy_value: "proxy-json-param"
+          match_headers: ["X-JSON-Param"]
+          rules:
+            - host: "127.0.0.1"
+
+metrics:
+  listen: "127.0.0.1:0"
