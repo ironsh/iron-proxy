@@ -41,6 +41,9 @@ func main() {
 		case "generate-ca":
 			runGenerateCA(os.Args[2:])
 			return
+		case "init":
+			runInit(os.Args[2:])
+			return
 		}
 	}
 
