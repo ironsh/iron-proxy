@@ -125,6 +125,20 @@ transforms:
         #   rules:
         #     - host: "api.example.com"
 
+        # Replace mode with AWS Systems Manager Parameter Store:
+        # - source:
+        #     type: aws_ssm
+        #     name: "/myapp/api-key"           # parameter name or ARN
+        #     region: "us-east-1"              # optional, falls back to AWS SDK default
+        #     with_decryption: true            # optional, defaults to true for SecureString params
+        #     json_key: "api_key"              # optional, extract a field from a JSON value
+        #     ttl: "15m"                       # optional, re-fetch interval; 0 = no refresh
+        #   replace:
+        #     proxy_value: "proxy-token-789"
+        #     match_headers: ["Authorization"]
+        #   rules:
+        #     - host: "api.example.com"
+
         # Legacy replace mode (top-level fields, still supported):
         # - source:
         #     type: env

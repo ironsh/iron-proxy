@@ -311,9 +311,10 @@ transforms:
 
 The sandbox never holds real credentials. Instead:
 
-1. Set real secrets as environment variables on the iron-proxy container.
+1. Configure iron-proxy with the real secret source: environment variables,
+   AWS Secrets Manager, or AWS Systems Manager Parameter Store.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
-3. Configure the `secrets` transform to map proxy tokens to env vars.
+3. Configure the `secrets` transform to map proxy tokens to those sources.
 
 iron-proxy scans outbound requests and replaces proxy tokens with the real
 values before forwarding upstream. You control where it looks:
@@ -326,6 +327,16 @@ values before forwarding upstream. You control where it looks:
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
+
+Secret sources:
+
+- **`env`:** reads `var` from the proxy process environment.
+- **`aws_sm`:** reads `secret_id` from AWS Secrets Manager. Optional `region`,
+  `json_key`, and `ttl` are supported.
+- **`aws_ssm`:** reads `name` from AWS Systems Manager Parameter Store. Optional
+  `region`, `with_decryption`, `json_key`, and `ttl` are supported.
+  `with_decryption` defaults to `true`, which is the expected setting for
+  `SecureString` parameters.
 
 ### Body limits
 

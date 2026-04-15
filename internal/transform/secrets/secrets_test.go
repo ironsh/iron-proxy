@@ -15,6 +15,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
@@ -28,7 +30,7 @@ type fakeResolver struct {
 }
 
 func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
-	// Try env config first, then aws_sm config.
+	// Try env config first, then AWS-backed configs.
 	var env envConfig
 	if err := raw.Decode(&env); err == nil && env.Var != "" {
 		val, ok := f.secrets[env.Var]
@@ -44,6 +46,14 @@ func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult,
 			return ResolveResult{}, &resolveError{sm.SecretID}
 		}
 		return ResolveResult{Name: sm.SecretID, GetValue: staticValue(val)}, nil
+	}
+	var ssm awsSSMConfig
+	if err := raw.Decode(&ssm); err == nil && ssm.Name != "" {
+		val, ok := f.secrets[ssm.Name]
+		if !ok || val == "" {
+			return ResolveResult{}, &resolveError{ssm.Name}
+		}
+		return ResolveResult{Name: ssm.Name, GetValue: staticValue(val)}, nil
 	}
 	return ResolveResult{}, &resolveError{"unknown"}
 }
@@ -62,6 +72,9 @@ func testRegistry() resolverRegistry {
 		"aws_sm": &fakeResolver{secrets: map[string]string{
 			"arn:aws:sm:test": "aws-secret-value",
 		}},
+		"aws_ssm": &fakeResolver{secrets: map[string]string{
+			"/myapp/api-key": "ssm-secret-value",
+		}},
 	}
 }
 
@@ -71,6 +84,10 @@ func envSource(varName string) yaml.Node {
 
 func awsSMSource(secretID string) yaml.Node {
 	return yamlNode(&testing.T{}, map[string]string{"type": "aws_sm", "secret_id": secretID})
+}
+
+func awsSSMSource(name string) yaml.Node {
+	return yamlNode(&testing.T{}, map[string]string{"type": "aws_ssm", "name": name})
 }
 
 // defaultEntry returns the most common secretEntry used across tests.
@@ -559,29 +576,34 @@ func TestSecrets_MixedSourceTypes(t *testing.T) {
 			e.ProxyValue = "proxy-aws-tok"
 			e.MatchHeaders = []string{"X-Api-Key"}
 		}),
+		defaultEntry(func(e *secretEntry) {
+			e.Source = awsSSMSource("/myapp/api-key")
+			e.ProxyValue = "proxy-ssm-tok"
+			e.MatchHeaders = []string{"X-SSM-Key"}
+		}),
 	})
 
 	req := openaiReq("GET", "/v1/chat")
 	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
 	req.Header.Set("X-Api-Key", "proxy-aws-tok")
+	req.Header.Set("X-SSM-Key", "proxy-ssm-tok")
 
 	doTransform(t, s, req)
 
 	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
 	require.Equal(t, "aws-secret-value", req.Header.Get("X-Api-Key"))
+	require.Equal(t, "ssm-secret-value", req.Header.Get("X-SSM-Key"))
 }
 
 // --- End-to-end tests with real awsSMResolver and mock AWS client ---
 
 func awsSMRegistry(client smClient) resolverRegistry {
-	r := &awsSMResolver{
-		clients: make(map[string]smClient),
-		logger:  slog.Default(),
-	}
-	r.clientFor = func(_ context.Context, _ string) (smClient, error) {
-		return client, nil
-	}
-	return resolverRegistry{"aws_sm": r}
+	return resolverRegistry{"aws_sm": &awsSMResolver{
+		clientFor: func(_ context.Context, _ string) (smClient, error) {
+			return client, nil
+		},
+		logger: slog.Default(),
+	}}
 }
 
 func makeAWSSMSecrets(t *testing.T, client smClient, entries []secretEntry) *Secrets {
@@ -644,10 +666,10 @@ func TestAWSSM_EndToEnd_BodySwap(t *testing.T) {
 	}, nil)
 
 	s := makeAWSSMSecrets(t, client, []secretEntry{{
-		Source:    yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:test"}),
+		Source:     yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:test"}),
 		ProxyValue: "proxy-tok",
-		MatchBody: true,
-		Rules:     []hostmatch.RuleConfig{{Host: "api.example.com"}},
+		MatchBody:  true,
+		Rules:      []hostmatch.RuleConfig{{Host: "api.example.com"}},
 	}})
 
 	body := `{"key": "proxy-tok"}`
@@ -767,6 +789,57 @@ func TestAWSSM_EndToEnd_RequireRejectsWithoutToken(t *testing.T) {
 	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+// --- End-to-end tests with real awsSSMResolver and mock AWS client ---
+
+func awsSSMRegistry(client ssmClient) resolverRegistry {
+	return resolverRegistry{"aws_ssm": &awsSSMResolver{
+		clientFor: func(_ context.Context, _ string) (ssmClient, error) {
+			return client, nil
+		},
+		logger: slog.Default(),
+	}}
+}
+
+func makeAWSSSMSecrets(t *testing.T, client ssmClient, entries []secretEntry) *Secrets {
+	t.Helper()
+	cfg := secretsConfig{Secrets: entries}
+	s, err := newFromConfig(context.Background(), cfg, awsSSMRegistry(client))
+	require.NoError(t, err)
+	return s
+}
+
+func TestAWSSSM_EndToEnd_JSONKeyHeaderSwap(t *testing.T) {
+	client := &mockSSMClient{fn: func(_ context.Context, input *ssm.GetParameterInput) (*ssm.GetParameterOutput, error) {
+		require.Equal(t, "/myapp/api-key", aws.ToString(input.Name))
+		require.True(t, aws.ToBool(input.WithDecryption))
+		return &ssm.GetParameterOutput{
+			Parameter: &ssmtypes.Parameter{Value: aws.String(`{"api_key":"sk-from-ssm"}`)},
+		}, nil
+	}}
+
+	s := makeAWSSSMSecrets(t, client, []secretEntry{{
+		Source: yamlNode(t, map[string]string{
+			"type":     "aws_ssm",
+			"name":     "/myapp/api-key",
+			"region":   "us-east-1",
+			"json_key": "api_key",
+			"ttl":      "15m",
+		}),
+		Replace: &replaceConfig{
+			ProxyValue:   "proxy-token-789",
+			MatchHeaders: []string{"Authorization"},
+		},
+		Rules: []hostmatch.RuleConfig{{Host: "api.example.com"}},
+	}})
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1/data", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-token-789")
+
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer sk-from-ssm", req.Header.Get("Authorization"))
 }
 
 // --- Inject mode tests ---

@@ -98,8 +98,9 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 		return nil, fmt.Errorf("parsing secrets config: %w", err)
 	}
 	registry := resolverRegistry{
-		"env":    newEnvResolver(),
-		"aws_sm": newAWSSMResolver(logger),
+		"env":     newEnvResolver(),
+		"aws_sm":  newAWSSMResolver(logger),
+		"aws_ssm": newAWSSSMResolver(logger),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -33,3 +33,4 @@ domains:
 
   # AWS (for integration tests)
   - "secretsmanager.us-west-1.amazonaws.com"
+  - "ssm.us-east-1.amazonaws.com"
