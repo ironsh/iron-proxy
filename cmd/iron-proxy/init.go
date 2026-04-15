@@ -56,8 +56,10 @@ func runInit(args []string) {
 	// 1. Generate CA certificate and key.
 	if *force {
 		// Remove existing files so cagen.WriteFiles doesn't refuse.
-		os.Remove(certPath)
-		os.Remove(keyPath)
+		// Errors are ignored: the files may not exist, and any real
+		// permission issue will surface in cagen.WriteFiles.
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyPath)
 	}
 
 	result, err := cagen.Generate(cagen.Options{
@@ -303,7 +305,7 @@ Next steps:
   Config reference             https://docs.iron.sh/reference/configuration
   Enable secret proxying       https://docs.iron.sh/reference/secret-proxying
   Production deployment        https://docs.iron.sh/reference/deployment-methods
-`, tunnelPort, configDir, tunnelPort, configDir, tunnelPort, configDir)
+`, tunnelPort, configDir, tunnelPort, configDir, tunnelPort)
 }
 
 func printSuccessBackground(configDir, tunnelPort string, pid int) {
@@ -331,7 +333,7 @@ Next steps:
   Config reference             https://docs.iron.sh/reference/configuration
   Enable secret proxying       https://docs.iron.sh/reference/secret-proxying
   Production deployment        https://docs.iron.sh/reference/deployment-methods
-`, configDir, tunnelPort, configDir, tunnelPort, configDir, configDir)
+`, configDir, tunnelPort, configDir, tunnelPort, configDir)
 }
 
 func printSuccessNoStart(configDir, tunnelPort string) {

@@ -147,7 +147,7 @@ func TestInit(t *testing.T) {
 		// Local upstream that echoes 200 OK.
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintln(w, "ok")
+			_, _ = fmt.Fprintln(w, "ok")
 		}))
 		defer upstream.Close()
 		upstreamHost := upstream.Listener.Addr().String()
