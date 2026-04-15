@@ -22,7 +22,7 @@ transforms:
       secrets:
         - source:
             type: aws_ssm
-            name: "/ironsh/exmaple-raw-param"
+            name: "/ironsh/example-raw-param"
             region: "us-west-1"
             with_decryption: true
           proxy_value: "proxy-raw-param"
