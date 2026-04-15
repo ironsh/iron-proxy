@@ -17,6 +17,25 @@ tls:
 `
 }
 
+func TestParse_NoDefaultsOrValidation(t *testing.T) {
+	// parse should not apply defaults or validate.
+	yaml := `
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+	cfg, err := parse(strings.NewReader(yaml))
+	require.NoError(t, err)
+
+	// dns.proxy_ip is missing but parse should not error.
+	require.Equal(t, "", cfg.DNS.ProxyIP)
+
+	// Defaults should not be applied.
+	require.Equal(t, "", cfg.DNS.Listen)
+	require.Equal(t, "", cfg.Proxy.HTTPListen)
+	require.Equal(t, "", cfg.Log.Level)
+}
+
 func TestLoad_ValidConfig(t *testing.T) {
 	cfg, err := Load(strings.NewReader(validYAML()))
 	require.NoError(t, err)

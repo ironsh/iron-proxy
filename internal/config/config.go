@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"io"
-	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -69,39 +68,53 @@ type Log struct {
 	Level string `yaml:"level"`
 }
 
-// LoadFile reads and parses a YAML config from the given path. If the path is
-// an S3 URL (s3://bucket/key), the config is fetched from S3 using the default
-// AWS credential chain.
-func LoadFile(path string) (*Config, error) {
-	return loadFileOrS3(path)
-}
-
-// loadFromFile reads and parses a YAML config file from a local filesystem path.
-func loadFromFile(path string) (*Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("opening config file: %w", err)
+// LoadConfig is the primary entry point for building a Config. It parses an
+// optional YAML config file, layers in IRON_* environment variable overrides,
+// and applies defaults. If path is empty, the config is built entirely from
+// environment variables and defaults.
+//
+// Validation is intentionally not performed here so that callers can populate
+// additional fields (e.g. from a control plane sync) before calling Validate.
+func LoadConfig(path string) (*Config, error) {
+	var cfg Config
+	if path != "" {
+		parsed, err := parseFileOrS3(path)
+		if err != nil {
+			return nil, err
+		}
+		cfg = *parsed
 	}
-	defer f.Close()
 
-	return Load(f)
+	if err := applyEnvOverrides(&cfg); err != nil {
+		return nil, err
+	}
+
+	applyDefaults(&cfg)
+
+	return &cfg, nil
 }
 
-// Load parses a YAML config from the given reader and applies defaults.
+// Load parses a YAML config from the given reader, applies defaults, and
+// validates. This is a convenience for tests and standalone readers.
 func Load(r io.Reader) (*Config, error) {
+	cfg, err := parse(r)
+	if err != nil {
+		return nil, err
+	}
+	applyDefaults(cfg)
+	if err := Validate(cfg); err != nil {
+		return nil, fmt.Errorf("validating config: %w", err)
+	}
+	return cfg, nil
+}
+
+func parse(r io.Reader) (*Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
-
-	applyDefaults(&cfg)
-
-	if err := validate(&cfg); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
 	return &cfg, nil
 }
 
@@ -133,7 +146,8 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-func validate(cfg *Config) error {
+// Validate checks required fields and value constraints.
+func Validate(cfg *Config) error {
 	if cfg.DNS.ProxyIP == "" {
 		return fmt.Errorf("dns.proxy_ip is required")
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -22,9 +23,9 @@ func parseS3URL(url string) (bucket, key string, err error) {
 	return rest[:idx], rest[idx+1:], nil
 }
 
-// loadS3 fetches a config file from S3 and parses it. It uses the default
-// AWS credential chain (env vars, shared config, IAM role, etc.).
-func loadS3(ctx context.Context, rawURL string) (*Config, error) {
+// parseS3 fetches a config file from S3 and parses it without applying defaults
+// or validation. It uses the default AWS credential chain.
+func parseS3(ctx context.Context, rawURL string) (*Config, error) {
 	bucket, key, err := parseS3URL(rawURL)
 	if err != nil {
 		return nil, err
@@ -45,15 +46,23 @@ func loadS3(ctx context.Context, rawURL string) (*Config, error) {
 	}
 	defer out.Body.Close()
 
-	return Load(out.Body)
+	return parse(out.Body)
 }
 
-// loadFileOrS3 loads a config from a local file path or an S3 URL.
-func loadFileOrS3(path string) (*Config, error) {
+// parseFileOrS3 parses a config from a local file path or an S3 URL without
+// applying defaults or validation.
+func parseFileOrS3(path string) (*Config, error) {
 	if strings.HasPrefix(path, "s3://") {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return loadS3(ctx, path)
+		return parseS3(ctx, path)
 	}
-	return loadFromFile(path)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening config file: %w", err)
+	}
+	defer f.Close()
+
+	return parse(f)
 }

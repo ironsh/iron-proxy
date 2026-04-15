@@ -26,6 +26,7 @@ func runInit(args []string) {
 	configDir := fs.String("config-dir", defaultConfigDir, "directory for config, CA cert, and CA key")
 	tunnelPort := fs.String("tunnel-port", defaultTunnelPort, "port for the CONNECT/SOCKS5 tunnel listener")
 	allow := fs.String("allow", defaultAllowList, "comma-separated domains for the initial allowlist")
+	bootstrapToken := fs.String("bootstrap-token", "", "bootstrap token for control plane registration (managed mode)")
 	noStart := fs.Bool("no-start", false, "generate config and unit file but don't start the service")
 	force := fs.Bool("force", false, "overwrite existing config and CA")
 	if err := fs.Parse(args); err != nil {
@@ -78,8 +79,14 @@ func runInit(args []string) {
 	}
 
 	// 2. Write default config.
-	domains := parseDomainList(*allow)
-	configYAML := generateConfig(*configDir, *tunnelPort, domains)
+	managedMode := *bootstrapToken != ""
+	var configYAML string
+	if managedMode {
+		configYAML = generateManagedConfig(*configDir, *tunnelPort)
+	} else {
+		domains := parseDomainList(*allow)
+		configYAML = generateConfig(*configDir, *tunnelPort, domains)
+	}
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
 		os.Exit(1)
@@ -90,7 +97,7 @@ func runInit(args []string) {
 
 	hasSystemd := hasSystemd()
 	if hasSystemd {
-		unitContent := generateSystemdUnit(execPath, configPath)
+		unitContent := generateSystemdUnit(execPath, configPath, *bootstrapToken)
 		unitPath := "/etc/systemd/system/iron-proxy.service"
 		if err := os.WriteFile(unitPath, []byte(unitContent), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing systemd unit: %v\n", err)
@@ -120,7 +127,11 @@ func runInit(args []string) {
 			}
 		}
 
-		printSuccessSystemd(*configDir, *tunnelPort, *noStart)
+		if managedMode {
+			printSuccessManagedSystemd(*configDir, *tunnelPort, *noStart)
+		} else {
+			printSuccessSystemd(*configDir, *tunnelPort, *noStart)
+		}
 	} else {
 		// Non-systemd fallback: start as a background process.
 		if *noStart {
@@ -128,7 +139,7 @@ func runInit(args []string) {
 			return
 		}
 
-		pid, err := startBackground(execPath, configPath)
+		pid, err := startBackground(execPath, configPath, *bootstrapToken)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error starting iron-proxy: %v\n", err)
 			os.Exit(1)
@@ -156,6 +167,23 @@ func parseDomainList(s string) []string {
 	return domains
 }
 
+// generateManagedConfig produces a YAML config for managed mode. It omits the
+// transforms section since transforms come from the control plane.
+func generateManagedConfig(configDir, tunnelPort string) string {
+	return fmt.Sprintf(`proxy:
+  http_listen: ":8080"
+  https_listen: ":8443"
+  tunnel_listen: ":%s"
+
+tls:
+  ca_cert: "%s/ca.crt"
+  ca_key: "%s/ca.key"
+
+log:
+  level: "info"
+`, tunnelPort, configDir, configDir)
+}
+
 func generateConfig(configDir, tunnelPort string, domains []string) string {
 	var domainLines string
 	for _, d := range domains {
@@ -181,7 +209,12 @@ log:
 `, tunnelPort, configDir, configDir, domainLines)
 }
 
-func generateSystemdUnit(execPath, configPath string) string {
+func generateSystemdUnit(execPath, configPath, bootstrapToken string) string {
+	var envLine string
+	if bootstrapToken != "" {
+		envLine = fmt.Sprintf("Environment=IRON_BOOTSTRAP_TOKEN=%s\n", bootstrapToken)
+	}
+
 	return fmt.Sprintf(`[Unit]
 Description=iron-proxy egress firewall
 After=network-online.target
@@ -192,13 +225,12 @@ Type=simple
 ExecStart=%s -config %s
 Restart=on-failure
 RestartSec=5
-EnvironmentFile=-/etc/iron-proxy/env
-StandardOutput=append:/var/log/iron-proxy.log
+%sStandardOutput=append:/var/log/iron-proxy.log
 StandardError=append:/var/log/iron-proxy.log
 
 [Install]
 WantedBy=multi-user.target
-`, execPath, configPath)
+`, execPath, configPath, envLine)
 }
 
 func resolveExecPath() string {
@@ -255,7 +287,7 @@ func printLogTail() {
 	}
 }
 
-func startBackground(execPath, configPath string) (int, error) {
+func startBackground(execPath, configPath, bootstrapToken string) (int, error) {
 	logFile, err := os.OpenFile(defaultLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("opening log file: %w", err)
@@ -266,6 +298,10 @@ func startBackground(execPath, configPath string) (int, error) {
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
+	if bootstrapToken != "" {
+		cmd.Env = append(os.Environ(), "IRON_BOOTSTRAP_TOKEN="+bootstrapToken)
+	}
+
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return 0, fmt.Errorf("starting process: %w", err)
@@ -275,6 +311,30 @@ func startBackground(execPath, configPath string) (int, error) {
 	logFile.Close()
 
 	return cmd.Process.Pid, nil
+}
+
+func printSuccessManagedSystemd(configDir, tunnelPort string, noStart bool) {
+	fmt.Printf("✓ Generated CA certificate     %s/ca.crt\n", configDir)
+	fmt.Printf("✓ Wrote config                 %s/proxy.yaml\n", configDir)
+	if noStart {
+		fmt.Println("✓ Installed systemd unit       systemctl start iron-proxy")
+	} else {
+		fmt.Println("✓ Started iron-proxy service   systemctl status iron-proxy")
+	}
+
+	fmt.Printf(`
+iron-proxy is configured in managed mode (control plane).
+
+Transforms and rules will be fetched from the control plane.
+
+  # View audit logs
+  tail -f /var/log/iron-proxy.log
+
+Next steps:
+
+  Config reference             https://docs.iron.sh/reference/configuration
+  Control plane dashboard      https://app.iron.sh
+`)
 }
 
 func printSuccessSystemd(configDir, tunnelPort string, noStart bool) {
