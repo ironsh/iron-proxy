@@ -82,12 +82,12 @@ func runInit(args []string) {
 
 	// 2. Write default config.
 	managedMode := *bootstrapToken != ""
-	tagList := parseDomainList(*tags)
+	tagList := splitCommaList(*tags)
 	var configYAML string
 	if managedMode {
 		configYAML = generateManagedConfig(*configDir, *tunnelPort, *proxyIP, tagList)
 	} else {
-		domains := parseDomainList(*allow)
+		domains := splitCommaList(*allow)
 		configYAML = generateConfig(*configDir, *tunnelPort, *proxyIP, domains, tagList)
 	}
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
@@ -158,16 +158,16 @@ func runInit(args []string) {
 	}
 }
 
-func parseDomainList(s string) []string {
+func splitCommaList(s string) []string {
 	parts := strings.Split(s, ",")
-	domains := make([]string, 0, len(parts))
+	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p != "" {
-			domains = append(domains, p)
+			out = append(out, p)
 		}
 	}
-	return domains
+	return out
 }
 
 // generateManagedConfig produces a YAML config for managed mode. It omits the
