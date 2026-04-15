@@ -84,6 +84,9 @@ func TestInit(t *testing.T) {
 		require.NoError(t, err)
 
 		var cfg struct {
+			DNS struct {
+				ProxyIP string `yaml:"proxy_ip"`
+			} `yaml:"dns"`
 			Proxy struct {
 				HTTPListen   string `yaml:"http_listen"`
 				HTTPSListen  string `yaml:"https_listen"`
@@ -105,6 +108,7 @@ func TestInit(t *testing.T) {
 		}
 		require.NoError(t, yaml.Unmarshal(data, &cfg))
 
+		require.Equal(t, "127.0.0.1", cfg.DNS.ProxyIP)
 		require.Equal(t, ":8080", cfg.Proxy.HTTPListen)
 		require.Equal(t, ":8443", cfg.Proxy.HTTPSListen)
 		require.Equal(t, ":"+tunnelPort, cfg.Proxy.TunnelListen)

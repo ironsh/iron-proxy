@@ -25,6 +25,7 @@ func runInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	configDir := fs.String("config-dir", defaultConfigDir, "directory for config, CA cert, and CA key")
 	tunnelPort := fs.String("tunnel-port", defaultTunnelPort, "port for the CONNECT/SOCKS5 tunnel listener")
+	proxyIP := fs.String("proxy-ip", "127.0.0.1", "IP address the DNS server returns for proxied domains")
 	allow := fs.String("allow", defaultAllowList, "comma-separated domains for the initial allowlist")
 	bootstrapToken := fs.String("bootstrap-token", "", "bootstrap token for control plane registration (managed mode)")
 	noStart := fs.Bool("no-start", false, "generate config and unit file but don't start the service")
@@ -82,10 +83,10 @@ func runInit(args []string) {
 	managedMode := *bootstrapToken != ""
 	var configYAML string
 	if managedMode {
-		configYAML = generateManagedConfig(*configDir, *tunnelPort)
+		configYAML = generateManagedConfig(*configDir, *tunnelPort, *proxyIP)
 	} else {
 		domains := parseDomainList(*allow)
-		configYAML = generateConfig(*configDir, *tunnelPort, domains)
+		configYAML = generateConfig(*configDir, *tunnelPort, *proxyIP, domains)
 	}
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
@@ -169,11 +170,15 @@ func parseDomainList(s string) []string {
 
 // generateManagedConfig produces a YAML config for managed mode. It omits the
 // transforms section since transforms come from the control plane.
-func generateManagedConfig(configDir, tunnelPort string) string {
+func generateManagedConfig(configDir, tunnelPort, proxyIP string) string {
 	return fmt.Sprintf(`proxy:
   http_listen: ":8080"
   https_listen: ":8443"
   tunnel_listen: ":%s"
+
+dns:
+  listen: ":8053"
+  proxy_ip: "%s"
 
 tls:
   ca_cert: "%s/ca.crt"
@@ -181,10 +186,10 @@ tls:
 
 log:
   level: "info"
-`, tunnelPort, configDir, configDir)
+`, tunnelPort, proxyIP, configDir, configDir)
 }
 
-func generateConfig(configDir, tunnelPort string, domains []string) string {
+func generateConfig(configDir, tunnelPort, proxyIP string, domains []string) string {
 	var domainLines string
 	for _, d := range domains {
 		domainLines += fmt.Sprintf("        - %q\n", d)
@@ -194,6 +199,10 @@ func generateConfig(configDir, tunnelPort string, domains []string) string {
   http_listen: ":8080"
   https_listen: ":8443"
   tunnel_listen: ":%s"
+
+dns:
+  listen: ":8053"
+  proxy_ip: "%s"
 
 tls:
   ca_cert: "%s/ca.crt"
@@ -206,7 +215,7 @@ transforms:
 %s
 log:
   level: "info"
-`, tunnelPort, configDir, configDir, domainLines)
+`, tunnelPort, proxyIP, configDir, configDir, domainLines)
 }
 
 func generateSystemdUnit(execPath, configPath, bootstrapToken string) string {
