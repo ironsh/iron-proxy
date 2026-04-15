@@ -36,6 +36,7 @@ func startProxy(t *testing.T, binary, cfgPath string, env []string) *proxyInstan
 	cmd := exec.CommandContext(ctx, binary, "-config", cfgPath)
 	cmd.Dir = repoRoot(t)
 	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(cmd.Env, "IRON_STATE_STORE="+t.TempDir())
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = stderrW
 	require.NoError(t, cmd.Start())
