@@ -247,7 +247,17 @@ func resolveExecPath() string {
 
 func hasSystemd() bool {
 	_, err := exec.LookPath("systemctl")
-	return err == nil
+	if err != nil {
+		return false
+	}
+	// systemctl may be installed but systemd might not be running as the init
+	// system (e.g., in containers or WSL). Check that PID 1 is systemd.
+	out, err := exec.Command("ps", "-p", "1", "-o", "comm=").Output()
+	if err != nil {
+		return false
+	}
+	comm := strings.TrimSpace(string(out))
+	return comm == "systemd"
 }
 
 func runCommand(name string, args ...string) error {
