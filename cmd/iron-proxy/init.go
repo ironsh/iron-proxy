@@ -352,7 +352,7 @@ Transforms and rules will be fetched from the control plane.
 Next steps:
 
   Config reference             https://docs.iron.sh/reference/configuration
-  Control plane dashboard      https://app.iron.sh
+  Control plane dashboard      https://console.iron.sh
 `)
 }
 
