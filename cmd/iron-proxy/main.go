@@ -73,21 +73,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Managed mode is determined by the presence of a bootstrap token or
-	// an existing credential, not by the absence of a config file. This
-	// allows a config file to provide base infrastructure settings while
-	// the control plane provides transforms.
+	// Managed mode is determined by the presence of a bootstrap token.
 	// CLI flag takes precedence over environment variable.
 	bootstrapToken := *bootstrapTokenFlag
 	if bootstrapToken == "" {
 		bootstrapToken = os.Getenv("IRON_BOOTSTRAP_TOKEN")
 	}
-	cred, credErr := controlplane.LoadCredential(stateStore)
-	if credErr != nil && !errors.Is(credErr, os.ErrNotExist) {
-		logger.Warn("could not load credential, ignoring", slog.String("error", credErr.Error()))
-		cred = nil
-	}
-	managed := bootstrapToken != "" || cred != nil
+	managed := bootstrapToken != ""
 
 	// Both modes produce a pipeline holder. Managed mode populates the
 	// initial transforms from the control plane and starts a poller that
@@ -102,10 +94,8 @@ func main() {
 	errc := make(chan error, 4)
 	var holder *transform.PipelineHolder
 
-	// 4. Fetch initial config from control plane (managed) or build
-	//    pipeline from file transforms (standalone) before validation.
 	if managed {
-		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, logger)
 	} else {
 		holder = initStandalone(cfg, bodyLimits, logger)
 	}
@@ -222,7 +212,13 @@ func main() {
 // initManaged registers with the control plane, performs an initial sync, builds
 // the initial pipeline, and starts the config poller. The poller runs until ctx
 // is canceled and sends fatal errors on errc.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) *transform.PipelineHolder {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, logger *slog.Logger) *transform.PipelineHolder {
+	cred, err := controlplane.LoadCredential(stateStore)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Error("loading credential", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	tags := parseTags(os.Getenv("IRON_TAGS"))
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
