@@ -6,9 +6,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 )
+
+// maxClientHelloBytes caps how many bytes peekSNI will buffer from a client
+// before giving up. A well-formed TLS ClientHello fits comfortably; this
+// exists so a malicious client cannot exhaust memory by streaming a slow,
+// ever-growing handshake record.
+const maxClientHelloBytes = 16 * 1024
 
 // errSNIPeekDone is returned from GetConfigForClient to abort the TLS handshake
 // after the ClientHello has been parsed and the SNI captured.
@@ -60,13 +67,18 @@ func peekSNI(conn net.Conn, timeout time.Duration) (sni string, peeked []byte, e
 // recordingConn wraps a net.Conn so that all bytes read from it are also
 // buffered for later replay, and all writes are silently discarded. This lets
 // us drive crypto/tls far enough to parse the ClientHello without sending a
-// handshake response (or an abort alert) back to the peer.
+// handshake response (or an abort alert) back to the peer. Reads past
+// maxClientHelloBytes return io.ErrShortBuffer so a slow/malicious client
+// cannot grow the buffer without bound.
 type recordingConn struct {
 	net.Conn
 	buf bytes.Buffer
 }
 
 func (c *recordingConn) Read(p []byte) (int, error) {
+	if c.buf.Len() >= maxClientHelloBytes {
+		return 0, io.ErrShortBuffer
+	}
 	n, err := c.Conn.Read(p)
 	if n > 0 {
 		c.buf.Write(p[:n])
@@ -74,6 +86,8 @@ func (c *recordingConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Write silently discards bytes so the crypto/tls server's abort alert never
+// reaches the client.
 func (c *recordingConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }

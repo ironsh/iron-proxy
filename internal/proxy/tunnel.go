@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -242,7 +243,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 	req.Body = transform.NewBufferedBody(http.NoBody, 0)
 
 	mode := transform.ModeMITM
-	if p.tlsMode == "sni-only" {
+	if p.tlsMode == config.TLSModeSNIOnly {
 		mode = transform.ModeSNIOnly
 	}
 
@@ -320,7 +321,7 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 // peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
 // port is ignored to prevent port-pivot attacks).
 func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
-	if p.tlsMode == "sni-only" {
+	if p.tlsMode == config.TLSModeSNIOnly {
 		return p.serveSNIPassthrough(clientConn)
 	}
 

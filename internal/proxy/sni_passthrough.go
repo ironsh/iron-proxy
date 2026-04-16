@@ -43,13 +43,7 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		return fmt.Errorf("peek sni: %w", err)
 	}
 
-	// Run the pipeline with a host-only synthetic request.
-	tctx := &transform.TransformContext{
-		Logger: p.logger,
-		SNI:    sni,
-		Mode:   transform.ModeSNIOnly,
-	}
-
+	// Set up audit first so even empty-SNI rejections get logged.
 	result := &transform.PipelineResult{
 		Host:       sni,
 		RemoteAddr: clientConn.RemoteAddr().String(),
@@ -58,6 +52,19 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
+
+	if sni == "" {
+		result.Action = transform.ActionReject
+		result.StatusCode = http.StatusBadRequest
+		result.Err = fmt.Errorf("client hello missing sni")
+		return result.Err
+	}
+
+	tctx := &transform.TransformContext{
+		Logger: p.logger,
+		SNI:    sni,
+		Mode:   transform.ModeSNIOnly,
+	}
 
 	req := &http.Request{
 		Host:       sni,
@@ -70,7 +77,7 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	}
 	req.Body = transform.NewBufferedBody(http.NoBody, 0)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(p.shutdownCtx)
 	defer cancel()
 
 	rejectResp, pipelineErr := pl.ProcessRequest(ctx, tctx, req, &result.RequestTransforms)
@@ -88,13 +95,6 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 			slog.Int("status", rejectResp.StatusCode),
 		)
 		return nil
-	}
-
-	if sni == "" {
-		result.Action = transform.ActionReject
-		result.StatusCode = http.StatusBadRequest
-		result.Err = fmt.Errorf("client hello missing sni")
-		return fmt.Errorf("client hello missing sni")
 	}
 
 	// Dial upstream using the proxy's resolver so SNI → IP lookup goes via

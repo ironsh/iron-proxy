@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -58,7 +59,7 @@ type Options struct {
 	HTTPSAddr  string
 	TunnelAddr string
 	TLSMode    string
-	CertCache  *certcache.Cache // required when TLSMode == "mitm"
+	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
 	Logger     *slog.Logger
@@ -68,7 +69,7 @@ type Options struct {
 // TLSModeSNIOnly, certCache is unused and may be nil.
 func New(opts Options) *Proxy {
 	if opts.TLSMode == "" {
-		opts.TLSMode = "mitm"
+		opts.TLSMode = config.TLSModeMITM
 	}
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	p := &Proxy{
@@ -121,7 +122,7 @@ func (p *Proxy) ListenAndServe() error {
 	}()
 
 	go func() {
-		if p.tlsMode == "sni-only" {
+		if p.tlsMode == config.TLSModeSNIOnly {
 			errc <- p.serveHTTPSSNI()
 		} else {
 			errc <- p.serveHTTPSMITM()
@@ -163,12 +164,7 @@ func (p *Proxy) serveHTTPSSNI() error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			select {
-			case <-p.tunnelDone:
-				return nil
-			default:
-			}
-			if isClosedErr(err) {
+			if p.shutdownCtx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			p.logger.Warn("https accept error", slog.String("error", err.Error()))
@@ -176,10 +172,6 @@ func (p *Proxy) serveHTTPSSNI() error {
 		}
 		go p.handleSNIPassthrough(conn)
 	}
-}
-
-func isClosedErr(err error) bool {
-	return err != nil && (errors.Is(err, net.ErrClosed))
 }
 
 // Shutdown gracefully stops all servers.
@@ -191,7 +183,7 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	errHTTP := p.httpServer.Shutdown(ctx)
 
 	var errHTTPS error
-	if p.tlsMode == "sni-only" {
+	if p.tlsMode == config.TLSModeSNIOnly {
 		if p.tlsListener != nil {
 			_ = p.tlsListener.Close()
 		}
