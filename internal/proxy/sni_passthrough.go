@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	sniPeekTimeout  = 5 * time.Second
-	sniUpstreamDial = 30 * time.Second
+	sniPeekTimeout     = 5 * time.Second
+	sniUpstreamDial    = 30 * time.Second
+	defaultSNIUpstream = "443"
 )
 
 // handleSNIPassthrough is the connection handler used by the HTTPS listener
@@ -24,32 +25,22 @@ const (
 // the transform pipeline with a host-only synthetic request, and on accept
 // TCP-passthroughs the connection to the upstream server.
 func (p *Proxy) handleSNIPassthrough(clientConn net.Conn) {
-	target := net.JoinHostPort("", "443")
-	if err := p.serveSNIPassthrough(clientConn, target); err != nil {
+	if err := p.serveSNIPassthrough(clientConn); err != nil {
 		p.logger.Debug("sni passthrough error", slog.String("error", err.Error()))
 	}
 }
 
 // serveSNIPassthrough peeks SNI, runs the pipeline, and TCP-passthroughs the
-// connection if allowed. targetPort is "host:port" whose port is used as the
-// upstream port (host is filled in from the peeked SNI). Used by both the
-// HTTPS listener and the CONNECT/SOCKS5 tunnel TLS branch in sni-only mode.
-func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, targetPort string) error {
+// connection to the SNI host on port 443 if allowed. Used by both the HTTPS
+// listener and the CONNECT/SOCKS5 tunnel TLS branch in sni-only mode. The
+// upstream port is fixed at 443 — a client-supplied CONNECT port is ignored
+// so an attacker cannot pivot an allowlisted hostname onto a different port.
+func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	defer clientConn.Close()
 
 	sni, peeked, err := peekSNI(clientConn, sniPeekTimeout)
 	if err != nil {
 		return fmt.Errorf("peek sni: %w", err)
-	}
-
-	// Determine the upstream port: prefer the port in targetPort (from CONNECT
-	// target), fall back to 443 for the raw HTTPS listener which passes an
-	// empty host.
-	port := "443"
-	if targetPort != "" {
-		if _, p, splitErr := net.SplitHostPort(targetPort); splitErr == nil && p != "" {
-			port = p
-		}
 	}
 
 	// Run the pipeline with a host-only synthetic request.
@@ -111,6 +102,10 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, targetPort string) erro
 	dialer := &net.Dialer{
 		Timeout:  sniUpstreamDial,
 		Resolver: p.resolver,
+	}
+	port := p.sniUpstreamPort
+	if port == "" {
+		port = defaultSNIUpstream
 	}
 	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(sni, port))
 	if err != nil {

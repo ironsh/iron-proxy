@@ -45,6 +45,11 @@ type Proxy struct {
 	// connections that would otherwise sit on blocking Reads.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+
+	// sniUpstreamPort is the port dialed for SNI-only passthrough. Fixed at
+	// 443 in production so a client-supplied CONNECT port cannot pivot an
+	// allowlisted hostname onto a different port. Overridable in tests.
+	sniUpstreamPort string
 }
 
 // Options configures Proxy construction.

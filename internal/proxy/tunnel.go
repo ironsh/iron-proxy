@@ -317,10 +317,11 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 
 // serveTunnelTLS handles the TLS branch of a tunnel connection. In MITM mode
 // it terminates TLS and serves HTTP via handleHTTP; in sni-only mode it
-// peeks SNI and TCP-passthroughs to the upstream named in target.
+// peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
+// port is ignored to prevent port-pivot attacks).
 func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
 	if p.tlsMode == "sni-only" {
-		return p.serveSNIPassthrough(clientConn, target)
+		return p.serveSNIPassthrough(clientConn)
 	}
 
 	tlsConn := tls.Server(clientConn, &tls.Config{
