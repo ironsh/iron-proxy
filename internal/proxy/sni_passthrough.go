@@ -142,16 +142,13 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, targetPort string) erro
 // canceled (e.g. by Proxy.Shutdown), both connections are closed to unblock
 // any in-flight Reads.
 func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
-	done := make(chan struct{})
-	defer close(done)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			_ = a.Close()
-			_ = b.Close()
-		case <-done:
-		}
+		<-ctx.Done()
+		_ = a.Close()
+		_ = b.Close()
 	}()
 
 	var wg sync.WaitGroup
