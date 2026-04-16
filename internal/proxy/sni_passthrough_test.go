@@ -27,11 +27,33 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
 
-// newLocalhostTLSCert returns a self-signed cert valid for "localhost" and
-// 127.0.0.1, plus a pool trusting it.
+// sniTestHosts covers every hostname used across the SNI passthrough tests.
+// The staticResolver maps each to 127.0.0.1 so the proxy's dial lands on our
+// local test upstream.
+var sniTestHosts = map[string][]string{
+	"localhost":       {"127.0.0.1"},
+	"blocked.example": {"127.0.0.1"},
+	"allowed.example": {"127.0.0.1"},
+}
+
+// startEchoTLSServer starts a TLS server on 127.0.0.1:0 that responds to any
+// request with "echo <path>\n". Returns the host:port address and a cert pool
+// trusting the server's self-signed leaf, whose SANs cover the hostnames in
+// sniTestHosts.
+func startEchoTLSServer(t *testing.T) (addr string, pool *x509.CertPool) {
+	t.Helper()
+	cert, pool := newLocalhostTLSCert(t)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, "echo %s\n", r.URL.Path)
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String(), pool
+}
+
 func newLocalhostTLSCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
-
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
@@ -52,46 +74,19 @@ func newLocalhostTLSCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 
 	pool := x509.NewCertPool()
 	pool.AddCert(parsed)
-
-	return tls.Certificate{
-		Certificate: [][]byte{certDER},
-		PrivateKey:  key,
-		Leaf:        parsed,
-	}, pool
+	return tls.Certificate{Certificate: [][]byte{certDER}, PrivateKey: key, Leaf: parsed}, pool
 }
 
-// startEchoTLSServer starts a TLS server on 127.0.0.1:0 that responds to any
-// HTTP/1.1 request with "echo <path>\n". Returns the "host:port" address.
-func startEchoTLSServer(t *testing.T, cert tls.Certificate) string {
+// buildSNIProxy creates a Proxy in sni-only mode with an allowlist permitting
+// the given hostnames. Returns the proxy and an accessor for captured audit
+// records. Callers are responsible for starting listeners and setting
+// p.sniUpstreamPort if they want upstream dials to reach a test server.
+func buildSNIProxy(t *testing.T, allowed []string, withTunnel bool) (*Proxy, func() []transform.PipelineResult) {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, "echo %s\n", r.URL.Path)
-	}))
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return srv.Listener.Addr().String()
-}
-
-// startSNIPassthroughProxy builds a Proxy in sni-only mode, listens on a
-// random port, and for each connection invokes serveSNIPassthrough with the
-// upstream dial rerouted to the test echo server (via sniUpstreamPort).
-// Returns the proxy listener addr and a snapshot accessor for audit records.
-func startSNIPassthroughProxy(t *testing.T, allowed []string, upstream string) (listenAddr string, getResults func() []transform.PipelineResult) {
-	t.Helper()
-
-	_, upstreamPort, err := net.SplitHostPort(upstream)
-	require.NoError(t, err)
-
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	al, err := allowlist.New(allowed, nil, &staticResolver{hosts: map[string][]string{
-		"localhost":       {"127.0.0.1"},
-		"blocked.example": {"127.0.0.1"},
-		"allowed.example": {"127.0.0.1"},
-	}})
+	al, err := allowlist.New(allowed, nil, &staticResolver{hosts: sniTestHosts})
 	require.NoError(t, err)
-
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
 	var mu sync.Mutex
@@ -102,34 +97,19 @@ func startSNIPassthroughProxy(t *testing.T, allowed []string, upstream string) (
 		results = append(results, *r)
 	})
 
-	holder := transform.NewPipelineHolder(pipeline)
-
-	p := New(Options{
+	opts := Options{
 		HTTPAddr:  "127.0.0.1:0",
 		HTTPSAddr: "127.0.0.1:0",
 		TLSMode:   "sni-only",
-		Pipeline:  holder,
+		Pipeline:  transform.NewPipelineHolder(pipeline),
 		Logger:    logger,
-	})
-	p.sniUpstreamPort = upstreamPort
+	}
+	if withTunnel {
+		opts.TunnelAddr = "127.0.0.1:0"
+	}
+	p := New(opts)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				_ = p.serveSNIPassthrough(c)
-			}(conn)
-		}
-	}()
-
-	return ln.Addr().String(), func() []transform.PipelineResult {
+	return p, func() []transform.PipelineResult {
 		mu.Lock()
 		defer mu.Unlock()
 		out := make([]transform.PipelineResult, len(results))
@@ -138,23 +118,97 @@ func startSNIPassthroughProxy(t *testing.T, allowed []string, upstream string) (
 	}
 }
 
-func TestSNIPassthrough_HappyPath(t *testing.T) {
-	cert, pool := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
+// startAcceptLoop listens on 127.0.0.1:0 and spawns handle(conn) for each
+// accepted connection. Returns the listener's address; the listener is closed
+// via t.Cleanup.
+func startAcceptLoop(t *testing.T, handle func(net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handle(conn)
+		}
+	}()
+	return ln.Addr().String()
+}
 
+// startTunnelListener wires up a tunnel accept loop for the given proxy on
+// 127.0.0.1:0 and returns the listener's address.
+func startTunnelListener(t *testing.T, p *Proxy) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	p.tunnelListener = ln
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.handleTunnel(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		close(p.tunnelDone)
+	})
+	return ln.Addr().String()
+}
+
+// startSNIPassthroughProxy builds a sni-only proxy wired to dial upstream and
+// starts a local accept loop that drives serveSNIPassthrough. Returns the
+// proxy's listener address and an audit-records accessor.
+func startSNIPassthroughProxy(t *testing.T, allowed []string, upstream string) (string, func() []transform.PipelineResult) {
+	t.Helper()
+	_, upstreamPort, err := net.SplitHostPort(upstream)
+	require.NoError(t, err)
+
+	p, getResults := buildSNIProxy(t, allowed, false)
+	p.sniUpstreamPort = upstreamPort
+
+	addr := startAcceptLoop(t, func(c net.Conn) { _ = p.serveSNIPassthrough(c) })
+	return addr, getResults
+}
+
+// connectAndHandshake opens a TCP connection to tunnelAddr, issues CONNECT to
+// connectTarget, and completes a TLS handshake with ServerName=sni verified
+// against pool. Returns the established TLS connection.
+func connectAndHandshake(t *testing.T, tunnelAddr, connectTarget, sni string, pool *x509.CertPool) *tls.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", tunnelAddr)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectTarget, connectTarget)
+	require.NoError(t, err)
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: sni, RootCAs: pool})
+	require.NoError(t, tlsConn.Handshake())
+	return tlsConn
+}
+
+func TestSNIPassthrough_HappyPath(t *testing.T) {
+	upstream, pool := startEchoTLSServer(t)
 	proxyAddr, getResults := startSNIPassthroughProxy(t, []string{"localhost"}, upstream)
 
-	conn, err := tls.Dial("tcp", proxyAddr, &tls.Config{
-		ServerName: "localhost",
-		RootCAs:    pool,
-	})
+	conn, err := tls.Dial("tcp", proxyAddr, &tls.Config{ServerName: "localhost", RootCAs: pool})
 	require.NoError(t, err)
 
 	_, err = conn.Write([]byte("GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n"))
 	require.NoError(t, err)
 
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 
@@ -166,9 +220,7 @@ func TestSNIPassthrough_HappyPath(t *testing.T) {
 	// Close the client conn so the proxy's bidi copy drains and emits audit.
 	_ = conn.Close()
 
-	require.Eventually(t, func() bool {
-		return len(getResults()) > 0
-	}, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return len(getResults()) > 0 }, 2*time.Second, 10*time.Millisecond)
 
 	results := getResults()
 	require.Len(t, results, 1)
@@ -181,26 +233,17 @@ func TestSNIPassthrough_HappyPath(t *testing.T) {
 }
 
 func TestSNIPassthrough_AllowlistDeny(t *testing.T) {
-	cert, _ := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
-
+	upstream, _ := startEchoTLSServer(t)
 	proxyAddr, getResults := startSNIPassthroughProxy(t, []string{"allowed.example"}, upstream)
 
 	conn, err := net.Dial("tcp", proxyAddr)
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// Start a tls handshake to the proxy with an SNI not on the allowlist.
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName:         "blocked.example",
-		InsecureSkipVerify: true,
-	})
-	handshakeErr := tlsConn.Handshake()
-	require.Error(t, handshakeErr, "handshake should fail because proxy closes conn")
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: "blocked.example", InsecureSkipVerify: true})
+	require.Error(t, tlsConn.Handshake(), "handshake should fail because proxy closes conn")
 
-	require.Eventually(t, func() bool {
-		return len(getResults()) > 0
-	}, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return len(getResults()) > 0 }, 2*time.Second, 10*time.Millisecond)
 
 	results := getResults()
 	require.Len(t, results, 1)
@@ -210,24 +253,18 @@ func TestSNIPassthrough_AllowlistDeny(t *testing.T) {
 }
 
 func TestSNIPassthrough_NoSNI(t *testing.T) {
-	cert, _ := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
-
+	upstream, _ := startEchoTLSServer(t)
 	proxyAddr, getResults := startSNIPassthroughProxy(t, []string{"localhost"}, upstream)
 
 	conn, err := net.Dial("tcp", proxyAddr)
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// Client with no ServerName → ClientHello with no SNI extension.
-	tlsConn := tls.Client(conn, &tls.Config{
-		InsecureSkipVerify: true,
-	})
+	// Client with no ServerName sends a ClientHello without an SNI extension.
+	tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
 	_ = tlsConn.Handshake() // will fail; proxy rejects empty SNI
 
-	require.Eventually(t, func() bool {
-		return len(getResults()) > 0
-	}, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return len(getResults()) > 0 }, 2*time.Second, 10*time.Millisecond)
 
 	results := getResults()
 	require.Len(t, results, 1)
@@ -236,75 +273,42 @@ func TestSNIPassthrough_NoSNI(t *testing.T) {
 }
 
 func TestSNIPassthrough_MalformedClientHello(t *testing.T) {
-	cert, _ := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
-
+	upstream, _ := startEchoTLSServer(t)
 	proxyAddr, getResults := startSNIPassthroughProxy(t, []string{"localhost"}, upstream)
 
 	conn, err := net.Dial("tcp", proxyAddr)
 	require.NoError(t, err)
 	_, _ = conn.Write([]byte("definitely not a tls client hello"))
 
-	// Proxy should close. Give it a moment, then confirm no audit record
-	// claims success.
 	time.Sleep(200 * time.Millisecond)
 	_ = conn.Close()
 
-	results := getResults()
 	// Malformed input is rejected before the pipeline runs, so no audit
 	// record is emitted.
-	require.Len(t, results, 0)
+	require.Empty(t, getResults())
 }
 
 func TestSNIPassthrough_ShutdownClosesInFlight(t *testing.T) {
-	cert, pool := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
+	upstream, pool := startEchoTLSServer(t)
 	_, upstreamPort, err := net.SplitHostPort(upstream)
 	require.NoError(t, err)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	al, err := allowlist.New([]string{"localhost"}, nil, &staticResolver{hosts: map[string][]string{
-		"localhost": {"127.0.0.1"},
-	}})
-	require.NoError(t, err)
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
-	holder := transform.NewPipelineHolder(pipeline)
-
-	p := New(Options{
-		HTTPAddr:  "127.0.0.1:0",
-		HTTPSAddr: "127.0.0.1:0",
-		TLSMode:   "sni-only",
-		Pipeline:  holder,
-		Logger:    logger,
-	})
+	p, _ := buildSNIProxy(t, []string{"localhost"}, false)
 	p.sniUpstreamPort = upstreamPort
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
 	done := make(chan struct{})
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			close(done)
-			return
-		}
-		_ = p.serveSNIPassthrough(conn)
+	addr := startAcceptLoop(t, func(c net.Conn) {
+		_ = p.serveSNIPassthrough(c)
 		close(done)
-	}()
-
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		ServerName: "localhost",
-		RootCAs:    pool,
 	})
+
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: "localhost", RootCAs: pool})
 	require.NoError(t, err)
 	defer conn.Close()
 
 	// Handshake is complete and connection is idle — proxyBidi goroutines
-	// are blocked on reads in both directions. Calling Shutdown should
-	// cancel shutdownCtx and close both conns so serveSNIPassthrough returns.
+	// are blocked on reads in both directions. Shutdown should unblock them
+	// by closing both conns.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, p.Shutdown(shutdownCtx))
@@ -317,98 +321,39 @@ func TestSNIPassthrough_ShutdownClosesInFlight(t *testing.T) {
 }
 
 func TestSNIPassthrough_CONNECTTunnel(t *testing.T) {
-	// A full end-to-end test via the CONNECT tunnel path in sni-only mode.
-	cert, pool := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
-	upstreamHost, upstreamPort, err := net.SplitHostPort(upstream)
+	upstream, pool := startEchoTLSServer(t)
+	_, upstreamPort, err := net.SplitHostPort(upstream)
 	require.NoError(t, err)
-	require.Equal(t, "127.0.0.1", upstreamHost)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	al, err := allowlist.New([]string{"localhost"}, nil, &staticResolver{hosts: map[string][]string{
-		"localhost": {"127.0.0.1"},
-	}})
-	require.NoError(t, err)
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
-	holder := transform.NewPipelineHolder(pipeline)
-
-	p := New(Options{
-		HTTPAddr:   "127.0.0.1:0",
-		HTTPSAddr:  "127.0.0.1:0",
-		TunnelAddr: "127.0.0.1:0",
-		TLSMode:    "sni-only",
-		Pipeline:   holder,
-		Logger:     logger,
-	})
+	p, _ := buildSNIProxy(t, []string{"localhost"}, true)
 	p.sniUpstreamPort = upstreamPort
+	tunnelAddr := startTunnelListener(t, p)
 
-	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	tunnelAddr := tunnelLn.Addr().String()
-	p.tunnelListener = tunnelLn
-	go func() {
-		for {
-			conn, err := tunnelLn.Accept()
-			if err != nil {
-				return
-			}
-			go p.handleTunnel(conn)
-		}
-	}()
-	t.Cleanup(func() {
-		_ = tunnelLn.Close()
-		close(p.tunnelDone)
-	})
-
-	// Connect to tunnel and send CONNECT for localhost:upstreamPort.
-	conn, err := net.Dial("tcp", tunnelAddr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	connectReq := fmt.Sprintf("CONNECT localhost:%s HTTP/1.1\r\nHost: localhost:%s\r\n\r\n", upstreamPort, upstreamPort)
-	_, err = conn.Write([]byte(connectReq))
-	require.NoError(t, err)
-
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-	require.Equal(t, 200, resp.StatusCode)
-
-	// Now do TLS over the tunnel, verifying it TCP-passthroughs rather than
-	// MITMs (cert chain must validate against the upstream's real cert).
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName: "localhost",
-		RootCAs:    pool,
-	})
-	require.NoError(t, tlsConn.Handshake())
+	tlsConn := connectAndHandshake(t, tunnelAddr, "localhost:"+upstreamPort, "localhost", pool)
 
 	_, err = tlsConn.Write([]byte("GET /tunneled HTTP/1.1\r\nHost: localhost\r\n\r\n"))
 	require.NoError(t, err)
 
-	bufR := bufio.NewReader(tlsConn)
-	upResp, err := http.ReadResponse(bufR, nil)
+	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
 	require.NoError(t, err)
-	defer upResp.Body.Close()
-	require.Equal(t, 200, upResp.StatusCode)
-	body, err := io.ReadAll(upResp.Body)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "echo /tunneled\n", string(body))
 }
 
-// TestSNIPassthrough_IgnoresCONNECTPort verifies that in sni-only mode a
-// client-supplied CONNECT port does not influence the upstream port the
-// proxy dials. This prevents a malicious client from pivoting an
-// allowlisted hostname onto a different port (e.g. SMTP).
+// TestSNIPassthrough_IgnoresCONNECTPort verifies that a client-supplied
+// CONNECT port does not influence the upstream port the proxy dials. This
+// prevents a malicious client from pivoting an allowlisted hostname onto a
+// different port (e.g. SMTP).
 func TestSNIPassthrough_IgnoresCONNECTPort(t *testing.T) {
-	cert, pool := newLocalhostTLSCert(t)
-	upstream := startEchoTLSServer(t, cert)
+	upstream, pool := startEchoTLSServer(t)
 	_, upstreamPort, err := net.SplitHostPort(upstream)
 	require.NoError(t, err)
 
-	// Start a second listener that we expect NEVER to be dialed. If the
-	// proxy respected the CONNECT port, it would try to connect here.
+	// Start a second listener that we expect NEVER to be dialed.
 	decoyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer decoyLn.Close()
@@ -427,62 +372,13 @@ func TestSNIPassthrough_IgnoresCONNECTPort(t *testing.T) {
 		}
 	}()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	al, err := allowlist.New([]string{"localhost"}, nil, &staticResolver{hosts: map[string][]string{
-		"localhost": {"127.0.0.1"},
-	}})
-	require.NoError(t, err)
-	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
-	holder := transform.NewPipelineHolder(pipeline)
-
-	p := New(Options{
-		HTTPAddr:   "127.0.0.1:0",
-		HTTPSAddr:  "127.0.0.1:0",
-		TunnelAddr: "127.0.0.1:0",
-		TLSMode:    "sni-only",
-		Pipeline:   holder,
-		Logger:     logger,
-	})
+	p, _ := buildSNIProxy(t, []string{"localhost"}, true)
 	p.sniUpstreamPort = upstreamPort // proxy should dial here, not decoyPort
-
-	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	tunnelAddr := tunnelLn.Addr().String()
-	p.tunnelListener = tunnelLn
-	go func() {
-		for {
-			conn, err := tunnelLn.Accept()
-			if err != nil {
-				return
-			}
-			go p.handleTunnel(conn)
-		}
-	}()
-	t.Cleanup(func() {
-		_ = tunnelLn.Close()
-		close(p.tunnelDone)
-	})
+	tunnelAddr := startTunnelListener(t, p)
 
 	// Client CONNECTs to localhost:decoyPort but the proxy should ignore
 	// that port and dial upstream on sniUpstreamPort.
-	conn, err := net.Dial("tcp", tunnelAddr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	_, err = fmt.Fprintf(conn, "CONNECT localhost:%s HTTP/1.1\r\nHost: localhost:%s\r\n\r\n", decoyPort, decoyPort)
-	require.NoError(t, err)
-
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	require.NoError(t, err)
-	_ = resp.Body.Close()
-	require.Equal(t, 200, resp.StatusCode)
-
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName: "localhost",
-		RootCAs:    pool,
-	})
-	require.NoError(t, tlsConn.Handshake(), "handshake should succeed against the real upstream, not the decoy")
+	_ = connectAndHandshake(t, tunnelAddr, "localhost:"+decoyPort, "localhost", pool)
 
 	select {
 	case <-decoyHit:
