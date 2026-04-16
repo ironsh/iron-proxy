@@ -323,7 +323,7 @@ func TestSNIPassthrough_ShutdownClosesInFlight(t *testing.T) {
 		RootCAs:    pool,
 	})
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Handshake is complete and connection is idle — proxyBidi goroutines
 	// are blocked on reads in both directions. Calling Shutdown should
