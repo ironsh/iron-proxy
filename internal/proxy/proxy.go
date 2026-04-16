@@ -108,7 +108,11 @@ func (p *Proxy) ListenAndServe() error {
 	}()
 
 	go func() {
-		errc <- p.serveHTTPS()
+		if p.tlsMode == "sni-only" {
+			errc <- p.serveHTTPSSNI()
+		} else {
+			errc <- p.serveHTTPSMITM()
+		}
 	}()
 
 	if p.tunnelAddr != "" {
@@ -120,40 +124,45 @@ func (p *Proxy) ListenAndServe() error {
 	return <-errc
 }
 
-// serveHTTPS runs the HTTPS listener. In MITM mode it terminates TLS and
-// serves through handleHTTP. In SNI-only mode it accepts raw TCP connections
-// and dispatches to handleSNIPassthrough.
-func (p *Proxy) serveHTTPS() error {
+// serveHTTPSMITM terminates TLS on the HTTPS listener and serves requests
+// through handleHTTP with leaf certs minted by the configured CA.
+func (p *Proxy) serveHTTPSMITM() error {
 	ln, err := net.Listen("tcp", p.httpsAddr)
 	if err != nil {
 		return fmt.Errorf("https listen: %w", err)
 	}
-
-	if p.tlsMode == "sni-only" {
-		p.tlsListener = ln
-		p.logger.Info("https proxy starting (sni-only)", slog.String("addr", ln.Addr().String()))
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				select {
-				case <-p.tunnelDone:
-					return nil
-				default:
-				}
-				if isClosedErr(err) {
-					return nil
-				}
-				p.logger.Warn("https accept error", slog.String("error", err.Error()))
-				continue
-			}
-			go p.handleSNIPassthrough(conn)
-		}
-	}
-
 	tlsLn := tls.NewListener(ln, p.httpsServer.TLSConfig)
 	p.tlsListener = tlsLn
 	p.logger.Info("https proxy starting", slog.String("addr", ln.Addr().String()))
 	return fmt.Errorf("https: %w", p.httpsServer.Serve(tlsLn))
+}
+
+// serveHTTPSSNI runs the HTTPS listener in sni-only mode: accepts raw TCP
+// connections, peeks the ClientHello SNI, and TCP-passthroughs to upstream
+// without terminating TLS.
+func (p *Proxy) serveHTTPSSNI() error {
+	ln, err := net.Listen("tcp", p.httpsAddr)
+	if err != nil {
+		return fmt.Errorf("https listen: %w", err)
+	}
+	p.tlsListener = ln
+	p.logger.Info("https proxy starting (sni-only)", slog.String("addr", ln.Addr().String()))
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-p.tunnelDone:
+				return nil
+			default:
+			}
+			if isClosedErr(err) {
+				return nil
+			}
+			p.logger.Warn("https accept error", slog.String("error", err.Error()))
+			continue
+		}
+		go p.handleSNIPassthrough(conn)
+	}
 }
 
 func isClosedErr(err error) bool {
