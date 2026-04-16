@@ -30,6 +30,14 @@ proxy:
 
 # TLS / MITM configuration
 tls:
+  # mode: "mitm" (default) or "sni-only".
+  # In sni-only mode, the proxy peeks at the TLS ClientHello SNI and
+  # TCP-passthroughs to the upstream without terminating TLS. No CA cert is
+  # needed on clients, but the pipeline only sees the hostname (method,
+  # path, headers, and body are empty), so host-only allowlist rules are the
+  # only thing that can match. Body-inspecting transforms like secrets and
+  # grpc still run, but have nothing to act on.
+  mode: "mitm"
   ca_cert: "/etc/iron-proxy/ca.crt"
   ca_key: "/etc/iron-proxy/ca.key"
   cert_cache_size: 1000

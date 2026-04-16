@@ -46,6 +46,7 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 			log.String("path", result.Path),
 			log.String("remote_addr", result.RemoteAddr),
 			log.String("sni", result.SNI),
+			log.String("mode", result.Mode.String()),
 			log.String("action", action),
 			log.Int("status_code", result.StatusCode),
 			log.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),

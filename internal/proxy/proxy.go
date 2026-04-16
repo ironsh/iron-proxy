@@ -1,56 +1,98 @@
-// Package proxy implements the iron-proxy HTTP/HTTPS MITM proxy.
+// Package proxy implements the iron-proxy HTTP/HTTPS proxy. The HTTPS
+// listener supports two modes: MITM (default), which terminates TLS using a
+// CA-signed leaf cert, and SNI-only, which peeks the ClientHello SNI and
+// TCP-passthroughs to the upstream without terminating TLS.
 package proxy
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"strconv"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-// Proxy is the HTTP/HTTPS MITM proxy server.
+// Proxy is the HTTP/HTTPS proxy server. When Mode is TLSModeMITM, the HTTPS
+// listener terminates TLS using certCache; when Mode is TLSModeSNIOnly, the
+// listener peeks the SNI from the ClientHello and TCP-passthroughs to the
+// upstream without terminating TLS.
 type Proxy struct {
-	httpServer      *http.Server
-	httpsServer     *http.Server
-	tlsListener     net.Listener
-	tunnelAddr      string
-	tunnelListener  net.Listener
-	tunnelDone      chan struct{}
-	certCache       *certcache.Cache
-	pipeline        *transform.PipelineHolder
-	transport       *http.Transport
-	logger          *slog.Logger
+	httpServer     *http.Server
+	httpsServer    *http.Server
+	httpsAddr      string
+	tlsMode        string
+	tlsListener    net.Listener
+	tunnelAddr     string
+	tunnelListener net.Listener
+	tunnelDone     chan struct{}
+	certCache      *certcache.Cache
+	pipeline       *transform.PipelineHolder
+	transport      *http.Transport
+	resolver       *net.Resolver
+	logger         *slog.Logger
+
+	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
+	// connections that would otherwise sit on blocking Reads.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+
+	// sniUpstreamPort is the port dialed for SNI-only passthrough. Fixed at
+	// 443 in production so a client-supplied CONNECT port cannot pivot an
+	// allowlisted hostname onto a different port. Overridable in tests.
+	sniUpstreamPort string
 }
 
-// New creates a new Proxy. If resolver is non-nil, it is used to resolve
-// upstream hostnames instead of the OS default resolver.
-func New(httpAddr, httpsAddr, tunnelAddr string, certCache *certcache.Cache, pipeline *transform.PipelineHolder, resolver *net.Resolver, logger *slog.Logger) *Proxy {
+// Options configures Proxy construction.
+type Options struct {
+	HTTPAddr   string
+	HTTPSAddr  string
+	TunnelAddr string
+	TLSMode    string
+	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
+	Pipeline   *transform.PipelineHolder
+	Resolver   *net.Resolver
+	Logger     *slog.Logger
+}
+
+// New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
+// TLSModeSNIOnly, certCache is unused and may be nil.
+func New(opts Options) *Proxy {
+	if opts.TLSMode == "" {
+		opts.TLSMode = config.TLSModeMITM
+	}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	p := &Proxy{
-		tunnelAddr: tunnelAddr,
-		tunnelDone: make(chan struct{}),
-		certCache:  certCache,
-		pipeline:   pipeline,
-		transport:  buildTransport(resolver),
-		logger:     logger,
+		httpsAddr:      opts.HTTPSAddr,
+		tlsMode:        opts.TLSMode,
+		tunnelAddr:     opts.TunnelAddr,
+		tunnelDone:     make(chan struct{}),
+		certCache:      opts.CertCache,
+		pipeline:       opts.Pipeline,
+		transport:      buildTransport(opts.Resolver),
+		resolver:       opts.Resolver,
+		logger:         opts.Logger,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 
 	p.httpServer = &http.Server{
-		Addr:    httpAddr,
+		Addr:    opts.HTTPAddr,
 		Handler: http.HandlerFunc(p.handleHTTP),
 	}
 
 	p.httpsServer = &http.Server{
-		Addr:    httpsAddr,
+		Addr:    opts.HTTPSAddr,
 		Handler: http.HandlerFunc(p.handleHTTP),
 		TLSConfig: &tls.Config{
 			GetCertificate: p.getCertificate,
@@ -80,15 +122,11 @@ func (p *Proxy) ListenAndServe() error {
 	}()
 
 	go func() {
-		ln, err := net.Listen("tcp", p.httpsServer.Addr)
-		if err != nil {
-			errc <- fmt.Errorf("https listen: %w", err)
-			return
+		if p.tlsMode == config.TLSModeSNIOnly {
+			errc <- p.serveHTTPSSNI()
+		} else {
+			errc <- p.serveHTTPSMITM()
 		}
-		tlsLn := tls.NewListener(ln, p.httpsServer.TLSConfig)
-		p.tlsListener = tlsLn
-		p.logger.Info("https proxy starting", slog.String("addr", ln.Addr().String()))
-		errc <- fmt.Errorf("https: %w", p.httpsServer.Serve(tlsLn))
 	}()
 
 	if p.tunnelAddr != "" {
@@ -100,10 +138,58 @@ func (p *Proxy) ListenAndServe() error {
 	return <-errc
 }
 
+// serveHTTPSMITM terminates TLS on the HTTPS listener and serves requests
+// through handleHTTP with leaf certs minted by the configured CA.
+func (p *Proxy) serveHTTPSMITM() error {
+	ln, err := net.Listen("tcp", p.httpsAddr)
+	if err != nil {
+		return fmt.Errorf("https listen: %w", err)
+	}
+	tlsLn := tls.NewListener(ln, p.httpsServer.TLSConfig)
+	p.tlsListener = tlsLn
+	p.logger.Info("https proxy starting", slog.String("addr", ln.Addr().String()))
+	return fmt.Errorf("https: %w", p.httpsServer.Serve(tlsLn))
+}
+
+// serveHTTPSSNI runs the HTTPS listener in sni-only mode: accepts raw TCP
+// connections, peeks the ClientHello SNI, and TCP-passthroughs to upstream
+// without terminating TLS.
+func (p *Proxy) serveHTTPSSNI() error {
+	ln, err := net.Listen("tcp", p.httpsAddr)
+	if err != nil {
+		return fmt.Errorf("https listen: %w", err)
+	}
+	p.tlsListener = ln
+	p.logger.Info("https proxy starting (sni-only)", slog.String("addr", ln.Addr().String()))
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if p.shutdownCtx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			p.logger.Warn("https accept error", slog.String("error", err.Error()))
+			continue
+		}
+		go p.handleSNIPassthrough(conn)
+	}
+}
+
 // Shutdown gracefully stops all servers.
 func (p *Proxy) Shutdown(ctx context.Context) error {
+	// Cancel shutdownCtx first so any in-flight TCP-passthrough proxyBidi
+	// goroutines close their connections and unblock their blocking Reads.
+	p.shutdownCancel()
+
 	errHTTP := p.httpServer.Shutdown(ctx)
-	errHTTPS := p.httpsServer.Shutdown(ctx)
+
+	var errHTTPS error
+	if p.tlsMode == config.TLSModeSNIOnly {
+		if p.tlsListener != nil {
+			_ = p.tlsListener.Close()
+		}
+	} else {
+		errHTTPS = p.httpsServer.Shutdown(ctx)
+	}
 
 	// Signal tunnel accept loop to stop, then close the listener.
 	close(p.tunnelDone)
@@ -118,10 +204,26 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 }
 
 func (p *Proxy) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if p.certCache == nil {
+		return nil, fmt.Errorf("cert cache not configured")
+	}
 	if hello.ServerName == "" {
 		return nil, fmt.Errorf("no SNI provided")
 	}
 	return p.certCache.GetOrCreate(hello.ServerName)
+}
+
+// beginPipelineRun snapshots the current pipeline and returns a finish
+// function that computes Duration and emits the audit record. The caller is
+// responsible for populating result.Action, StatusCode, traces, and Err
+// before finish runs — typically via defer. StartedAt is set here.
+func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.Pipeline, func()) {
+	pl := p.pipeline.Load()
+	result.StartedAt = time.Now()
+	return pl, func() {
+		result.Duration = time.Since(result.StartedAt)
+		pl.EmitAudit(result)
+	}
 }
 
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,41 +254,32 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Snapshot the pipeline for this request so a concurrent swap does not
-	// affect in-flight processing.
-	pl := p.pipeline.Load()
-
 	// Build transform context and audit state
-	startedAt := time.Now()
-	bodyLimits := pl.BodyLimits()
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
+		Mode:   transform.ModeMITM,
 	}
 	if r.TLS != nil {
 		tctx.SNI = r.TLS.ServerName
 	}
 
-	var reqTraces, respTraces []transform.TransformTrace
 	result := &transform.PipelineResult{
 		Host:       r.Host,
 		Method:     r.Method,
 		Path:       r.URL.Path,
 		RemoteAddr: r.RemoteAddr,
 		SNI:        tctx.SNI,
-		StartedAt:  startedAt,
+		Mode:       transform.ModeMITM,
 	}
-	defer func() {
-		result.Duration = time.Since(startedAt)
-		result.RequestTransforms = reqTraces
-		result.ResponseTransforms = respTraces
-		pl.EmitAudit(result)
-	}()
+	pl, finish := p.beginPipelineRun(result)
+	defer finish()
 
+	bodyLimits := pl.BodyLimits()
 	// Wrap request body for lazy buffering by transforms.
 	r.Body = transform.NewBufferedBody(r.Body, bodyLimits.MaxRequestBodyBytes)
 
 	// Run request transforms
-	if rejectResp, err := pl.ProcessRequest(r.Context(), tctx, r, &reqTraces); err != nil {
+	if rejectResp, err := pl.ProcessRequest(r.Context(), tctx, r, &result.RequestTransforms); err != nil {
 		result.Action = transform.ActionContinue // error, not reject
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
@@ -250,7 +343,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	resp.Body = transform.NewBufferedBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
 
 	// Run response transforms
-	finalResp, err := pl.ProcessResponse(r.Context(), tctx, r, resp, &respTraces)
+	finalResp, err := pl.ProcessResponse(r.Context(), tctx, r, resp, &result.ResponseTransforms)
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
@@ -453,7 +546,7 @@ func buildTransport(resolver *net.Resolver) *http.Transport {
 		DialContext:           dialer.DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:  10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 }

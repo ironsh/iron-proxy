@@ -126,12 +126,18 @@ func main() {
 	}
 	holder.Load().SetAuditFunc(auditFunc)
 
-	// Initialize cert cache.
-	leafExpiry := time.Duration(cfg.TLS.LeafCertExpiryHours) * time.Hour
-	certCache, err := certcache.New(cfg.TLS.CACert, cfg.TLS.CAKey, cfg.TLS.CertCacheSize, leafExpiry)
-	if err != nil {
-		logger.Error("initializing cert cache", slog.String("error", err.Error()))
-		os.Exit(1)
+	// Initialize cert cache. Not needed in sni-only mode since TLS is never
+	// terminated and no leaf certs are generated.
+	var certCache *certcache.Cache
+	if cfg.TLS.Mode != config.TLSModeSNIOnly {
+		leafExpiry := time.Duration(cfg.TLS.LeafCertExpiryHours) * time.Hour
+		certCache, err = certcache.New(cfg.TLS.CACert, cfg.TLS.CAKey, cfg.TLS.CertCacheSize, leafExpiry)
+		if err != nil {
+			logger.Error("initializing cert cache", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+	} else if cfg.TLS.CACert != "" || cfg.TLS.CAKey != "" {
+		logger.Warn("tls.ca_cert and tls.ca_key are ignored when tls.mode=sni-only")
 	}
 
 	// Build upstream resolver.
@@ -155,7 +161,16 @@ func main() {
 	}
 
 	// Initialize proxy.
-	p := proxy.New(cfg.Proxy.HTTPListen, cfg.Proxy.HTTPSListen, cfg.Proxy.TunnelListen, certCache, holder, resolver, logger)
+	p := proxy.New(proxy.Options{
+		HTTPAddr:   cfg.Proxy.HTTPListen,
+		HTTPSAddr:  cfg.Proxy.HTTPSListen,
+		TunnelAddr: cfg.Proxy.TunnelListen,
+		TLSMode:    cfg.TLS.Mode,
+		CertCache:  certCache,
+		Pipeline:   holder,
+		Resolver:   resolver,
+		Logger:     logger,
+	})
 
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)

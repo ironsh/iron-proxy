@@ -13,8 +13,8 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"time"
 
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -45,12 +45,6 @@ func (p *Proxy) listenTunnel() error {
 // handleTunnel peeks at the first byte to dispatch to CONNECT or SOCKS5.
 // This is the single logging point for tunnel connection errors.
 func (p *Proxy) handleTunnel(conn net.Conn) {
-	defer func() {
-		if r := recover(); r != nil {
-			p.logger.Error("tunnel panic", slog.Any("panic", r))
-		}
-	}()
-
 	br := bufio.NewReader(conn)
 	first, err := br.Peek(1)
 	if err != nil {
@@ -248,30 +242,29 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 	}
 	req.Body = transform.NewBufferedBody(http.NoBody, 0)
 
-	pl := p.pipeline.Load()
+	mode := transform.ModeMITM
+	if p.tlsMode == config.TLSModeSNIOnly {
+		mode = transform.ModeSNIOnly
+	}
 
-	startedAt := time.Now()
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
 		SNI:    host,
+		Mode:   mode,
 	}
 
-	var reqTraces []transform.TransformTrace
 	result := &transform.PipelineResult{
 		Host:       target,
 		Method:     http.MethodConnect,
 		Path:       "",
 		RemoteAddr: remoteAddr,
 		SNI:        host,
-		StartedAt:  startedAt,
+		Mode:       mode,
 	}
-	defer func() {
-		result.Duration = time.Since(startedAt)
-		result.RequestTransforms = reqTraces
-		pl.EmitAudit(result)
-	}()
+	pl, finish := p.beginPipelineRun(result)
+	defer finish()
 
-	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &reqTraces)
+	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &result.RequestTransforms)
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
@@ -323,9 +316,15 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 	return fmt.Errorf("unsupported protocol (first byte 0x%02x) for target %s", first[0], target)
 }
 
-// serveTunnelTLS performs TLS MITM on the client connection, then serves
-// HTTP requests through the normal handleHTTP handler.
+// serveTunnelTLS handles the TLS branch of a tunnel connection. In MITM mode
+// it terminates TLS and serves HTTP via handleHTTP; in sni-only mode it
+// peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
+// port is ignored to prevent port-pivot attacks).
 func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
+	if p.tlsMode == config.TLSModeSNIOnly {
+		return p.serveSNIPassthrough(clientConn)
+	}
+
 	tlsConn := tls.Server(clientConn, &tls.Config{
 		GetCertificate: p.getCertificate,
 	})

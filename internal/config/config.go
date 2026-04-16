@@ -10,13 +10,13 @@ import (
 
 // Config is the top-level configuration for iron-proxy.
 type Config struct {
-	DNS        DNS        `yaml:"dns"`
-	Proxy      Proxy      `yaml:"proxy"`
-	TLS        TLS        `yaml:"tls"`
+	DNS        DNS         `yaml:"dns"`
+	Proxy      Proxy       `yaml:"proxy"`
+	TLS        TLS         `yaml:"tls"`
 	Transforms []Transform `yaml:"transforms"`
-	Metrics    Metrics    `yaml:"metrics"`
-	Log        Log        `yaml:"log"`
-	Tags       []string   `yaml:"tags"`
+	Metrics    Metrics     `yaml:"metrics"`
+	Log        Log         `yaml:"log"`
+	Tags       []string    `yaml:"tags"`
 }
 
 // DNS configures the built-in DNS server.
@@ -46,11 +46,23 @@ type Proxy struct {
 
 // TLS configures certificate authority and cert caching for MITM.
 type TLS struct {
-	CACert             string `yaml:"ca_cert"`
-	CAKey              string `yaml:"ca_key"`
-	CertCacheSize      int    `yaml:"cert_cache_size"`
-	LeafCertExpiryHours int   `yaml:"leaf_cert_expiry_hours"`
+	// Mode selects how the HTTPS listener handles TLS connections.
+	// "mitm" (default): terminate TLS, mint a leaf cert signed by the configured
+	// CA, and run the full request/response pipeline.
+	// "sni-only": peek the ClientHello SNI, run the pipeline with a host-only
+	// synthetic request, and TCP-passthrough to the upstream. No CA required.
+	Mode                string `yaml:"mode"`
+	CACert              string `yaml:"ca_cert"`
+	CAKey               string `yaml:"ca_key"`
+	CertCacheSize       int    `yaml:"cert_cache_size"`
+	LeafCertExpiryHours int    `yaml:"leaf_cert_expiry_hours"`
 }
+
+// TLS mode values.
+const (
+	TLSModeMITM    = "mitm"
+	TLSModeSNIOnly = "sni-only"
+)
 
 // Transform is a named transform with arbitrary config.
 // Config is a raw yaml.Node so each transform can decode it into its own typed struct.
@@ -133,6 +145,9 @@ func applyDefaults(cfg *Config) {
 		cfg.Proxy.MaxRequestBodyBytes = 1 << 20 // 1 MiB
 	}
 	// MaxResponseBodyBytes defaults to 0 (uncapped).
+	if cfg.TLS.Mode == "" {
+		cfg.TLS.Mode = TLSModeMITM
+	}
 	if cfg.TLS.CertCacheSize == 0 {
 		cfg.TLS.CertCacheSize = 1000
 	}
@@ -152,11 +167,19 @@ func Validate(cfg *Config) error {
 	if cfg.DNS.ProxyIP == "" {
 		return fmt.Errorf("dns.proxy_ip is required")
 	}
-	if cfg.TLS.CACert == "" {
-		return fmt.Errorf("tls.ca_cert is required")
-	}
-	if cfg.TLS.CAKey == "" {
-		return fmt.Errorf("tls.ca_key is required")
+
+	switch cfg.TLS.Mode {
+	case TLSModeMITM:
+		if cfg.TLS.CACert == "" {
+			return fmt.Errorf("tls.ca_cert is required")
+		}
+		if cfg.TLS.CAKey == "" {
+			return fmt.Errorf("tls.ca_key is required")
+		}
+	case TLSModeSNIOnly:
+		// CA cert/key are ignored in sni-only mode; no requirement.
+	default:
+		return fmt.Errorf("tls.mode must be %q or %q; got %q", TLSModeMITM, TLSModeSNIOnly, cfg.TLS.Mode)
 	}
 
 	if _, err := parseLogLevel(cfg.Log.Level); err != nil {

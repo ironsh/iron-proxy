@@ -22,11 +22,38 @@ const (
 	ActionReject
 )
 
+// Mode identifies how the proxy obtained the request being transformed.
+type Mode int
+
+const (
+	// ModeMITM means the request was parsed from a terminated TLS connection
+	// (or plaintext HTTP) and has full method, path, headers, and body.
+	ModeMITM Mode = iota
+
+	// ModeSNIOnly means the request is a synthetic host-only stand-in built
+	// from a peeked TLS ClientHello SNI. Method, path, headers, and body are
+	// all empty; transforms that depend on them cannot function.
+	ModeSNIOnly
+)
+
+// String returns the canonical string form of the mode.
+func (m Mode) String() string {
+	switch m {
+	case ModeMITM:
+		return "mitm"
+	case ModeSNIOnly:
+		return "sni-only"
+	default:
+		return "unknown"
+	}
+}
+
 // TransformContext carries metadata about the connection and request.
 type TransformContext struct {
 	SNI        string
 	ClientCert *x509.Certificate
 	Logger     *slog.Logger
+	Mode       Mode
 
 	// annotations is written by transforms via Annotate and read by the pipeline
 	// to build TransformTrace. Not exported — transforms use the Annotate method.
@@ -56,9 +83,10 @@ type PipelineResult struct {
 	Path       string
 	RemoteAddr string
 	SNI        string
+	Mode       Mode
 
-	StartedAt  time.Time
-	Duration   time.Duration
+	StartedAt time.Time
+	Duration  time.Duration
 
 	Action     TransformAction
 	StatusCode int
