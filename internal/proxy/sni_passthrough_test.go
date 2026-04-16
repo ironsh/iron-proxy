@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -272,6 +273,63 @@ func TestSNIPassthrough_MalformedClientHello(t *testing.T) {
 	// Malformed input is rejected before the pipeline runs, so no audit
 	// record is emitted.
 	require.Len(t, results, 0)
+}
+
+func TestSNIPassthrough_ShutdownClosesInFlight(t *testing.T) {
+	cert, pool := newLocalhostTLSCert(t)
+	upstream := startEchoTLSServer(t, cert)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	al, err := allowlist.New([]string{"localhost"}, nil, &staticResolver{hosts: map[string][]string{
+		"localhost": {"127.0.0.1"},
+	}})
+	require.NoError(t, err)
+	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
+	holder := transform.NewPipelineHolder(pipeline)
+
+	p := New(Options{
+		HTTPAddr:  "127.0.0.1:0",
+		HTTPSAddr: "127.0.0.1:0",
+		TLSMode:   "sni-only",
+		Pipeline:  holder,
+		Logger:    logger,
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			close(done)
+			return
+		}
+		_ = p.serveSNIPassthrough(conn, upstream)
+		close(done)
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		ServerName: "localhost",
+		RootCAs:    pool,
+	})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Handshake is complete and connection is idle — proxyBidi goroutines
+	// are blocked on reads in both directions. Calling Shutdown should
+	// cancel shutdownCtx and close both conns so serveSNIPassthrough returns.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, p.Shutdown(shutdownCtx))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveSNIPassthrough did not return after Shutdown")
+	}
 }
 
 func TestSNIPassthrough_CONNECTTunnel(t *testing.T) {

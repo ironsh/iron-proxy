@@ -138,14 +138,28 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, targetPort string) erro
 	result.Action = transform.ActionContinue
 	result.StatusCode = http.StatusOK
 
-	// Proxy bidirectionally until either side closes.
-	proxyBidi(clientConn, upstream, p.logger)
+	// Proxy bidirectionally until either side closes or the proxy shuts down.
+	proxyBidi(p.shutdownCtx, clientConn, upstream, p.logger)
 	return nil
 }
 
 // proxyBidi copies bytes between two connections in both directions, closing
-// write halves on EOF and logging copy errors at debug level.
-func proxyBidi(a, b net.Conn, logger *slog.Logger) {
+// write halves on EOF and logging copy errors at debug level. If ctx is
+// canceled (e.g. by Proxy.Shutdown), both connections are closed to unblock
+// any in-flight Reads.
+func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = a.Close()
+			_ = b.Close()
+		case <-done:
+		}
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 

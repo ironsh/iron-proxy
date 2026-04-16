@@ -40,6 +40,11 @@ type Proxy struct {
 	transport      *http.Transport
 	resolver       *net.Resolver
 	logger         *slog.Logger
+
+	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
+	// connections that would otherwise sit on blocking Reads.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // Options configures Proxy construction.
@@ -60,16 +65,19 @@ func New(opts Options) *Proxy {
 	if opts.TLSMode == "" {
 		opts.TLSMode = "mitm"
 	}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	p := &Proxy{
-		httpsAddr:  opts.HTTPSAddr,
-		tlsMode:    opts.TLSMode,
-		tunnelAddr: opts.TunnelAddr,
-		tunnelDone: make(chan struct{}),
-		certCache:  opts.CertCache,
-		pipeline:   opts.Pipeline,
-		transport:  buildTransport(opts.Resolver),
-		resolver:   opts.Resolver,
-		logger:     opts.Logger,
+		httpsAddr:      opts.HTTPSAddr,
+		tlsMode:        opts.TLSMode,
+		tunnelAddr:     opts.TunnelAddr,
+		tunnelDone:     make(chan struct{}),
+		certCache:      opts.CertCache,
+		pipeline:       opts.Pipeline,
+		transport:      buildTransport(opts.Resolver),
+		resolver:       opts.Resolver,
+		logger:         opts.Logger,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 
 	p.httpServer = &http.Server{
@@ -171,6 +179,10 @@ func isClosedErr(err error) bool {
 
 // Shutdown gracefully stops all servers.
 func (p *Proxy) Shutdown(ctx context.Context) error {
+	// Cancel shutdownCtx first so any in-flight TCP-passthrough proxyBidi
+	// goroutines close their connections and unblock their blocking Reads.
+	p.shutdownCancel()
+
 	errHTTP := p.httpServer.Shutdown(ctx)
 
 	var errHTTPS error
