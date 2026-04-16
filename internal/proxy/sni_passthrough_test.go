@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
@@ -63,37 +64,13 @@ func newLocalhostTLSCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 // HTTP/1.1 request with "echo <path>\n". Returns the "host:port" address.
 func startEchoTLSServer(t *testing.T, cert tls.Certificate) string {
 	t.Helper()
-
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				req, err := http.ReadRequest(br)
-				if err != nil {
-					return
-				}
-				body := fmt.Sprintf("echo %s\n", req.URL.Path)
-				resp := fmt.Sprintf(
-					"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nContent-Type: text/plain\r\n\r\n%s",
-					len(body), body,
-				)
-				_, _ = c.Write([]byte(resp))
-			}(conn)
-		}
-	}()
-
-	return ln.Addr().String()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, "echo %s\n", r.URL.Path)
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
 }
 
 // startSNIPassthroughProxy builds a Proxy in sni-only mode, listens on a
