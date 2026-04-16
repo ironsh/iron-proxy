@@ -17,3 +17,4 @@ linters:
         - (*net.TCPConn).CloseWrite
         - (*net.TCPListener).Close
         - (net.Listener).Close
+        - (*crypto/tls.Conn).Close
