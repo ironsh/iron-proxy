@@ -29,7 +29,14 @@ func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy,
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
-	p := New("127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", cache, holder, nil, testLogger())
+	p := New(Options{
+		HTTPAddr:   "127.0.0.1:0",
+		HTTPSAddr:  "127.0.0.1:0",
+		TunnelAddr: "127.0.0.1:0",
+		CertCache:  cache,
+		Pipeline:   holder,
+		Logger:     testLogger(),
+	})
 
 	// Start tunnel listener
 	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")

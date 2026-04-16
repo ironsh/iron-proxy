@@ -30,6 +30,7 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.String("path", result.Path),
 				slog.String("remote_addr", result.RemoteAddr),
 				slog.String("sni", result.SNI),
+				slog.String("mode", result.Mode.String()),
 				slog.String("action", action),
 				slog.Int("status_code", result.StatusCode),
 				slog.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
