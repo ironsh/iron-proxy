@@ -16,6 +16,7 @@ type Config struct {
 	Transforms []Transform `yaml:"transforms"`
 	Metrics    Metrics    `yaml:"metrics"`
 	Log        Log        `yaml:"log"`
+	Tags       []string   `yaml:"tags"`
 }
 
 // DNS configures the built-in DNS server.

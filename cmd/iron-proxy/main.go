@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -220,7 +219,7 @@ func main() {
 // is canceled and sends fatal errors on errc.
 func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) *transform.PipelineHolder {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
-	tags := parseTags(os.Getenv("IRON_TAGS"))
+	tags := cfg.Tags
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
 	client := controlplane.NewClient(cpURL, logger)
@@ -322,21 +321,6 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 		os.Exit(1)
 	}
 	return transform.NewPipelineHolder(pipeline)
-}
-
-func parseTags(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	tags := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			tags = append(tags, p)
-		}
-	}
-	return tags
 }
 
 // stateStorePath returns the state store path without creating any directories.
