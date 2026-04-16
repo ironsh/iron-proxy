@@ -132,10 +132,9 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	return nil
 }
 
-// proxyBidi copies bytes between two connections in both directions, closing
-// write halves on EOF and logging copy errors at debug level. If ctx is
-// canceled (e.g. by Proxy.Shutdown), both connections are closed to unblock
-// any in-flight Reads.
+// proxyBidi copies bytes between two connections in both directions. When
+// either direction ends (EOF, error, or ctx cancellation), both connections
+// are closed so the other direction unblocks.
 func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -154,9 +153,7 @@ func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
 		if _, err := io.Copy(b, a); err != nil {
 			logger.Debug("sni passthrough a->b copy error", slog.String("error", err.Error()))
 		}
-		if tc, ok := b.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
+		cancel()
 	}()
 
 	go func() {
@@ -164,9 +161,7 @@ func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
 		if _, err := io.Copy(a, b); err != nil {
 			logger.Debug("sni passthrough b->a copy error", slog.String("error", err.Error()))
 		}
-		if tc, ok := a.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
+		cancel()
 	}()
 
 	wg.Wait()
