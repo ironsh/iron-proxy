@@ -44,12 +44,6 @@ func (p *Proxy) listenTunnel() error {
 // handleTunnel peeks at the first byte to dispatch to CONNECT or SOCKS5.
 // This is the single logging point for tunnel connection errors.
 func (p *Proxy) handleTunnel(conn net.Conn) {
-	defer func() {
-		if r := recover(); r != nil {
-			p.logger.Error("tunnel panic", slog.Any("panic", r))
-		}
-	}()
-
 	br := bufio.NewReader(conn)
 	first, err := br.Peek(1)
 	if err != nil {

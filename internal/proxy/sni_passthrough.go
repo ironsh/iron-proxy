@@ -24,12 +24,6 @@ const (
 // the transform pipeline with a host-only synthetic request, and on accept
 // TCP-passthroughs the connection to the upstream server.
 func (p *Proxy) handleSNIPassthrough(clientConn net.Conn) {
-	defer func() {
-		if r := recover(); r != nil {
-			p.logger.Error("sni passthrough panic", slog.Any("panic", r))
-		}
-	}()
-
 	target := net.JoinHostPort("", "443")
 	if err := p.serveSNIPassthrough(clientConn, target); err != nil {
 		p.logger.Debug("sni passthrough error", slog.String("error", err.Error()))
