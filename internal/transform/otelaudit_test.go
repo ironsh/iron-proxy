@@ -103,7 +103,24 @@ func TestOTELAuditFunc_AllowedRequest(t *testing.T) {
 	// Second transform: secrets with annotations
 	t1 := mapFromValue(transformSlice[1])
 	assert.Equal(t, "secrets", t1["name"].AsString())
-	assert.Contains(t, t1["annotations"].AsString(), "OPENAI_API_KEY")
+
+	// annotations should be a nested map, not a JSON string.
+	annotations := t1["annotations"]
+	require.Equal(t, log.KindMap, annotations.Kind())
+	annMap := mapFromValue(annotations)
+
+	swapped := annMap["swapped"]
+	require.Equal(t, log.KindSlice, swapped.Kind())
+	swappedSlice := swapped.AsSlice()
+	require.Len(t, swappedSlice, 1)
+
+	entry := mapFromValue(swappedSlice[0])
+	assert.Equal(t, "OPENAI_API_KEY", entry["secret"].AsString())
+	locations := entry["locations"]
+	require.Equal(t, log.KindSlice, locations.Kind())
+	locSlice := locations.AsSlice()
+	require.Len(t, locSlice, 1)
+	assert.Equal(t, "header:Authorization", locSlice[0].AsString())
 }
 
 func TestOTELAuditFunc_RejectedRequest(t *testing.T) {

@@ -3,6 +3,7 @@ package transform
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/log"
@@ -141,14 +142,45 @@ func transformTracesValue(traces []TransformTrace) log.Value {
 	return log.SliceValue(vals...)
 }
 
-// annotationsValue converts an arbitrary map[string]any into an OTEL log Value.
-// Since annotations can contain nested structures (e.g. swapped secret lists),
-// we JSON-encode the entire map as a string for maximum compatibility with
-// OTEL backends.
+// annotationsValue converts an arbitrary map[string]any into an OTEL log Value,
+// preserving nested structure. Annotation values may be arbitrary Go types
+// (structs, slices, maps), so we round-trip through JSON to normalize everything
+// into primitives, maps, and slices before building the log.Value tree.
 func annotationsValue(annotations map[string]any) log.Value {
 	data, err := json.Marshal(annotations)
 	if err != nil {
 		return log.StringValue("{}")
 	}
-	return log.StringValue(string(data))
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return log.StringValue("{}")
+	}
+	return toLogValue(normalized)
+}
+
+func toLogValue(v any) log.Value {
+	switch x := v.(type) {
+	case nil:
+		return log.Value{}
+	case bool:
+		return log.BoolValue(x)
+	case string:
+		return log.StringValue(x)
+	case float64:
+		return log.Float64Value(x)
+	case []any:
+		vals := make([]log.Value, len(x))
+		for i, item := range x {
+			vals[i] = toLogValue(item)
+		}
+		return log.SliceValue(vals...)
+	case map[string]any:
+		kvs := make([]log.KeyValue, 0, len(x))
+		for k, val := range x {
+			kvs = append(kvs, log.KeyValue{Key: k, Value: toLogValue(val)})
+		}
+		return log.MapValue(kvs...)
+	default:
+		return log.StringValue(fmt.Sprintf("%v", x))
+	}
 }
