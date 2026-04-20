@@ -98,9 +98,17 @@ func main() {
 	// and (in managed mode) the config poller.
 	errc := make(chan error, 4)
 	var holder *transform.PipelineHolder
+	var otelCfg iotel.ExportConfig
 
 	if managed {
-		holder = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+		var ingestToken string
+		holder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+		if ingestToken != "" {
+			otelCfg.DefaultEndpoint = "https://ingest.iron.sh"
+			otelCfg.DefaultHeaders = map[string]string{
+				"Authorization": "Bearer " + ingestToken,
+			}
+		}
 	} else {
 		holder = initStandalone(cfg, bodyLimits, logger)
 	}
@@ -114,8 +122,8 @@ func main() {
 	// Set up audit function.
 	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
 	var otelShutdown func(context.Context) error
-	if iotel.Enabled() {
-		otelProvider, otelErr := iotel.NewLoggerProvider(ctx)
+	if otelCfg.Enabled() {
+		otelProvider, otelErr := iotel.NewLoggerProvider(ctx, otelCfg)
 		if otelErr != nil {
 			logger.Error("initializing OTEL log provider", slog.String("error", otelErr.Error()))
 			os.Exit(1)
@@ -231,8 +239,9 @@ func main() {
 
 // initManaged registers with the control plane, performs an initial sync, builds
 // the initial pipeline, and starts the config poller. The poller runs until ctx
-// is canceled and sends fatal errors on errc.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) *transform.PipelineHolder {
+// is canceled and sends fatal errors on errc. Returns the pipeline holder and
+// the ingest token from the initial sync (empty if the sync failed).
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	tags := cfg.Tags
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
@@ -280,10 +289,12 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	}
 
 	configHash := ""
+	ingestToken := ""
 	var initialRules json.RawMessage
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
 		initialRules = syncResp.Rules
+		ingestToken = syncResp.IngestToken
 		if len(syncResp.Rules) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
@@ -325,7 +336,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		errc <- poller.Run(ctx)
 	}()
 
-	return holder
+	return holder, ingestToken
 }
 
 // initStandalone builds the pipeline from the YAML config's transforms.

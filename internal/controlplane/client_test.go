@@ -146,9 +146,10 @@ func TestSyncSuccess(t *testing.T) {
 
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(SyncResponse{
-			ConfigHash: "sha256:def",
-			Rules:      json.RawMessage(`[{"name":"allowlist"}]`),
-			Secrets:    json.RawMessage(`{"API_KEY":"secret"}`),
+			ConfigHash:  "sha256:def",
+			Rules:       json.RawMessage(`[{"name":"allowlist"}]`),
+			Secrets:     json.RawMessage(`{"API_KEY":"secret"}`),
+			IngestToken: "ingest_token_abc",
 		})
 	}))
 	defer server.Close()
@@ -164,6 +165,7 @@ func TestSyncSuccess(t *testing.T) {
 	require.Equal(t, "sha256:def", resp.ConfigHash)
 	require.NotNil(t, resp.Rules)
 	require.NotNil(t, resp.Secrets)
+	require.Equal(t, "ingest_token_abc", resp.IngestToken)
 }
 
 func TestSyncUnchanged(t *testing.T) {
