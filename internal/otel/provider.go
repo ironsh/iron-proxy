@@ -6,6 +6,9 @@
 //   - OTEL_EXPORTER_OTLP_HEADERS: comma-separated key=value pairs for auth
 //   - OTEL_RESOURCE_ATTRIBUTES: comma-separated key=value resource attributes
 //   - OTEL_SERVICE_NAME: service name (defaults to "iron-proxy")
+//
+// Callers may also provide an [ExportConfig] with defaults (used in managed
+// mode). Environment variables always take precedence over these defaults.
 package otel
 
 import (
@@ -21,11 +24,22 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 )
 
-// NewLoggerProvider creates an OTEL LoggerProvider configured via environment
-// variables. The caller must call Shutdown on the returned provider during
-// graceful shutdown. Both exporters read their config (endpoint, headers, TLS,
-// etc.) from standard OTEL_EXPORTER_OTLP_* env vars automatically.
-func NewLoggerProvider(ctx context.Context) (*sdklog.LoggerProvider, error) {
+// ExportConfig provides default OTLP export settings for fields not set via
+// OTEL_EXPORTER_OTLP_* environment variables.
+type ExportConfig struct {
+	DefaultEndpoint string
+	DefaultHeaders  map[string]string
+}
+
+// Enabled reports whether OTLP export should be initialized.
+func (c ExportConfig) Enabled() bool {
+	return c.DefaultEndpoint != "" || endpointFromEnv()
+}
+
+// NewLoggerProvider creates an OTEL LoggerProvider. Endpoint and headers from
+// cfg are used only when the corresponding OTEL_EXPORTER_OTLP_* env vars are
+// unset, so env vars always win.
+func NewLoggerProvider(ctx context.Context, cfg ExportConfig) (*sdklog.LoggerProvider, error) {
 	protocol := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")
 	if protocol == "" {
 		protocol = "http/protobuf"
@@ -35,9 +49,9 @@ func NewLoggerProvider(ctx context.Context) (*sdklog.LoggerProvider, error) {
 	var err error
 	switch protocol {
 	case "http/protobuf":
-		exporter, err = otlploghttp.New(ctx)
+		exporter, err = otlploghttp.New(ctx, httpOptions(cfg)...)
 	case "grpc":
-		exporter, err = otlploggrpc.New(ctx)
+		exporter, err = otlploggrpc.New(ctx, grpcOptions(cfg)...)
 	default:
 		return nil, fmt.Errorf("unsupported OTEL_EXPORTER_OTLP_PROTOCOL: %q (expected \"http/protobuf\" or \"grpc\")", protocol)
 	}
@@ -69,9 +83,34 @@ func NewLoggerProvider(ctx context.Context) (*sdklog.LoggerProvider, error) {
 	return provider, nil
 }
 
-// Enabled returns true if OTEL_EXPORTER_OTLP_ENDPOINT is set, indicating
-// that the user wants to export telemetry.
-func Enabled() bool {
-	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+func httpOptions(cfg ExportConfig) []otlploghttp.Option {
+	var opts []otlploghttp.Option
+	if cfg.DefaultEndpoint != "" && !endpointFromEnv() {
+		opts = append(opts, otlploghttp.WithEndpointURL(cfg.DefaultEndpoint))
+	}
+	if len(cfg.DefaultHeaders) > 0 && !headersFromEnv() {
+		opts = append(opts, otlploghttp.WithHeaders(cfg.DefaultHeaders))
+	}
+	return opts
 }
 
+func grpcOptions(cfg ExportConfig) []otlploggrpc.Option {
+	var opts []otlploggrpc.Option
+	if cfg.DefaultEndpoint != "" && !endpointFromEnv() {
+		opts = append(opts, otlploggrpc.WithEndpointURL(cfg.DefaultEndpoint))
+	}
+	if len(cfg.DefaultHeaders) > 0 && !headersFromEnv() {
+		opts = append(opts, otlploggrpc.WithHeaders(cfg.DefaultHeaders))
+	}
+	return opts
+}
+
+func endpointFromEnv() bool {
+	return os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") != "" ||
+		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+}
+
+func headersFromEnv() bool {
+	return os.Getenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS") != "" ||
+		os.Getenv("OTEL_EXPORTER_OTLP_HEADERS") != ""
+}

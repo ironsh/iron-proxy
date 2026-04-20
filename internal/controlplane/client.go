@@ -20,9 +20,10 @@ type Credential struct {
 
 // SyncResponse is the parsed response from the sync endpoint.
 type SyncResponse struct {
-	ConfigHash string          `json:"config_hash"`
-	Rules      json.RawMessage `json:"rules"`
-	Secrets    json.RawMessage `json:"secrets"`
+	ConfigHash  string          `json:"config_hash"`
+	Rules       json.RawMessage `json:"rules"`
+	Secrets     json.RawMessage `json:"secrets"`
+	IngestToken string          `json:"ingest_token"`
 }
 
 // Client talks to the iron.sh control plane REST API.
