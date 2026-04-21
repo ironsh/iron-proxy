@@ -43,6 +43,9 @@ func main() {
 		case "init":
 			runInit(os.Args[2:])
 			return
+		case "version", "--version", "-v":
+			fmt.Println(version)
+			return
 		}
 	}
 
