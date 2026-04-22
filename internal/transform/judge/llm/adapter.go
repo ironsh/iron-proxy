@@ -36,11 +36,13 @@ type Adapter interface {
 }
 
 // NewAdapter constructs an Adapter from a provider type string and its
-// type-specific YAML config. v1 supports only "anthropic".
+// type-specific YAML config. Supported types: "anthropic", "openai".
 func NewAdapter(providerType string, cfg yaml.Node, logger *slog.Logger) (Adapter, error) {
 	switch providerType {
 	case "anthropic":
 		return newAnthropic(cfg, logger)
+	case "openai":
+		return newOpenAI(cfg, logger)
 	case "":
 		return nil, fmt.Errorf("provider.type is required")
 	default:

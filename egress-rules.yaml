@@ -35,5 +35,6 @@ domains:
   - "secretsmanager.us-west-1.amazonaws.com"
   - "ssm.us-west-1.amazonaws.com"
 
-  # Anthropic (for judge transform integration tests)
+  # Anthropic / OpenAI (for judge transform integration tests)
   - "api.anthropic.com"
+  - "api.openai.com"

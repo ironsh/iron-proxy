@@ -204,6 +204,10 @@ transforms:
         model: "claude-haiku-4-5-20251001"
         api_key_env: "ANTHROPIC_API_KEY"
         max_tokens: 256
+        # OpenAI backend alternative:
+        # type: "openai"
+        # model: "gpt-4o-mini"
+        # api_key_env: "OPENAI_API_KEY"
       prompt: |
         This agent performs code review on the repository under review.
         Allow writes to the comments and reviews endpoints of the specific

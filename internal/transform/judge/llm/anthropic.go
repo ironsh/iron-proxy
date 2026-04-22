@@ -3,23 +3,18 @@ package llm
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	defaultMaxTokens        = 256
 	anthropicVersion        = "2023-06-01"
 )
 
@@ -47,12 +42,9 @@ func newAnthropic(cfg yaml.Node, logger *slog.Logger) (*anthropicAdapter, error)
 	if c.Model == "" {
 		return nil, fmt.Errorf("anthropic provider: model is required")
 	}
-	if c.APIKeyEnv == "" {
-		return nil, fmt.Errorf("anthropic provider: api_key_env is required")
-	}
-	apiKey := os.Getenv(c.APIKeyEnv)
-	if apiKey == "" {
-		return nil, fmt.Errorf("anthropic provider: env var %q is empty", c.APIKeyEnv)
+	apiKey, err := resolveAPIKey("anthropic", c.APIKeyEnv)
+	if err != nil {
+		return nil, err
 	}
 	baseURL := c.BaseURL
 	if baseURL == "" {
@@ -74,22 +66,6 @@ func newAnthropic(cfg yaml.Node, logger *slog.Logger) (*anthropicAdapter, error)
 		httpClient: &http.Client{Transport: buildTransport()},
 		logger:     logger,
 	}, nil
-}
-
-// buildTransport mirrors the proxy's upstream-transport timeouts so a stuck
-// Anthropic endpoint can't hold a goroutine past the per-call context timeout.
-func buildTransport() *http.Transport {
-	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
 }
 
 func (a *anthropicAdapter) Name() string  { return "anthropic" }
@@ -187,12 +163,4 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req Request) (Response,
 		InputTokens:  parsed.Usage.InputTokens,
 		OutputTokens: parsed.Usage.OutputTokens,
 	}, nil
-}
-
-func truncateForError(b []byte) string {
-	const max = 512
-	if len(b) <= max {
-		return string(b)
-	}
-	return string(b[:max]) + "..."
 }

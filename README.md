@@ -360,7 +360,7 @@ many judges with different prompts scoped to different rules.
       - host: "api.github.com"
         methods: ["POST", "PATCH", "DELETE", "PUT"]
     provider:
-      type: "anthropic"           # v1 supports only anthropic
+      type: "anthropic"           # "anthropic" or "openai"
       model: "claude-haiku-4-5-20251001"
       api_key_env: "ANTHROPIC_API_KEY"
       max_tokens: 256
@@ -387,6 +387,14 @@ Pipeline ordering with the secrets transform:
 - Alternatively, placing the judge after secrets lets it evaluate the exact
   wire form that will egress, at the cost of sending real credentials to the
   LLM provider. Only choose this if your threat model accepts that trade.
+
+Supported providers:
+
+- **`anthropic`** (Messages API). Uses `api_key_env`, `model`, optional
+  `base_url` and `max_tokens`.
+- **`openai`** (Chat Completions API). Same fields as above; set
+  `type: openai`, point `api_key_env` at the env var holding your OpenAI
+  key, and pick a model like `gpt-4o-mini`.
 
 Audit output: every matched request adds structured fields under the transform
 trace, including `judge.instance`, `judge.decision`, `judge.reason`,
