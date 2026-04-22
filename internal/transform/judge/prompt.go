@@ -1,3 +1,7 @@
+// Portions adapted from CrabTrap (https://github.com/brexhq/CrabTrap)
+// Copyright (c) 2026 Brex, LLC
+// Licensed under MIT
+
 package judge
 
 import (
