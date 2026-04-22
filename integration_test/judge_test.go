@@ -15,7 +15,27 @@ import (
 // TestJudgeAnthropic exercises the judge transform's path-based policy
 // against the real Anthropic API. /allowed passes, /denied is rejected.
 func TestJudgeAnthropic(t *testing.T) {
-	f := setupJudgeFixture(t, "judge_pipeline.yaml")
+	runJudgePathPolicy(t, "judge_pipeline.yaml", "ANTHROPIC_API_KEY")
+}
+
+// TestJudgeAnthropicBody verifies the judge inspects the request body in its
+// envelope against the Anthropic backend.
+func TestJudgeAnthropicBody(t *testing.T) {
+	runJudgeBodyPolicy(t, "judge_body.yaml", "ANTHROPIC_API_KEY")
+}
+
+// TestJudgeOpenAI is the OpenAI equivalent of TestJudgeAnthropic.
+func TestJudgeOpenAI(t *testing.T) {
+	runJudgePathPolicy(t, "judge_openai_pipeline.yaml", "OPENAI_API_KEY")
+}
+
+// TestJudgeOpenAIBody is the OpenAI equivalent of TestJudgeAnthropicBody.
+func TestJudgeOpenAIBody(t *testing.T) {
+	runJudgeBodyPolicy(t, "judge_openai_body.yaml", "OPENAI_API_KEY")
+}
+
+func runJudgePathPolicy(t *testing.T, configTemplate, envVarName string) {
+	f := setupJudgeFixture(t, configTemplate, envVarName)
 
 	t.Run("allow_decision_passes_through", func(t *testing.T) {
 		resp := f.do(t, "GET", "/allowed", "")
@@ -36,10 +56,8 @@ func TestJudgeAnthropic(t *testing.T) {
 	})
 }
 
-// TestJudgeAnthropicBody verifies the judge inspects the request body in its
-// envelope. The policy denies any request whose body mentions "banana".
-func TestJudgeAnthropicBody(t *testing.T) {
-	f := setupJudgeFixture(t, "judge_body.yaml")
+func runJudgeBodyPolicy(t *testing.T, configTemplate, envVarName string) {
+	f := setupJudgeFixture(t, configTemplate, envVarName)
 
 	t.Run("clean_body_allowed", func(t *testing.T) {
 		resp := f.do(t, "POST", "/submit", "I would like to order some apples and pears.")
@@ -73,12 +91,12 @@ type judgeFixture struct {
 
 // setupJudgeFixture boots a local upstream and an iron-proxy instance
 // configured from the named testdata template. It skips the test if
-// ANTHROPIC_API_KEY is unset so local runs without the secret pass cleanly.
-func setupJudgeFixture(t *testing.T, configTemplate string) *judgeFixture {
+// envVarName is unset so local runs without the secret pass cleanly.
+func setupJudgeFixture(t *testing.T, configTemplate, envVarName string) *judgeFixture {
 	t.Helper()
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	apiKey := os.Getenv(envVarName)
 	if apiKey == "" {
-		t.Skip("ANTHROPIC_API_KEY not set; skipping real-LLM judge integration test")
+		t.Skipf("%s not set; skipping real-LLM judge integration test", envVarName)
 	}
 
 	hits := make(chan upstreamHit, 8)
@@ -91,7 +109,7 @@ func setupJudgeFixture(t *testing.T, configTemplate string) *judgeFixture {
 	t.Cleanup(upstream.Close)
 
 	cfgPath := renderConfig(t, t.TempDir(), configTemplate, nil)
-	proxy := startProxy(t, proxyBinary(t), cfgPath, []string{"ANTHROPIC_API_KEY=" + apiKey})
+	proxy := startProxy(t, proxyBinary(t), cfgPath, []string{envVarName + "=" + apiKey})
 
 	return &judgeFixture{
 		proxyAddr:    proxy.HTTPAddr,
