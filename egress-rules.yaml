@@ -34,3 +34,6 @@ domains:
   # AWS (for integration tests)
   - "secretsmanager.us-west-1.amazonaws.com"
   - "ssm.us-west-1.amazonaws.com"
+
+  # Anthropic (for judge transform integration tests)
+  - "api.anthropic.com"

@@ -338,6 +338,65 @@ Secret sources:
   `with_decryption` defaults to `true`, which is the expected setting for
   `SecureString` parameters.
 
+### Judge
+
+The judge transform calls an LLM to produce an allow/deny decision for
+requests that match its URL rules. Each entry under `transforms:` is an
+independent judge instance with its own natural-language policy, LLM backend,
+timeout, semaphore, and circuit breaker. Operators can deploy zero, one, or
+many judges with different prompts scoped to different rules.
+
+```yaml
+- name: judge
+  config:
+    name: "github-write-guard"    # required; identifies the instance in audit logs
+    fallback: "deny"              # deny (default) | skip. No "allow" fallback ships in v1.
+    timeout: "8s"                 # per-call LLM timeout
+    max_concurrent: 100           # semaphore capacity; additional calls wait
+    circuit_breaker:
+      consecutive_failures: 5
+      cooldown: "10s"
+    rules:                        # uses the same matcher as allowlist/secrets
+      - host: "api.github.com"
+        methods: ["POST", "PATCH", "DELETE", "PUT"]
+    provider:
+      type: "anthropic"           # v1 supports only anthropic
+      model: "claude-haiku-4-5-20251001"
+      api_key_env: "ANTHROPIC_API_KEY"
+      max_tokens: 256
+    prompt: |
+      Natural-language policy describing what is allowed for requests that
+      match the rules above. Kept short and specific.
+```
+
+Invariants:
+
+- The judge can only reject. It never approves a request the static allowlist
+  would have denied. Static deny always wins.
+- Non-matching requests are ignored: no LLM call, no audit annotations.
+- On LLM error, timeout, circuit-breaker-open, or malformed model output, the
+  configured `fallback` applies. `deny` blocks the request (the recommended
+  default for production). `skip` defers to the rest of the pipeline; since
+  iron-proxy is default-deny, unmatched requests are still blocked.
+
+Pipeline ordering with the secrets transform:
+
+- **Recommended:** place the judge **before** the secrets transform. The LLM
+  provider sees proxy tokens, never the real credentials the workload has
+  access to.
+- Alternatively, placing the judge after secrets lets it evaluate the exact
+  wire form that will egress, at the cost of sending real credentials to the
+  LLM provider. Only choose this if your threat model accepts that trade.
+
+Audit output: every matched request adds structured fields under the transform
+trace, including `judge.instance`, `judge.decision`, `judge.reason`,
+`judge.duration_ms`, `judge.input_tokens`, `judge.output_tokens`,
+`judge.fallback_applied` (when a fallback fires), and
+`judge.circuit_breaker_tripped` (when the breaker is open).
+
+Credits: thanks to Brex for their CrabTrap project (MIT-licensed), which
+informed this design.
+
 ### Body limits
 
 Transforms that inspect or forward request/response bodies (secrets body

@@ -183,6 +183,33 @@ transforms:
       target: "localhost:9501"
       # send_request_body/send_response_body default to false (headers only)
 
+  # Judge transforms: each entry is an independent LLM-backed allow/deny
+  # decision, scoped to its own rules and carrying its own natural-language
+  # policy. Place judge BEFORE the secrets transform so the LLM provider
+  # never sees real credentials.
+  - name: judge
+    config:
+      name: "github-write-guard"
+      fallback: "deny"            # deny (default) | skip
+      timeout: "8s"
+      max_concurrent: 100
+      circuit_breaker:
+        consecutive_failures: 5
+        cooldown: "10s"
+      rules:
+        - host: "api.github.com"
+          methods: ["POST", "PATCH", "DELETE", "PUT"]
+      provider:
+        type: "anthropic"
+        model: "claude-haiku-4-5-20251001"
+        api_key_env: "ANTHROPIC_API_KEY"
+        max_tokens: 256
+      prompt: |
+        This agent performs code review on the repository under review.
+        Allow writes to the comments and reviews endpoints of the specific
+        repository under review. Deny writes to user settings, organization
+        management, billing, or any repository the agent is not reviewing.
+
 # Logging
 log:
   level: "info"  # debug, info, warn, error
