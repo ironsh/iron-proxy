@@ -206,7 +206,7 @@ transforms:
         max_tokens: 256
         # OpenAI backend alternative:
         # type: "openai"
-        # model: "gpt-4o-mini"
+        # model: "gpt-5.4-nano"
         # api_key_env: "OPENAI_API_KEY"
       prompt: |
         This agent performs code review on the repository under review.

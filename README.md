@@ -394,7 +394,7 @@ Supported providers:
   `base_url` and `max_tokens`.
 - **`openai`** (Chat Completions API). Same fields as above; set
   `type: openai`, point `api_key_env` at the env var holding your OpenAI
-  key, and pick a model like `gpt-4o-mini`.
+  key, and pick a model like `gpt-5.4-nano`.
 
 Audit output: every matched request adds structured fields under the transform
 trace, including `judge.instance`, `judge.decision`, `judge.reason`,

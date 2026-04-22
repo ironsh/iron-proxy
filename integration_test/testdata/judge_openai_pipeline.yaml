@@ -26,7 +26,7 @@ transforms:
         - host: "127.0.0.1"
       provider:
         type: "openai"
-        model: "gpt-4o-mini"
+        model: "gpt-5.4-nano"
         api_key_env: "OPENAI_API_KEY"
         max_tokens: 128
       prompt: |
