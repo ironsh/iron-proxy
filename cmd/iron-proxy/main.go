@@ -29,6 +29,7 @@ import (
 	_ "github.com/ironsh/iron-proxy/internal/transform/annotate"
 	_ "github.com/ironsh/iron-proxy/internal/transform/grpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/judge"
+	_ "github.com/ironsh/iron-proxy/internal/transform/jwtauth"
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 

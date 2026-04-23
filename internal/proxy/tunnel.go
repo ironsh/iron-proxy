@@ -90,9 +90,19 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header) {
-		if _, err := fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n"); err != nil {
-			return fmt.Errorf("write 403: %w", err)
+	if ok, rejectResp := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header); !ok {
+		status := 403
+		var headerLines string
+		if rejectResp != nil {
+			status = rejectResp.StatusCode
+			for k, vals := range rejectResp.Header {
+				for _, v := range vals {
+					headerLines += fmt.Sprintf("%s: %s\r\n", k, v)
+				}
+			}
+		}
+		if _, err := fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\n%s\r\n", status, http.StatusText(status), headerLines); err != nil {
+			return fmt.Errorf("write %d: %w", status, err)
 		}
 		return nil
 	}
@@ -202,7 +212,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil) {
+	if ok, _ := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil); !ok {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
 		}
@@ -230,7 +240,7 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 // is non-nil the headers from the original CONNECT request (e.g.
 // Proxy-Authorization) are forwarded to transforms so they can make
 // authentication and policy decisions at the tunnel level.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) bool {
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response) {
 	host, _, _ := net.SplitHostPort(target)
 
 	hdr := http.Header{}
@@ -281,7 +291,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 			slog.String("target", target),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return false, nil
 	}
 	if rejectResp != nil {
 		result.Action = transform.ActionReject
@@ -290,12 +300,12 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 			slog.String("target", target),
 			slog.Int("status", rejectResp.StatusCode),
 		)
-		return false
+		return false, rejectResp
 	}
 
 	result.Action = transform.ActionContinue
 	result.StatusCode = http.StatusOK
-	return true
+	return true, nil
 }
 
 // serveTunnel peeks at the client's first byte after the CONNECT/SOCKS5
