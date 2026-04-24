@@ -90,7 +90,7 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host) {
+	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header) {
 		if _, err := fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n"); err != nil {
 			return fmt.Errorf("write 403: %w", err)
 		}
@@ -202,7 +202,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), target) {
+	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil) {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
 		}
@@ -226,15 +226,23 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 }
 
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
-// pipeline to decide whether the tunnel should be allowed.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
+// pipeline to decide whether the tunnel should be allowed. When connectHeaders
+// is non-nil the headers from the original CONNECT request (e.g.
+// Proxy-Authorization) are forwarded to transforms so they can make
+// authentication and policy decisions at the tunnel level.
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) bool {
 	host, _, _ := net.SplitHostPort(target)
+
+	hdr := http.Header{}
+	if connectHeaders != nil {
+		hdr = connectHeaders.Clone()
+	}
 
 	req := &http.Request{
 		Method:     http.MethodConnect,
 		Host:       target,
 		URL:        &url.URL{Host: target},
-		Header:     http.Header{},
+		Header:     hdr,
 		RemoteAddr: remoteAddr,
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
