@@ -18,6 +18,12 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
+// tunnelAnnotationsKey is the context key for CONNECT transform annotations
+// propagated to inner HTTP requests within the same tunnel.
+type tunnelAnnotationsKeyType struct{}
+
+var tunnelAnnotationsKey = tunnelAnnotationsKeyType{}
+
 // listenTunnel starts the CONNECT/SOCKS5 tunnel listener.
 func (p *Proxy) listenTunnel() error {
 	ln, err := net.Listen("tcp", p.tunnelAddr)
@@ -90,7 +96,8 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	if ok, rejectResp := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header); !ok {
+	ok, rejectResp, connectAnnotations := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header)
+	if !ok {
 		status := 403
 		var headerLines string
 		if rejectResp != nil {
@@ -112,7 +119,7 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("write 200: %w", err)
 	}
 
-	return p.serveTunnel(conn, host)
+	return p.serveTunnel(conn, host, connectAnnotations)
 }
 
 // handleSOCKS5 handles SOCKS5 tunnel requests.
@@ -212,7 +219,8 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	if ok, _ := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil); !ok {
+	ok, _, connectAnnotations := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil)
+	if !ok {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
 		}
@@ -225,7 +233,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("write success reply: %w", err)
 	}
 
-	return p.serveTunnel(conn, target)
+	return p.serveTunnel(conn, target, connectAnnotations)
 }
 
 // socks5Reply sends a SOCKS5 reply with the given status code.
@@ -240,7 +248,7 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 // is non-nil the headers from the original CONNECT request (e.g.
 // Proxy-Authorization) are forwarded to transforms so they can make
 // authentication and policy decisions at the tunnel level.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response) {
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response, map[string]any) {
 	host, _, _ := net.SplitHostPort(target)
 
 	hdr := http.Header{}
@@ -291,7 +299,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 			slog.String("target", target),
 			slog.String("error", err.Error()),
 		)
-		return false, nil
+		return false, nil, nil
 	}
 	if rejectResp != nil {
 		result.Action = transform.ActionReject
@@ -300,18 +308,26 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 			slog.String("target", target),
 			slog.Int("status", rejectResp.StatusCode),
 		)
-		return false, rejectResp
+		return false, rejectResp, nil
+	}
+
+	// Collect annotations from all CONNECT transforms
+	annotations := make(map[string]any)
+	for _, tr := range result.RequestTransforms {
+		for k, v := range tr.Annotations {
+			annotations[k] = v
+		}
 	}
 
 	result.Action = transform.ActionContinue
 	result.StatusCode = http.StatusOK
-	return true, nil
+	return true, nil, annotations
 }
 
 // serveTunnel peeks at the client's first byte after the CONNECT/SOCKS5
 // handshake to detect TLS (0x16) vs plain HTTP. TLS connections get MITM'd;
 // plain HTTP is served directly through handleHTTP. Anything else is rejected.
-func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnel(clientConn net.Conn, target string, connectAnnotations map[string]any) error {
 	br := bufio.NewReader(clientConn)
 	first, err := br.Peek(1)
 	if err != nil {
@@ -323,12 +339,12 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 
 	if first[0] == 0x16 {
 		// TLS ClientHello: MITM
-		return p.serveTunnelTLS(peekedConn, target)
+		return p.serveTunnelTLS(peekedConn, target, connectAnnotations)
 	}
 
 	if isHTTPMethodByte(first[0]) {
 		// Plain HTTP request
-		return p.serveTunnelHTTP(peekedConn, target)
+		return p.serveTunnelHTTP(peekedConn, target, connectAnnotations)
 	}
 
 	return fmt.Errorf("unsupported protocol (first byte 0x%02x) for target %s", first[0], target)
@@ -338,7 +354,7 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 // it terminates TLS and serves HTTP via handleHTTP; in sni-only mode it
 // peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
 // port is ignored to prevent port-pivot attacks).
-func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, connectAnnotations map[string]any) error {
 	if p.tlsMode == config.TLSModeSNIOnly {
 		return p.serveSNIPassthrough(clientConn)
 	}
@@ -354,20 +370,31 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
 
 	ln := newOneConnListener(tlsConn)
 	srv := &http.Server{
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: p.withTunnelAnnotations(connectAnnotations),
 	}
 	return srv.Serve(ln)
 }
 
 // serveTunnelHTTP serves plain HTTP requests through the normal handleHTTP handler.
-func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string, connectAnnotations map[string]any) error {
 	defer clientConn.Close()
 
 	ln := newOneConnListener(clientConn)
 	srv := &http.Server{
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: p.withTunnelAnnotations(connectAnnotations),
 	}
 	return srv.Serve(ln)
+}
+
+// withTunnelAnnotations wraps handleHTTP to inject CONNECT annotations into
+// the request context so inner requests inherit the tunnel's identity.
+func (p *Proxy) withTunnelAnnotations(annotations map[string]any) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(annotations) > 0 {
+			r = r.WithContext(context.WithValue(r.Context(), tunnelAnnotationsKey, annotations))
+		}
+		p.handleHTTP(w, r)
+	})
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.
