@@ -118,7 +118,7 @@ func (c *Cache) generate(domain string) (*tls.Certificate, error) {
 	}
 
 	return &tls.Certificate{
-		Certificate: [][]byte{certDER},
+		Certificate: [][]byte{certDER, c.caCert.Raw},
 		PrivateKey:  key,
 		Leaf:        leaf,
 	}, nil
