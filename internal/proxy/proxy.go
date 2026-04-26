@@ -271,6 +271,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		SNI:        tctx.SNI,
 		Mode:       transform.ModeMITM,
 	}
+	if ta, ok := r.Context().Value(tunnelAnnotationsKey).(map[string]any); ok {
+		result.TunnelAnnotations = ta
+	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
 

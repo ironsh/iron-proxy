@@ -94,6 +94,11 @@ type PipelineResult struct {
 	RequestTransforms  []TransformTrace
 	ResponseTransforms []TransformTrace
 
+	// TunnelAnnotations holds annotations from the CONNECT transform that
+	// established this tunnel. Set on inner requests so the audit log can
+	// attribute them to the tunnel's authenticated user.
+	TunnelAnnotations map[string]any
+
 	Err error
 }
 
