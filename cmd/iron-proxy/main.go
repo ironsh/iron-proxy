@@ -108,7 +108,7 @@ func main() {
 		var ingestToken string
 		holder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
 		if ingestToken != "" {
-			otelCfg.DefaultEndpoint = "https://ingest.iron.sh"
+			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
 				"Authorization": "Bearer " + ingestToken,
 			}
