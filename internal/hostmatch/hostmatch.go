@@ -70,8 +70,12 @@ func (m *Matcher) Matches(ctx context.Context, host string) bool {
 }
 
 // MatchGlob matches a domain against a glob pattern.
-// "*.example.com" matches any subdomain depth and "example.com" itself.
+// "*" matches any host. "*.example.com" matches any subdomain depth and
+// "example.com" itself.
 func MatchGlob(pattern, name string) bool {
+	if pattern == "*" {
+		return true
+	}
 	if strings.HasPrefix(pattern, "*.") {
 		suffix := pattern[1:] // ".example.com"
 		return strings.HasSuffix(name, suffix) || name == pattern[2:]
