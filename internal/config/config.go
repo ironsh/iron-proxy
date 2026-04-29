@@ -4,9 +4,37 @@ package config
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
+// proxy waits for upstream response headers before returning 502.
+const DefaultUpstreamResponseHeaderTimeout = 30 * time.Second
+
+// Duration is a time.Duration that decodes YAML strings using
+// time.ParseDuration ("30s", "5m", "2h"). The zero value indicates "unset"
+// so applyDefaults can fill in a default.
+type Duration time.Duration
+
+// UnmarshalYAML decodes a Go duration string into a Duration.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	if s == "" {
+		*d = 0
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
+}
 
 // Config is the top-level configuration for iron-proxy.
 type Config struct {
@@ -42,6 +70,12 @@ type Proxy struct {
 	TunnelListen         string `yaml:"tunnel_listen"`
 	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
 	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
+	// UpstreamResponseHeaderTimeout caps how long the proxy waits for an
+	// upstream response's headers before returning 502. Accepts Go duration
+	// syntax: "30s" (default), "5m", "2h". Useful for upstream endpoints
+	// (e.g. LLM context compaction) that legitimately take longer than the
+	// 30-second default to begin replying.
+	UpstreamResponseHeaderTimeout Duration `yaml:"upstream_response_header_timeout"`
 }
 
 // TLS configures certificate authority and cert caching for MITM.
@@ -145,6 +179,9 @@ func applyDefaults(cfg *Config) {
 		cfg.Proxy.MaxRequestBodyBytes = 1 << 20 // 1 MiB
 	}
 	// MaxResponseBodyBytes defaults to 0 (uncapped).
+	if cfg.Proxy.UpstreamResponseHeaderTimeout == 0 {
+		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(DefaultUpstreamResponseHeaderTimeout)
+	}
 	if cfg.TLS.Mode == "" {
 		cfg.TLS.Mode = TLSModeMITM
 	}
@@ -184,6 +221,10 @@ func Validate(cfg *Config) error {
 
 	if _, err := parseLogLevel(cfg.Log.Level); err != nil {
 		return fmt.Errorf("log.level: %w", err)
+	}
+
+	if cfg.Proxy.UpstreamResponseHeaderTimeout <= 0 {
+		return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 	}
 
 	for i, rec := range cfg.DNS.Records {

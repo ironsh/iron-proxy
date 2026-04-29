@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // applyEnvOverrides layers IRON_* environment variables on top of an existing
@@ -84,6 +85,14 @@ func applyEnvOverrides(cfg *Config) error {
 			return fmt.Errorf("IRON_TLS_LEAF_CERT_EXPIRY_HOURS: %w", err)
 		}
 		cfg.TLS.LeafCertExpiryHours = n
+	}
+
+	if v := os.Getenv("IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT: %w", err)
+		}
+		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(d)
 	}
 
 	return nil

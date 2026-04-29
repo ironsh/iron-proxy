@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -32,24 +33,26 @@ func TestLoadConfig_EnvOnly_Defaults(t *testing.T) {
 	require.Equal(t, ":9090", cfg.Metrics.Listen)
 	require.Equal(t, "info", cfg.Log.Level)
 	require.Empty(t, cfg.Transforms)
+	require.Equal(t, 30*time.Second, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 }
 
 func TestLoadConfig_EnvOnly_AllOverrides(t *testing.T) {
 	setEnvs(t, map[string]string{
-		"IRON_DNS_LISTEN":                    ":5353",
-		"IRON_DNS_PROXY_IP":                  "10.0.0.1",
-		"IRON_DNS_UPSTREAM_RESOLVER":         "8.8.8.8:53",
-		"IRON_PROXY_HTTP_LISTEN":             ":8080",
-		"IRON_PROXY_HTTPS_LISTEN":            ":8443",
-		"IRON_PROXY_TUNNEL_LISTEN":           ":1080",
-		"IRON_PROXY_MAX_REQUEST_BODY_BYTES":  "2097152",
-		"IRON_PROXY_MAX_RESPONSE_BODY_BYTES": "4194304",
-		"IRON_TLS_CA_CERT":                   "/custom/ca.pem",
-		"IRON_TLS_CA_KEY":                    "/custom/ca-key.pem",
-		"IRON_TLS_CERT_CACHE_SIZE":           "500",
-		"IRON_TLS_LEAF_CERT_EXPIRY_HOURS":    "24",
-		"IRON_METRICS_LISTEN":                ":2112",
-		"IRON_LOG_LEVEL":                     "debug",
+		"IRON_DNS_LISTEN":                             ":5353",
+		"IRON_DNS_PROXY_IP":                           "10.0.0.1",
+		"IRON_DNS_UPSTREAM_RESOLVER":                  "8.8.8.8:53",
+		"IRON_PROXY_HTTP_LISTEN":                      ":8080",
+		"IRON_PROXY_HTTPS_LISTEN":                     ":8443",
+		"IRON_PROXY_TUNNEL_LISTEN":                    ":1080",
+		"IRON_PROXY_MAX_REQUEST_BODY_BYTES":           "2097152",
+		"IRON_PROXY_MAX_RESPONSE_BODY_BYTES":          "4194304",
+		"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT": "5m",
+		"IRON_TLS_CA_CERT":                            "/custom/ca.pem",
+		"IRON_TLS_CA_KEY":                             "/custom/ca-key.pem",
+		"IRON_TLS_CERT_CACHE_SIZE":                    "500",
+		"IRON_TLS_LEAF_CERT_EXPIRY_HOURS":             "24",
+		"IRON_METRICS_LISTEN":                         ":2112",
+		"IRON_LOG_LEVEL":                              "debug",
 	})
 
 	cfg, err := LoadConfig("")
@@ -69,6 +72,7 @@ func TestLoadConfig_EnvOnly_AllOverrides(t *testing.T) {
 	require.Equal(t, 24, cfg.TLS.LeafCertExpiryHours)
 	require.Equal(t, ":2112", cfg.Metrics.Listen)
 	require.Equal(t, "debug", cfg.Log.Level)
+	require.Equal(t, 5*time.Minute, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 }
 
 func TestLoadConfig_EnvOnly_InvalidIntegers(t *testing.T) {
@@ -227,6 +231,39 @@ func TestApplyEnvOverrides_InvalidInteger(t *testing.T) {
 	require.Contains(t, err.Error(), "IRON_PROXY_MAX_REQUEST_BODY_BYTES")
 }
 
+func TestApplyEnvOverrides_UpstreamResponseHeaderTimeout(t *testing.T) {
+	t.Run("env override applied", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT": "2m",
+		})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 2*time.Minute, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
+	})
+
+	t.Run("env override beats yaml value", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT": "10s",
+		})
+
+		cfg := Config{Proxy: Proxy{UpstreamResponseHeaderTimeout: Duration(time.Minute)}}
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 10*time.Second, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
+	})
+
+	t.Run("invalid duration rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT": "not-a-duration",
+		})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT")
+	})
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
@@ -247,6 +284,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 		"IRON_PROXY_TUNNEL_LISTEN",
 		"IRON_PROXY_MAX_REQUEST_BODY_BYTES",
 		"IRON_PROXY_MAX_RESPONSE_BODY_BYTES",
+		"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT",
 		"IRON_TLS_CA_CERT",
 		"IRON_TLS_CA_KEY",
 		"IRON_TLS_CERT_CACHE_SIZE",
