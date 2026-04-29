@@ -323,17 +323,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 
 	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(rules json.RawMessage, secrets json.RawMessage) error {
-		newTransforms, err := config.TransformsFromSync(rules, secrets)
-		if err != nil {
-			return fmt.Errorf("parsing config update: %w", err)
-		}
-		newPipeline, err := buildPipeline(newTransforms, bodyLimits, logger)
-		if err != nil {
-			return fmt.Errorf("building updated pipeline: %w", err)
-		}
-		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
-		holder.Store(newPipeline)
-		logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
+		applyPipelineSync(holder, bodyLimits, logger, rules, secrets)
 		return nil
 	}, logger)
 
@@ -373,6 +363,26 @@ func ensureStateStoreDir(stateStore string) error {
 		return fmt.Errorf("creating state store directory: %w", err)
 	}
 	return nil
+}
+
+// applyPipelineSync builds a new pipeline from a sync payload and atomically
+// swaps it in. If parsing or pipeline construction fails, the existing pipeline
+// is preserved and an error is logged: an invalid push from the control plane
+// must not take down the proxy.
+func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets json.RawMessage) {
+	newTransforms, err := config.TransformsFromSync(rules, secrets)
+	if err != nil {
+		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
+		return
+	}
+	newPipeline, err := buildPipeline(newTransforms, bodyLimits, logger)
+	if err != nil {
+		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
+		return
+	}
+	newPipeline.SetAuditFunc(holder.Load().AuditFunc())
+	holder.Store(newPipeline)
+	logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
 }
 
 // buildPipeline creates a transform.Pipeline from config transforms.
