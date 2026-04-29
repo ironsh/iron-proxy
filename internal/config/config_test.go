@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -297,4 +298,66 @@ tls:
 	require.Equal(t, "internal.example.com", cfg.DNS.Records[0].Name)
 	require.Equal(t, "A", cfg.DNS.Records[0].Type)
 	require.Equal(t, "10.0.0.5", cfg.DNS.Records[0].Value)
+}
+
+func TestLoad_UpstreamResponseHeaderTimeout(t *testing.T) {
+	t.Run("default applied when unset", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, "", cfg.Proxy.UpstreamResponseHeaderTimeout)
+		require.Equal(t, DefaultUpstreamResponseHeaderTimeout, cfg.Proxy.UpstreamResponseHeaderTimeoutDuration())
+	})
+
+	t.Run("valid duration accepted", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_response_header_timeout: "5m"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, "5m", cfg.Proxy.UpstreamResponseHeaderTimeout)
+		require.Equal(t, 5*time.Minute, cfg.Proxy.UpstreamResponseHeaderTimeoutDuration())
+	})
+
+	t.Run("invalid duration rejected at validate", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_response_header_timeout: "not-a-duration"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "proxy.upstream_response_header_timeout")
+	})
+
+	t.Run("non-positive duration rejected at validate", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_response_header_timeout: "0s"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must be positive")
+	})
 }

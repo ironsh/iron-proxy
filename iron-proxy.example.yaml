@@ -27,6 +27,11 @@ proxy:
   # Global body buffer limits for transforms.
   max_request_body_bytes: 1048576   # default: 1 MiB
   # max_response_body_bytes: 0      # default: 0 (uncapped)
+  # Cap on how long the proxy waits for upstream response headers before
+  # returning 502. Accepts Go duration syntax: "30s" (default), "5m", "2h".
+  # Bump this for upstream endpoints that legitimately take longer than 30s
+  # to begin replying (e.g. LLM context-compaction endpoints).
+  # upstream_response_header_timeout: "5m"
 
 # TLS / MITM configuration
 tls:

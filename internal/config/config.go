@@ -4,9 +4,15 @@ package config
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultUpstreamResponseHeaderTimeout is applied when the policy does not
+// set proxy.upstream_response_header_timeout. It matches the historical
+// hard-coded value so existing configurations behave unchanged.
+const DefaultUpstreamResponseHeaderTimeout = 30 * time.Second
 
 // Config is the top-level configuration for iron-proxy.
 type Config struct {
@@ -42,6 +48,28 @@ type Proxy struct {
 	TunnelListen         string `yaml:"tunnel_listen"`
 	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
 	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
+	// UpstreamResponseHeaderTimeout caps how long the proxy waits for an
+	// upstream response's headers before returning 502. Accepts Go duration
+	// syntax: "30s" (default), "5m", "2h". Useful for upstream endpoints
+	// (e.g. LLM context compaction) that legitimately take longer than the
+	// 30-second default to begin replying.
+	UpstreamResponseHeaderTimeout string `yaml:"upstream_response_header_timeout"`
+}
+
+// UpstreamResponseHeaderTimeoutDuration returns the parsed duration for the
+// upstream response-header timeout, falling back to
+// DefaultUpstreamResponseHeaderTimeout when the field is empty. Validate
+// rejects invalid values up front, so this is safe to call on validated
+// configs.
+func (p Proxy) UpstreamResponseHeaderTimeoutDuration() time.Duration {
+	if p.UpstreamResponseHeaderTimeout == "" {
+		return DefaultUpstreamResponseHeaderTimeout
+	}
+	d, err := time.ParseDuration(p.UpstreamResponseHeaderTimeout)
+	if err != nil || d <= 0 {
+		return DefaultUpstreamResponseHeaderTimeout
+	}
+	return d
 }
 
 // TLS configures certificate authority and cert caching for MITM.
@@ -184,6 +212,16 @@ func Validate(cfg *Config) error {
 
 	if _, err := parseLogLevel(cfg.Log.Level); err != nil {
 		return fmt.Errorf("log.level: %w", err)
+	}
+
+	if cfg.Proxy.UpstreamResponseHeaderTimeout != "" {
+		d, err := time.ParseDuration(cfg.Proxy.UpstreamResponseHeaderTimeout)
+		if err != nil {
+			return fmt.Errorf("proxy.upstream_response_header_timeout: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", d)
+		}
 	}
 
 	for i, rec := range cfg.DNS.Records {

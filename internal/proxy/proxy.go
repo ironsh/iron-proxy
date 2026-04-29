@@ -63,6 +63,10 @@ type Options struct {
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
 	Logger     *slog.Logger
+	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
+	// ResponseHeaderTimeout. Zero falls back to
+	// config.DefaultUpstreamResponseHeaderTimeout (30s).
+	UpstreamResponseHeaderTimeout time.Duration
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -79,7 +83,7 @@ func New(opts Options) *Proxy {
 		tunnelDone:     make(chan struct{}),
 		certCache:      opts.CertCache,
 		pipeline:       opts.Pipeline,
-		transport:      buildTransport(opts.Resolver),
+		transport:      buildTransport(opts.Resolver, opts.UpstreamResponseHeaderTimeout),
 		resolver:       opts.Resolver,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
@@ -533,11 +537,16 @@ func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 // buildTransport creates the HTTP transport used for upstream requests.
 // If resolver is non-nil, the transport's dialer uses it instead of the OS
 // default — this prevents resolution loops when iron-proxy owns the system DNS.
-func buildTransport(resolver *net.Resolver) *http.Transport {
+// responseHeaderTimeout overrides the default 30-second
+// ResponseHeaderTimeout when greater than zero; pass 0 to keep the default.
+func buildTransport(resolver *net.Resolver, responseHeaderTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Resolver:  resolver,
+	}
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = config.DefaultUpstreamResponseHeaderTimeout
 	}
 	return &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -547,7 +556,7 @@ func buildTransport(resolver *net.Resolver) *http.Transport {
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
 }
 

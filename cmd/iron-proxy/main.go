@@ -174,14 +174,15 @@ func main() {
 
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
-		HTTPAddr:   cfg.Proxy.HTTPListen,
-		HTTPSAddr:  cfg.Proxy.HTTPSListen,
-		TunnelAddr: cfg.Proxy.TunnelListen,
-		TLSMode:    cfg.TLS.Mode,
-		CertCache:  certCache,
-		Pipeline:   holder,
-		Resolver:   resolver,
-		Logger:     logger,
+		HTTPAddr:                      cfg.Proxy.HTTPListen,
+		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
+		TunnelAddr:                    cfg.Proxy.TunnelListen,
+		TLSMode:                       cfg.TLS.Mode,
+		CertCache:                     certCache,
+		Pipeline:                      holder,
+		Resolver:                      resolver,
+		Logger:                        logger,
+		UpstreamResponseHeaderTimeout: cfg.Proxy.UpstreamResponseHeaderTimeoutDuration(),
 	})
 
 	// Initialize metrics server.
