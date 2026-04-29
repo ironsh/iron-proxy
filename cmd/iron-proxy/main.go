@@ -294,12 +294,13 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 
 	configHash := ""
 	ingestToken := ""
-	var initialRules json.RawMessage
+	var initialRules, initialSecrets json.RawMessage
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
 		initialRules = syncResp.Rules
+		initialSecrets = syncResp.Secrets
 		ingestToken = syncResp.IngestToken
-		if len(syncResp.Rules) > 0 {
+		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
 			)
@@ -307,7 +308,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	}
 
 	// Build initial pipeline from sync response.
-	initialTransforms, err := config.TransformsFromSync(initialRules)
+	initialTransforms, err := config.TransformsFromSync(initialRules, initialSecrets)
 	if err != nil {
 		logger.Error("parsing initial config", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -322,7 +323,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 
 	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(rules json.RawMessage, secrets json.RawMessage) error {
-		newTransforms, err := config.TransformsFromSync(rules)
+		newTransforms, err := config.TransformsFromSync(rules, secrets)
 		if err != nil {
 			return fmt.Errorf("parsing config update: %w", err)
 		}
