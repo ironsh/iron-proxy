@@ -27,7 +27,7 @@ func runInit(args []string) {
 	tunnelPort := fs.String("tunnel-port", defaultTunnelPort, "port for the CONNECT/SOCKS5 tunnel listener")
 	proxyIP := fs.String("proxy-ip", "127.0.0.1", "IP address the DNS server returns for proxied domains")
 	allow := fs.String("allow", defaultAllowList, "comma-separated domains for the initial allowlist")
-	bootstrapToken := fs.String("bootstrap-token", "", "bootstrap token for control plane registration (managed mode)")
+	enrollmentToken := fs.String("enrollment-token", "", "enrollment token for control plane registration (managed mode)")
 	tags := fs.String("tags", "", "comma-separated tags for control plane registration (managed mode)")
 	noStart := fs.Bool("no-start", false, "generate config and unit file but don't start the service")
 	force := fs.Bool("force", false, "overwrite existing config and CA")
@@ -81,7 +81,7 @@ func runInit(args []string) {
 	}
 
 	// 2. Write default config.
-	managedMode := *bootstrapToken != ""
+	managedMode := *enrollmentToken != ""
 	tagList := splitCommaList(*tags)
 	var configYAML string
 	if managedMode {
@@ -100,7 +100,7 @@ func runInit(args []string) {
 
 	hasSystemd := hasSystemd()
 	if hasSystemd {
-		unitContent := generateSystemdUnit(execPath, configPath, *bootstrapToken)
+		unitContent := generateSystemdUnit(execPath, configPath, *enrollmentToken)
 		unitPath := "/etc/systemd/system/iron-proxy.service"
 		if err := os.WriteFile(unitPath, []byte(unitContent), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing systemd unit: %v\n", err)
@@ -142,7 +142,7 @@ func runInit(args []string) {
 			return
 		}
 
-		pid, err := startBackground(execPath, configPath, *bootstrapToken)
+		pid, err := startBackground(execPath, configPath, *enrollmentToken)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error starting iron-proxy: %v\n", err)
 			os.Exit(1)
@@ -232,10 +232,10 @@ func formatTags(tags []string) string {
 	return s
 }
 
-func generateSystemdUnit(execPath, configPath, bootstrapToken string) string {
+func generateSystemdUnit(execPath, configPath, enrollmentToken string) string {
 	var envLine string
-	if bootstrapToken != "" {
-		envLine = fmt.Sprintf("Environment=IRON_BOOTSTRAP_TOKEN=%s\n", bootstrapToken)
+	if enrollmentToken != "" {
+		envLine = fmt.Sprintf("Environment=IRON_ENROLLMENT_TOKEN=%s\n", enrollmentToken)
 	}
 
 	return fmt.Sprintf(`[Unit]
@@ -320,7 +320,7 @@ func printLogTail() {
 	}
 }
 
-func startBackground(execPath, configPath, bootstrapToken string) (int, error) {
+func startBackground(execPath, configPath, enrollmentToken string) (int, error) {
 	logFile, err := os.OpenFile(defaultLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("opening log file: %w", err)
@@ -331,8 +331,8 @@ func startBackground(execPath, configPath, bootstrapToken string) (int, error) {
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	if bootstrapToken != "" {
-		cmd.Env = append(os.Environ(), "IRON_BOOTSTRAP_TOKEN="+bootstrapToken)
+	if enrollmentToken != "" {
+		cmd.Env = append(os.Environ(), "IRON_ENROLLMENT_TOKEN="+enrollmentToken)
 	}
 
 	if err := cmd.Start(); err != nil {

@@ -28,13 +28,13 @@ func apiError(code, message string) map[string]any {
 func TestRegisterSuccess(t *testing.T) {
 	secret := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/proxies/register", r.URL.Path)
+		require.Equal(t, "/v1/proxies/enroll", r.URL.Path)
 		require.Equal(t, http.MethodPost, r.Method)
 
 		var body registerRequest
 		err := json.NewDecoder(r.Body).Decode(&body)
 		require.NoError(t, err)
-		require.Equal(t, "irbs_test123", body.BootstrapToken)
+		require.Equal(t, "irbs_test123", body.EnrollmentToken)
 		require.Equal(t, []string{"ci", "prod"}, body.Tags)
 		require.Equal(t, "1.0.0", body.Version)
 

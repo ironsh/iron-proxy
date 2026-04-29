@@ -51,7 +51,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
-	bootstrapTokenFlag := flag.String("bootstrap-token", "", "bootstrap token for control plane registration")
+	enrollmentTokenFlag := flag.String("enrollment-token", "", "enrollment token for control plane registration")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,12 +71,12 @@ func main() {
 	}
 
 	// CLI flag takes precedence over environment variable.
-	bootstrapToken := *bootstrapTokenFlag
-	if bootstrapToken == "" {
-		bootstrapToken = os.Getenv("IRON_BOOTSTRAP_TOKEN")
+	enrollmentToken := *enrollmentTokenFlag
+	if enrollmentToken == "" {
+		enrollmentToken = os.Getenv("IRON_ENROLLMENT_TOKEN")
 	}
 
-	// Managed mode is determined by the presence of a bootstrap token or
+	// Managed mode is determined by the presence of an enrollment token or
 	// an existing credential from a prior registration.
 	stateStore, err := stateStorePath()
 	if err != nil {
@@ -88,7 +88,7 @@ func main() {
 		logger.Error("loading credential", slog.String("error", credErr.Error()))
 		os.Exit(1)
 	}
-	managed := bootstrapToken != "" || cred != nil
+	managed := enrollmentToken != "" || cred != nil
 
 	// Both modes produce a pipeline holder. Managed mode populates the
 	// initial transforms from the control plane and starts a poller that
@@ -106,7 +106,7 @@ func main() {
 
 	if managed {
 		var ingestToken string
-		holder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, bootstrapToken, cred, logger)
+		holder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -245,7 +245,7 @@ func main() {
 // the initial pipeline, and starts the config poller. The poller runs until ctx
 // is canceled and sends fatal errors on errc. Returns the pipeline holder and
 // the ingest token from the initial sync (empty if the sync failed).
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, bootstrapToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	tags := cfg.Tags
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
@@ -256,7 +256,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	if cred == nil {
 		logger.Info("registering with control plane")
 		var regErr error
-		cred, regErr = client.Register(ctx, bootstrapToken, controlplane.RegisterMetadata{
+		cred, regErr = client.Register(ctx, enrollmentToken, controlplane.RegisterMetadata{
 			Tags:    tags,
 			Version: version,
 		})

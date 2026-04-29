@@ -68,11 +68,11 @@ func (c *Client) GetCredential() *Credential {
 }
 
 type registerRequest struct {
-	BootstrapToken string   `json:"bootstrap_token"`
-	Tags           []string `json:"tags"`
-	Hostname       string   `json:"hostname"`
-	Version        string   `json:"version"`
-	Platform       string   `json:"platform"`
+	EnrollmentToken string   `json:"enrollment_token"`
+	Tags            []string `json:"tags"`
+	Hostname        string   `json:"hostname"`
+	Version         string   `json:"version"`
+	Platform        string   `json:"platform"`
 }
 
 type registerResponse struct {
@@ -80,7 +80,7 @@ type registerResponse struct {
 	Secret  string `json:"secret"`
 }
 
-// Register exchanges a bootstrap token for a persistent credential.
+// Register exchanges an enrollment token for a persistent credential.
 // Retries up to 5 times with exponential backoff on transient errors.
 func (c *Client) Register(ctx context.Context, token string, meta RegisterMetadata) (*Credential, error) {
 	return WithRetry(ctx, 5, func() (*Credential, error) {
@@ -92,11 +92,11 @@ func (c *Client) register(ctx context.Context, token string, meta RegisterMetada
 	hostname, _ := os.Hostname()
 
 	body := registerRequest{
-		BootstrapToken: token,
-		Tags:           meta.Tags,
-		Hostname:       hostname,
-		Version:        meta.Version,
-		Platform:       detectPlatform(),
+		EnrollmentToken: token,
+		Tags:            meta.Tags,
+		Hostname:        hostname,
+		Version:         meta.Version,
+		Platform:        detectPlatform(),
 	}
 	if body.Tags == nil {
 		body.Tags = []string{}
@@ -107,7 +107,7 @@ func (c *Client) register(ctx context.Context, token string, meta RegisterMetada
 		return nil, fmt.Errorf("marshaling register request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/proxies/register", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/proxies/enroll", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("building register request: %w", err)
 	}

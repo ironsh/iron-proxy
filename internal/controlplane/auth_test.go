@@ -32,7 +32,7 @@ func TestComputeSignature(t *testing.T) {
 			timestamp: "1744310400",
 			method:    "POST",
 			path:      "/v1/register",
-			body:      []byte(`{"bootstrap_token":"irbs_test"}`),
+			body:      []byte(`{"enrollment_token":"irbs_test"}`),
 		},
 		{
 			name:      "get request",
