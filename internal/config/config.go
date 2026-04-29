@@ -9,10 +9,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultUpstreamResponseHeaderTimeout is applied when the policy does not
-// set proxy.upstream_response_header_timeout. It matches the historical
-// hard-coded value so existing configurations behave unchanged.
+// DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
+// proxy waits for upstream response headers before returning 502.
 const DefaultUpstreamResponseHeaderTimeout = 30 * time.Second
+
+// Duration is a time.Duration that decodes YAML strings using
+// time.ParseDuration ("30s", "5m", "2h"). The zero value indicates "unset"
+// so applyDefaults can fill in a default.
+type Duration time.Duration
+
+// UnmarshalYAML decodes a Go duration string into a Duration.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	if s == "" {
+		*d = 0
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
+}
 
 // Config is the top-level configuration for iron-proxy.
 type Config struct {
@@ -53,23 +75,7 @@ type Proxy struct {
 	// syntax: "30s" (default), "5m", "2h". Useful for upstream endpoints
 	// (e.g. LLM context compaction) that legitimately take longer than the
 	// 30-second default to begin replying.
-	UpstreamResponseHeaderTimeout string `yaml:"upstream_response_header_timeout"`
-}
-
-// UpstreamResponseHeaderTimeoutDuration returns the parsed duration for the
-// upstream response-header timeout, falling back to
-// DefaultUpstreamResponseHeaderTimeout when the field is empty. Validate
-// rejects invalid values up front, so this is safe to call on validated
-// configs.
-func (p Proxy) UpstreamResponseHeaderTimeoutDuration() time.Duration {
-	if p.UpstreamResponseHeaderTimeout == "" {
-		return DefaultUpstreamResponseHeaderTimeout
-	}
-	d, err := time.ParseDuration(p.UpstreamResponseHeaderTimeout)
-	if err != nil || d <= 0 {
-		return DefaultUpstreamResponseHeaderTimeout
-	}
-	return d
+	UpstreamResponseHeaderTimeout Duration `yaml:"upstream_response_header_timeout"`
 }
 
 // TLS configures certificate authority and cert caching for MITM.
@@ -173,6 +179,9 @@ func applyDefaults(cfg *Config) {
 		cfg.Proxy.MaxRequestBodyBytes = 1 << 20 // 1 MiB
 	}
 	// MaxResponseBodyBytes defaults to 0 (uncapped).
+	if cfg.Proxy.UpstreamResponseHeaderTimeout == 0 {
+		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(DefaultUpstreamResponseHeaderTimeout)
+	}
 	if cfg.TLS.Mode == "" {
 		cfg.TLS.Mode = TLSModeMITM
 	}
@@ -214,14 +223,8 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("log.level: %w", err)
 	}
 
-	if cfg.Proxy.UpstreamResponseHeaderTimeout != "" {
-		d, err := time.ParseDuration(cfg.Proxy.UpstreamResponseHeaderTimeout)
-		if err != nil {
-			return fmt.Errorf("proxy.upstream_response_header_timeout: %w", err)
-		}
-		if d <= 0 {
-			return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", d)
-		}
+	if cfg.Proxy.UpstreamResponseHeaderTimeout <= 0 {
+		return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 	}
 
 	for i, rec := range cfg.DNS.Records {

@@ -311,8 +311,7 @@ tls:
 `
 		cfg, err := Load(strings.NewReader(yaml))
 		require.NoError(t, err)
-		require.Equal(t, "", cfg.Proxy.UpstreamResponseHeaderTimeout)
-		require.Equal(t, DefaultUpstreamResponseHeaderTimeout, cfg.Proxy.UpstreamResponseHeaderTimeoutDuration())
+		require.Equal(t, 30*time.Second, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 	})
 
 	t.Run("valid duration accepted", func(t *testing.T) {
@@ -327,11 +326,10 @@ tls:
 `
 		cfg, err := Load(strings.NewReader(yaml))
 		require.NoError(t, err)
-		require.Equal(t, "5m", cfg.Proxy.UpstreamResponseHeaderTimeout)
-		require.Equal(t, 5*time.Minute, cfg.Proxy.UpstreamResponseHeaderTimeoutDuration())
+		require.Equal(t, 5*time.Minute, time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
 	})
 
-	t.Run("invalid duration rejected at validate", func(t *testing.T) {
+	t.Run("invalid duration rejected at parse", func(t *testing.T) {
 		yaml := `
 dns:
   proxy_ip: "10.0.0.1"
@@ -343,15 +341,15 @@ tls:
 `
 		_, err := Load(strings.NewReader(yaml))
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "proxy.upstream_response_header_timeout")
+		require.Contains(t, err.Error(), "invalid duration")
 	})
 
-	t.Run("non-positive duration rejected at validate", func(t *testing.T) {
+	t.Run("negative duration rejected at validate", func(t *testing.T) {
 		yaml := `
 dns:
   proxy_ip: "10.0.0.1"
 proxy:
-  upstream_response_header_timeout: "0s"
+  upstream_response_header_timeout: "-5s"
 tls:
   ca_cert: "/tmp/ca.crt"
   ca_key: "/tmp/ca.key"

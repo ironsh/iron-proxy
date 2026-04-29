@@ -65,7 +65,7 @@ type Options struct {
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
-	// config.DefaultUpstreamResponseHeaderTimeout (30s).
+	// config.DefaultUpstreamResponseHeaderTimeout.
 	UpstreamResponseHeaderTimeout time.Duration
 }
 

@@ -182,7 +182,7 @@ func main() {
 		Pipeline:                      holder,
 		Resolver:                      resolver,
 		Logger:                        logger,
-		UpstreamResponseHeaderTimeout: cfg.Proxy.UpstreamResponseHeaderTimeoutDuration(),
+		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 	})
 
 	// Initialize metrics server.
