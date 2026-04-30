@@ -1,6 +1,14 @@
 dns:
   proxy_ip: "127.0.0.1"
-  listen: "127.0.0.1:0"
+  listen: "127.0.0.1:{{.DNSPort}}"
+  upstream_resolver: "127.0.0.1:{{.DNSPort}}"
+  records:
+    - name: "host-a.test"
+      type: "A"
+      value: "127.0.0.1"
+    - name: "host-b.test"
+      type: "A"
+      value: "127.0.0.1"
 
 proxy:
   http_listen: "127.0.0.1:0"
@@ -15,10 +23,8 @@ tls:
 transforms:
   - name: allowlist
     config:
-      cidrs:
-        - "127.0.0.1/32"
       domains:
-        - "only-in-config-b.example"
+        - "host-b.test"
 
   - name: secrets
     config:
@@ -29,7 +35,7 @@ transforms:
           proxy_value: "proxy-reload-token"
           match_headers: ["X-Reload-Secret"]
           rules:
-            - host: "127.0.0.1"
+            - host: "host-b.test"
 
 management:
   listen: "{{.MgmtAddr}}"

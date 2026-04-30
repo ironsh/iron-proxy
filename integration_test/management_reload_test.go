@@ -6,16 +6,19 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// TestManagementReload boots the proxy with config A, verifies the secret
-// transform swaps in config A's value, then rewrites the config file to
-// config B (different allowlist + secret env var), POSTs /v1/reload, and
-// verifies subsequent requests now see config B's resolved secret.
+// TestManagementReload boots the proxy with config A (allowlist + secret rule
+// matching host-a.test, secret resolved from env var ..._SECRET_A), verifies
+// requests for host-a.test are allowed and the secret is swapped while
+// host-b.test is rejected, then overwrites the config file with config B
+// (allowlist + secret rule for host-b.test, env var ..._SECRET_B), POSTs
+// /v1/reload, and verifies the allow/block and the swapped value have flipped.
 func TestManagementReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	binary := proxyBinary(t)
@@ -36,23 +39,41 @@ func TestManagementReload(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
-	upstreamHost := upstream.Listener.Addr().String()
+	upstreamPort := upstream.Listener.Addr().(*net.TCPAddr).Port
 
-	// Pre-bind a free port for the management server. The management
-	// server logs only its configured Addr (not the resolved listener
-	// address), so we cannot use :0.
+	// Pre-allocate fixed ports for the management server (TCP) and the
+	// proxy's DNS server (UDP). The management server logs only its
+	// configured Addr (not the resolved listener), and the DNS port has
+	// to be known up front so we can point the proxy's upstream resolver
+	// back at itself in the YAML.
 	mgmtAddr := "127.0.0.1:" + freePort(t)
-	data := struct{ MgmtAddr string }{MgmtAddr: mgmtAddr}
+	dnsPort := freeUDPPort(t)
+
+	data := struct {
+		MgmtAddr string
+		DNSPort  string
+	}{
+		MgmtAddr: mgmtAddr,
+		DNSPort:  dnsPort,
+	}
 
 	// Render config A; this writes <tmpDir>/config.yaml.
 	cfgPath := renderConfig(t, tmpDir, "reload_a.yaml", data)
 	proxy := startProxy(t, binary, cfgPath, nil)
-
 	waitForTCP(t, mgmtAddr)
 
+	hostA := fmt.Sprintf("host-a.test:%d", upstreamPort)
+	hostB := fmt.Sprintf("host-b.test:%d", upstreamPort)
+
 	t.Run("config_a_active", func(t *testing.T) {
-		got := doSecretRequest(t, proxy.HTTPAddr, upstreamHost)
+		// host-a.test is allowed and its secret is swapped.
+		got, status := doSecretRequest(t, proxy.HTTPAddr, hostA)
+		require.Equal(t, http.StatusOK, status)
 		require.Equal(t, secretValueA, got)
+
+		// host-b.test is rejected by config A's allowlist.
+		_, status = doSecretRequest(t, proxy.HTTPAddr, hostB)
+		require.Equal(t, http.StatusForbidden, status)
 	})
 
 	// Overwrite the config file in place with config B and reload.
@@ -72,20 +93,27 @@ func TestManagementReload(t *testing.T) {
 	})
 
 	t.Run("config_b_active", func(t *testing.T) {
-		got := doSecretRequest(t, proxy.HTTPAddr, upstreamHost)
+		// host-b.test is now allowed and its secret is swapped.
+		got, status := doSecretRequest(t, proxy.HTTPAddr, hostB)
+		require.Equal(t, http.StatusOK, status)
 		require.Equal(t, secretValueB, got)
 		require.NotEqual(t, secretValueA, got)
+
+		// host-a.test is now rejected by config B's allowlist.
+		_, status = doSecretRequest(t, proxy.HTTPAddr, hostA)
+		require.Equal(t, http.StatusForbidden, status)
 	})
 }
 
 // doSecretRequest sends a request through the proxy with the proxy-token in
 // the X-Reload-Secret header and returns the value the upstream observed
-// (which the upstream echoes back as X-Got-Reload-Secret).
-func doSecretRequest(t *testing.T, proxyAddr, upstreamHost string) string {
+// (echoed back via X-Got-Reload-Secret) along with the response status.
+// When the request is rejected by the proxy, the value will be empty.
+func doSecretRequest(t *testing.T, proxyAddr, hostHeader string) (string, int) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/", proxyAddr), nil)
 	require.NoError(t, err)
-	req.Host = upstreamHost
+	req.Host = hostHeader
 	req.Header.Set("X-Reload-Secret", "proxy-reload-token")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -93,8 +121,7 @@ func doSecretRequest(t *testing.T, proxyAddr, upstreamHost string) string {
 	defer resp.Body.Close()
 	_, err = io.Copy(io.Discard, resp.Body)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	return resp.Header.Get("X-Got-Reload-Secret")
+	return resp.Header.Get("X-Got-Reload-Secret"), resp.StatusCode
 }
 
 // waitForTCP polls addr until a TCP connect succeeds. The management server
@@ -109,5 +136,17 @@ func waitForTCP(t *testing.T, addr string) {
 		}
 		_ = c.Close()
 		return true
-	}, 5*time.Second, 50*time.Millisecond, "management server never accepted connections at %s", addr)
+	}, 5*time.Second, 50*time.Millisecond, "tcp listener never accepted at %s", addr)
+}
+
+// freeUDPPort asks the OS for a free UDP port and returns it as a string.
+// Used to pin the proxy's DNS server to a port we know in advance so we can
+// point upstream_resolver back at it.
+func freeUDPPort(t *testing.T) string {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := c.LocalAddr().(*net.UDPAddr).Port
+	require.NoError(t, c.Close())
+	return strconv.Itoa(port)
 }
