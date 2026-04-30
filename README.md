@@ -317,7 +317,7 @@ transforms:
 The sandbox never holds real credentials. Instead:
 
 1. Configure iron-proxy with the real secret source: environment variables,
-   AWS Secrets Manager, or AWS Systems Manager Parameter Store.
+   AWS Secrets Manager, AWS Systems Manager Parameter Store, or 1Password.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -346,6 +346,10 @@ Secret sources:
   `region`, `with_decryption`, `json_key`, and `ttl` are supported.
   `with_decryption` defaults to `true`, which is the expected setting for
   `SecureString` parameters.
+- **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
+  reference) using a 1Password service account token. The token is read from
+  `OP_SERVICE_ACCOUNT_TOKEN` by default; override with `token_env`. Optional
+  `ttl` is supported.
 
 ### Judge
 
