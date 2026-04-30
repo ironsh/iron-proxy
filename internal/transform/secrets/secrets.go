@@ -48,6 +48,7 @@ type replaceConfig struct {
 	ProxyValue   string   `yaml:"proxy_value"`
 	MatchHeaders []string `yaml:"match_headers,omitempty"`
 	MatchBody    bool     `yaml:"match_body,omitempty"`
+	MatchPath    bool     `yaml:"match_path,omitempty"`
 	Require      bool     `yaml:"require,omitempty"`
 }
 
@@ -68,6 +69,7 @@ type resolvedSecret struct {
 	proxyValue   string
 	matchHeaders []string // empty = all headers
 	matchBody    bool
+	matchPath    bool
 	require      bool
 
 	// inject mode fields
@@ -167,6 +169,7 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 				getValue:     result.GetValue,
 				matchHeaders: replace.MatchHeaders,
 				matchBody:    replace.MatchBody,
+				matchPath:    replace.MatchPath,
 				require:      replace.Require,
 				rules:        rules,
 			})
@@ -280,6 +283,12 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		var locations []string
 		locations = append(locations, s.swapHeaders(req, &sec, realValue)...)
 		locations = append(locations, s.swapQuery(req, &sec, realValue)...)
+
+		if sec.matchPath {
+			if loc := s.swapPath(req, &sec, realValue); loc != "" {
+				locations = append(locations, loc)
+			}
+		}
 
 		if sec.matchBody {
 			if loc := s.swapBody(req, &sec, realValue); loc != "" {
@@ -434,6 +443,18 @@ func (s *Secrets) swapQuery(req *http.Request, sec *resolvedSecret, realValue st
 		req.URL.RawQuery = params.Encode()
 	}
 	return locations
+}
+
+func (s *Secrets) swapPath(req *http.Request, sec *resolvedSecret, realValue string) string {
+	path := req.URL.Path
+	if path == "" || !strings.Contains(path, sec.proxyValue) {
+		return ""
+	}
+	req.URL.Path = strings.ReplaceAll(path, sec.proxyValue, realValue)
+	// RawPath is an optional encoded form; clear it so net/http re-derives
+	// the encoding from the new Path.
+	req.URL.RawPath = ""
+	return "path"
 }
 
 func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret, realValue string) string {
