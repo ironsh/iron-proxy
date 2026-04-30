@@ -28,7 +28,6 @@ func runInit(args []string) {
 	proxyIP := fs.String("proxy-ip", "127.0.0.1", "IP address the DNS server returns for proxied domains")
 	allow := fs.String("allow", defaultAllowList, "comma-separated domains for the initial allowlist")
 	enrollmentToken := fs.String("enrollment-token", "", "enrollment token for control plane registration (managed mode)")
-	tags := fs.String("tags", "", "comma-separated tags for control plane registration (managed mode)")
 	noStart := fs.Bool("no-start", false, "generate config and unit file but don't start the service")
 	force := fs.Bool("force", false, "overwrite existing config and CA")
 	if err := fs.Parse(args); err != nil {
@@ -82,13 +81,12 @@ func runInit(args []string) {
 
 	// 2. Write default config.
 	managedMode := *enrollmentToken != ""
-	tagList := splitCommaList(*tags)
 	var configYAML string
 	if managedMode {
-		configYAML = generateManagedConfig(*configDir, *tunnelPort, *proxyIP, tagList)
+		configYAML = generateManagedConfig(*configDir, *tunnelPort, *proxyIP)
 	} else {
 		domains := splitCommaList(*allow)
-		configYAML = generateConfig(*configDir, *tunnelPort, *proxyIP, domains, tagList)
+		configYAML = generateConfig(*configDir, *tunnelPort, *proxyIP, domains)
 	}
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
@@ -172,7 +170,7 @@ func splitCommaList(s string) []string {
 
 // generateManagedConfig produces a YAML config for managed mode. It omits the
 // transforms section since transforms come from the control plane.
-func generateManagedConfig(configDir, tunnelPort, proxyIP string, tags []string) string {
+func generateManagedConfig(configDir, tunnelPort, proxyIP string) string {
 	return fmt.Sprintf(`proxy:
   http_listen: ":8080"
   https_listen: ":8443"
@@ -185,13 +183,13 @@ dns:
 tls:
   ca_cert: "%s/ca.crt"
   ca_key: "%s/ca.key"
-%s
+
 log:
   level: "info"
-`, tunnelPort, proxyIP, configDir, configDir, formatTags(tags))
+`, tunnelPort, proxyIP, configDir, configDir)
 }
 
-func generateConfig(configDir, tunnelPort, proxyIP string, domains []string, tags []string) string {
+func generateConfig(configDir, tunnelPort, proxyIP string, domains []string) string {
 	var domainLines string
 	for _, d := range domains {
 		domainLines += fmt.Sprintf("        - %q\n", d)
@@ -214,22 +212,10 @@ transforms:
   - name: allowlist
     config:
       domains:
-%s%s
+%s
 log:
   level: "info"
-`, tunnelPort, proxyIP, configDir, configDir, domainLines, formatTags(tags))
-}
-
-func formatTags(tags []string) string {
-	if len(tags) == 0 {
-		return ""
-	}
-	var s string
-	s += "\ntags:\n"
-	for _, t := range tags {
-		s += fmt.Sprintf("  - %q\n", t)
-	}
-	return s
+`, tunnelPort, proxyIP, configDir, configDir, domainLines)
 }
 
 func generateSystemdUnit(execPath, configPath, enrollmentToken string) string {

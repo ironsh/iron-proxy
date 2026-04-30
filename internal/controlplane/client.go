@@ -36,7 +36,6 @@ type Client struct {
 
 // RegisterMetadata contains information sent during registration.
 type RegisterMetadata struct {
-	Tags    []string
 	Version string
 }
 
@@ -68,11 +67,10 @@ func (c *Client) GetCredential() *Credential {
 }
 
 type registerRequest struct {
-	EnrollmentToken string   `json:"enrollment_token"`
-	Tags            []string `json:"tags"`
-	Hostname        string   `json:"hostname"`
-	Version         string   `json:"version"`
-	Platform        string   `json:"platform"`
+	EnrollmentToken string `json:"enrollment_token"`
+	Hostname        string `json:"hostname"`
+	Version         string `json:"version"`
+	Platform        string `json:"platform"`
 }
 
 type registerResponse struct {
@@ -93,13 +91,9 @@ func (c *Client) register(ctx context.Context, token string, meta RegisterMetada
 
 	body := registerRequest{
 		EnrollmentToken: token,
-		Tags:            meta.Tags,
 		Hostname:        hostname,
 		Version:         meta.Version,
 		Platform:        detectPlatform(),
-	}
-	if body.Tags == nil {
-		body.Tags = []string{}
 	}
 
 	data, err := json.Marshal(body)

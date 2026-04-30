@@ -107,7 +107,7 @@ func main() {
 
 	if managed {
 		var ingestToken string
-		holder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
+		holder, ingestToken = initManaged(ctx, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -261,9 +261,8 @@ func main() {
 // the initial pipeline, and starts the config poller. The poller runs until ctx
 // is canceled and sends fatal errors on errc. Returns the pipeline holder and
 // the ingest token from the initial sync (empty if the sync failed).
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
+func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
-	tags := cfg.Tags
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
 	client := controlplane.NewClient(cpURL, logger)
@@ -273,7 +272,6 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		logger.Info("registering with control plane")
 		var regErr error
 		cred, regErr = client.Register(ctx, enrollmentToken, controlplane.RegisterMetadata{
-			Tags:    tags,
 			Version: version,
 		})
 		if regErr != nil {

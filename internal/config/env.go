@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -43,16 +42,6 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	if v := os.Getenv("IRON_LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v
-	}
-	if v := os.Getenv("IRON_TAGS"); v != "" {
-		tags := make([]string, 0)
-		for _, t := range strings.Split(v, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				tags = append(tags, t)
-			}
-		}
-		cfg.Tags = tags
 	}
 
 	if v := os.Getenv("IRON_PROXY_MAX_REQUEST_BODY_BYTES"); v != "" {
