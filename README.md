@@ -321,6 +321,10 @@ values before forwarding upstream. You control where it looks:
 
 - **`match_headers`:** list of header names to scan. Empty list = all headers.
 - **`match_body`:** scan the request body (buffered up to `max_request_body_bytes`).
+- **`match_path`:** scan the URL path. Defaults to `false`; opt in for upstreams
+  like Telegram that embed the secret in the path (e.g.
+  `/bot<TOKEN>/sendMessage`). URL paths often appear in access logs on either
+  side of the proxy, so this is off by default.
 - **`require`:** when `true`, requests to a matching host that do **not** contain
   the proxy token are rejected with 403. This prevents a compromised workload
   from bypassing the secret-swap mechanism with alternative credentials. Default: `false`.

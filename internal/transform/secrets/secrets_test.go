@@ -1047,6 +1047,84 @@ func TestInject_ConfigErrors(t *testing.T) {
 	}
 }
 
+// --- Path mode tests ---
+
+func telegramReq(path string) *http.Request {
+	req := httptest.NewRequest("POST", "http://api.telegram.org"+path, nil)
+	req.Host = "api.telegram.org"
+	return req
+}
+
+func telegramReplaceEntry(opts ...func(*secretEntry)) secretEntry {
+	e := secretEntry{
+		Source: envSource("OPENAI_API_KEY"),
+		Replace: &replaceConfig{
+			ProxyValue:   "proxy-tg-token",
+			MatchHeaders: []string{}, // disable header scanning
+			MatchPath:    true,
+		},
+		Rules: []hostmatch.RuleConfig{{Host: "api.telegram.org"}},
+	}
+	for _, opt := range opts {
+		opt(&e)
+	}
+	return e
+}
+
+func TestReplace_MatchPath(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{telegramReplaceEntry()})
+
+	req := telegramReq("/botproxy-tg-token/sendMessage")
+	doTransform(t, s, req)
+
+	require.Equal(t, "/botsk-real-openai-key/sendMessage", req.URL.Path)
+	require.Empty(t, req.URL.RawPath)
+}
+
+func TestReplace_MatchPath_NoMatchInPath(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{telegramReplaceEntry()})
+
+	req := telegramReq("/sendMessage")
+	doTransform(t, s, req)
+
+	require.Equal(t, "/sendMessage", req.URL.Path)
+}
+
+func TestReplace_MatchPath_RequireRejectsWhenAbsent(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{telegramReplaceEntry(func(e *secretEntry) {
+		e.Replace.Require = true
+	})})
+
+	req := telegramReq("/sendMessage")
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+func TestReplace_MatchPath_ClearsRawPath(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{telegramReplaceEntry()})
+
+	req := telegramReq("/botproxy-tg-token/sendMessage")
+	// Simulate net/http populating an encoded RawPath alongside Path.
+	req.URL.RawPath = "/botproxy-tg-token/sendMessage"
+	doTransform(t, s, req)
+
+	require.Equal(t, "/botsk-real-openai-key/sendMessage", req.URL.Path)
+	require.Empty(t, req.URL.RawPath, "RawPath must be cleared so net/http re-encodes from Path")
+}
+
+func TestReplace_MatchPath_DefaultOff(t *testing.T) {
+	// Without match_path, a proxy_value embedded in the path must be left alone.
+	s := makeSecrets(t, []secretEntry{telegramReplaceEntry(func(e *secretEntry) {
+		e.Replace.MatchPath = false
+	})})
+
+	req := telegramReq("/botproxy-tg-token/sendMessage")
+	doTransform(t, s, req)
+
+	require.Equal(t, "/botproxy-tg-token/sendMessage", req.URL.Path)
+}
+
 func TestInject_ConcurrentSafety(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{injectEntry()})
 

@@ -125,6 +125,21 @@ transforms:
               methods: ["POST"]
               paths: ["/v1/messages", "/v1/complete"]
 
+        # Replace mode with URL path scanning. Use match_path when the client
+        # embeds the proxy token in the URL path (e.g. Telegram-style APIs).
+        # Defaults to false; opt in explicitly because paths often appear in
+        # access logs.
+        # - source:
+        #     type: env
+        #     var: TELEGRAM_BOT_TOKEN
+        #   replace:
+        #     proxy_value: "proxy-tg-token-123"
+        #     match_headers: []          # disable header scanning if path-only
+        #     match_path: true
+        #     require: true
+        #   rules:
+        #     - host: "api.telegram.org"
+
         # Replace mode with AWS Secrets Manager and background refresh:
         # - source:
         #     type: aws_sm
