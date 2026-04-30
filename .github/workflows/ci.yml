@@ -53,6 +53,7 @@ jobs:
           AWS_REGION: us-west-1
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
 
       - uses: ironsh/iron-proxy-action/summary@fa1fd82ec32396d044deba7040a6db576bec927a # v0.1.4
         if: always()

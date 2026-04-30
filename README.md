@@ -351,6 +351,10 @@ Secret sources:
   `OP_SERVICE_ACCOUNT_TOKEN` by default; override with `token_env`. Optional
   `ttl` is supported.
 
+  > **Note:** a bug in `onepassword-sdk-go` breaks builds with `CGO_ENABLED=0`,
+  > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)
+  > via a `replace` directive in `go.mod` until the fix lands upstream.
+
 ### Judge
 
 The judge transform calls an LLM to produce an allow/deny decision for

@@ -38,3 +38,6 @@ domains:
   # Anthropic / OpenAI (for judge transform integration tests)
   - "api.anthropic.com"
   - "api.openai.com"
+
+  # 1Password (for 1password secret source integration tests)
+  - "ironsh.1password.com"
