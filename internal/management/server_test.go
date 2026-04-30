@@ -36,9 +36,9 @@ func do(t *testing.T, s *Server, method, path, auth string) *httptest.ResponseRe
 
 func decodeError(t *testing.T, body io.Reader) string {
 	t.Helper()
-	var resp map[string]string
+	var resp errorResponse
 	require.NoError(t, json.NewDecoder(body).Decode(&resp))
-	return resp["error"]
+	return resp.Error
 }
 
 func TestReload_MissingAuth(t *testing.T) {
@@ -80,9 +80,9 @@ func TestReload_Success(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, 1, called)
 
-	var resp map[string]string
+	var resp statusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	require.Equal(t, "ok", resp["status"])
+	require.Equal(t, "ok", resp.Status)
 }
 
 func TestReload_ValidationError(t *testing.T) {

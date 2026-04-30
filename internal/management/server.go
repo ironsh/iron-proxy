@@ -26,6 +26,16 @@ func (e *ValidationError) Error() string { return e.Err.Error() }
 // Unwrap exposes the underlying error to errors.Is / errors.As.
 func (e *ValidationError) Unwrap() error { return e.Err }
 
+// errorResponse is the JSON body sent for any non-2xx response.
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+// statusResponse is the JSON body sent for successful operations.
+type statusResponse struct {
+	Status string `json:"status"`
+}
+
 // Options configures Server.
 type Options struct {
 	Addr   string
@@ -72,31 +82,31 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
 		return
 	}
 
 	err := s.reload()
 	if err == nil {
 		s.logger.Info("management reload succeeded")
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, statusResponse{Status: "ok"})
 		return
 	}
 
 	var vErr *ValidationError
 	if errors.As(err, &vErr) {
 		s.logger.Warn("management reload rejected invalid config", slog.String("error", vErr.Error()))
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": vErr.Error()})
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: vErr.Error()})
 		return
 	}
 
 	s.logger.Error("management reload failed", slog.String("error", err.Error()))
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
 func (s *Server) authorize(r *http.Request) bool {
