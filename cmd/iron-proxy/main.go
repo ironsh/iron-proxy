@@ -96,7 +96,7 @@ func main() {
 			os.Exit(1)
 		}
 		if *configPath == "" {
-			fmt.Fprintln(os.Stderr, "error: management.listen requires --config; /reload has no file to re-read")
+			fmt.Fprintln(os.Stderr, "error: management.listen requires --config; /v1/reload has no file to re-read")
 			os.Exit(1)
 		}
 	}

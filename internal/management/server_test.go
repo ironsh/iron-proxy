@@ -43,20 +43,20 @@ func decodeError(t *testing.T, body io.Reader) string {
 
 func TestReload_MissingAuth(t *testing.T) {
 	s := newTestServer(t, "secret", func() error { return nil })
-	rec := do(t, s, http.MethodPost, "/reload", "")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.Equal(t, "unauthorized", decodeError(t, rec.Body))
 }
 
 func TestReload_WrongAuth(t *testing.T) {
 	s := newTestServer(t, "secret", func() error { return nil })
-	rec := do(t, s, http.MethodPost, "/reload", "Bearer nope")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer nope")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestReload_NonBearerAuth(t *testing.T) {
 	s := newTestServer(t, "secret", func() error { return nil })
-	rec := do(t, s, http.MethodPost, "/reload", "Basic c2VjcmV0")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Basic c2VjcmV0")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
@@ -65,7 +65,7 @@ func TestReload_WrongMethod(t *testing.T) {
 		t.Fatal("reload should not run on GET")
 		return nil
 	})
-	rec := do(t, s, http.MethodGet, "/reload", "Bearer secret")
+	rec := do(t, s, http.MethodGet, "/v1/reload", "Bearer secret")
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 	require.Equal(t, http.MethodPost, rec.Header().Get("Allow"))
 }
@@ -76,7 +76,7 @@ func TestReload_Success(t *testing.T) {
 		called++
 		return nil
 	})
-	rec := do(t, s, http.MethodPost, "/reload", "Bearer secret")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, 1, called)
 
@@ -89,7 +89,7 @@ func TestReload_ValidationError(t *testing.T) {
 	s := newTestServer(t, "secret", func() error {
 		return &ValidationError{Err: errors.New("bad transform: missing field")}
 	})
-	rec := do(t, s, http.MethodPost, "/reload", "Bearer secret")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	msg := decodeError(t, rec.Body)
 	require.True(t, strings.Contains(msg, "bad transform"), "got %q", msg)
@@ -101,7 +101,7 @@ func TestReload_WrappedValidationError(t *testing.T) {
 		inner := &ValidationError{Err: errors.New("parse failure")}
 		return errors.Join(errors.New("wrapper"), inner)
 	})
-	rec := do(t, s, http.MethodPost, "/reload", "Bearer secret")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
@@ -109,7 +109,7 @@ func TestReload_InternalError(t *testing.T) {
 	s := newTestServer(t, "secret", func() error {
 		return errors.New("disk on fire")
 	})
-	rec := do(t, s, http.MethodPost, "/reload", "Bearer secret")
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	// Internal errors are not echoed back to the client.
 	require.Equal(t, "internal error", decodeError(t, rec.Body))

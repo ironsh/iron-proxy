@@ -61,7 +61,7 @@ func New(opts Options) *Server {
 		reload: opts.Reload,
 		logger: opts.Logger,
 	}
-	mux.HandleFunc("/reload", s.handleReload)
+	mux.HandleFunc("/v1/reload", s.handleReload)
 	s.server = &http.Server{
 		Addr:    opts.Addr,
 		Handler: mux,

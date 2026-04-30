@@ -268,13 +268,14 @@ transforms:
         management, billing, or any repository the agent is not reviewing.
 
 # Optional management API. When `listen` is empty (default), the management
-# server is disabled. When set, the proxy serves an authenticated POST /reload
-# endpoint that re-reads this YAML file and atomically swaps in a freshly built
-# transform pipeline. A bad config is rejected with 422; the running pipeline
-# is preserved. Standalone mode only — incompatible with control-plane mode.
+# server is disabled. When set, the proxy serves an authenticated
+# POST /v1/reload endpoint that re-reads this YAML file and atomically swaps in
+# a freshly built transform pipeline. A bad config is rejected with 422; the
+# running pipeline is preserved. Standalone mode only — incompatible with
+# control-plane mode.
 # management:
 #   # Bind on loopback unless you front this with a private network or auth proxy:
-#   # /reload can rebuild the entire transform pipeline.
+#   # /v1/reload can rebuild the entire transform pipeline.
 #   listen: "127.0.0.1:9092"
 #   # Env var that holds the bearer token. Defaults to IRON_MANAGEMENT_API_KEY.
 #   api_key_env: "IRON_MANAGEMENT_API_KEY"
