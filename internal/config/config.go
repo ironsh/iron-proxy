@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -45,6 +46,7 @@ type Config struct {
 	TLS        TLS         `yaml:"tls"`
 	Transforms []Transform `yaml:"transforms"`
 	Metrics    Metrics     `yaml:"metrics"`
+	Management Management  `yaml:"management"`
 	Log        Log         `yaml:"log"`
 }
 
@@ -128,6 +130,16 @@ type Transform struct {
 // Metrics configures the OpenTelemetry/Prometheus metrics endpoint.
 type Metrics struct {
 	Listen string `yaml:"listen"`
+}
+
+// Management configures the optional operator-facing HTTP API.
+//
+// When Listen is empty (the default) the management server is disabled.
+// When Listen is set, requests are authenticated with a bearer token whose
+// value is read from the env var named in APIKeyEnv.
+type Management struct {
+	Listen    string `yaml:"listen"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 // Log configures structured logging.
@@ -218,6 +230,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Metrics.Listen == "" {
 		cfg.Metrics.Listen = ":9090"
 	}
+	if cfg.Management.Listen != "" && cfg.Management.APIKeyEnv == "" {
+		cfg.Management.APIKeyEnv = "IRON_MANAGEMENT_API_KEY"
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -253,6 +268,15 @@ func Validate(cfg *Config) error {
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
+	}
+
+	if cfg.Management.Listen != "" {
+		if cfg.Management.APIKeyEnv == "" {
+			return fmt.Errorf("management.api_key_env is required when management.listen is set")
+		}
+		if os.Getenv(cfg.Management.APIKeyEnv) == "" {
+			return fmt.Errorf("management.api_key_env %q is not set in the environment", cfg.Management.APIKeyEnv)
+		}
 	}
 
 	for i, rec := range cfg.DNS.Records {

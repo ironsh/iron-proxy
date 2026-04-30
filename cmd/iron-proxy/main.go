@@ -20,6 +20,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/controlplane"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/management"
 	"github.com/ironsh/iron-proxy/internal/metrics"
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/proxy"
@@ -89,6 +90,17 @@ func main() {
 	}
 	managed := enrollmentToken != "" || cred != nil
 
+	if cfg.Management.Listen != "" {
+		if managed {
+			fmt.Fprintln(os.Stderr, "error: management.listen cannot be used with managed mode; the control plane is the source of truth")
+			os.Exit(1)
+		}
+		if *configPath == "" {
+			fmt.Fprintln(os.Stderr, "error: management.listen requires --config; /v1/reload has no file to re-read")
+			os.Exit(1)
+		}
+	}
+
 	// Both modes produce a pipeline holder. Managed mode populates the
 	// initial transforms from the control plane and starts a poller that
 	// hot-reloads the pipeline.
@@ -99,7 +111,7 @@ func main() {
 
 	// errc collects fatal errors from all background goroutines: servers
 	// and (in managed mode) the config poller.
-	errc := make(chan error, 4)
+	errc := make(chan error, 5)
 	var holder *transform.PipelineHolder
 	var otelCfg iotel.ExportConfig
 
@@ -201,10 +213,24 @@ func main() {
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
 
+	// Initialize management server (standalone mode only; guarded above).
+	var mgmtServer *management.Server
+	if cfg.Management.Listen != "" {
+		mgmtServer = management.New(management.Options{
+			Addr:   cfg.Management.Listen,
+			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
+			Reload: newReloadFunc(*configPath, holder, bodyLimits, logger),
+			Logger: logger,
+		})
+	}
+
 	// Start services.
 	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
+	if mgmtServer != nil {
+		go func() { errc <- fmt.Errorf("management: %w", mgmtServer.ListenAndServe()) }()
+	}
 
 	startAttrs := []any{
 		slog.String("dns_listen", cfg.DNS.Listen),
@@ -250,6 +276,11 @@ func main() {
 	}
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
+	}
+	if mgmtServer != nil {
+		if err := mgmtServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("management server shutdown error", slog.String("error", err.Error()))
+		}
 	}
 
 	logger.Info("iron-proxy stopped")
@@ -395,6 +426,30 @@ func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.Bo
 	newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 	holder.Store(newPipeline)
 	logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
+}
+
+// newReloadFunc returns a management.ReloadFunc that re-reads the YAML config
+// from configPath, rebuilds the pipeline, and atomically swaps it in. Parse,
+// validation, and pipeline-build errors are wrapped in *management.ValidationError
+// so the management server returns 422; the existing pipeline is preserved.
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+	return func() error {
+		newCfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
+		if err := config.Validate(newCfg); err != nil {
+			return &management.ValidationError{Err: err}
+		}
+		newPipeline, err := buildPipeline(newCfg.Transforms, bodyLimits, logger)
+		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
+		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
+		holder.Store(newPipeline)
+		logger.Info("pipeline reloaded via management API", slog.String("transforms", newPipeline.Names()))
+		return nil
+	}
 }
 
 // buildPipeline creates a transform.Pipeline from config transforms.
