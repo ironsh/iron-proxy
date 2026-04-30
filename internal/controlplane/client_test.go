@@ -35,7 +35,6 @@ func TestRegisterSuccess(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&body)
 		require.NoError(t, err)
 		require.Equal(t, "irbs_test123", body.EnrollmentToken)
-		require.Equal(t, []string{"ci", "prod"}, body.Tags)
 		require.Equal(t, "1.0.0", body.Version)
 
 		w.WriteHeader(http.StatusCreated)
@@ -48,7 +47,6 @@ func TestRegisterSuccess(t *testing.T) {
 
 	client := NewClient(server.URL, testLogger())
 	cred, err := client.Register(context.Background(), "irbs_test123", RegisterMetadata{
-		Tags:    []string{"ci", "prod"},
 		Version: "1.0.0",
 	})
 	require.NoError(t, err)
@@ -86,22 +84,6 @@ func TestRegisterExhaustedToken(t *testing.T) {
 	var apiErr *APIError
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, ErrTokenExhausted, apiErr.Code)
-}
-
-func TestRegisterLabelNotPermitted(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(apiError("tag_not_permitted", "tag 'admin' is not allowed"))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, testLogger())
-	_, err := client.Register(context.Background(), "irbs_test", RegisterMetadata{Tags: []string{"admin"}})
-
-	var apiErr *APIError
-	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, ErrTagNotPermitted, apiErr.Code)
-	require.Contains(t, apiErr.Detail, "admin")
 }
 
 func TestRegisterRateLimitedThenSuccess(t *testing.T) {

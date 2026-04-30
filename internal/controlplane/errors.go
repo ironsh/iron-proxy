@@ -7,13 +7,12 @@ import "fmt"
 type ErrorCode string
 
 const (
-	ErrInvalidToken    ErrorCode = "invalid_token"
-	ErrTokenExpired    ErrorCode = "token_expired"
-	ErrTokenExhausted  ErrorCode = "token_exhausted"
-	ErrTagNotPermitted ErrorCode = "tag_not_permitted"
-	ErrValidationFail  ErrorCode = "validation_failed"
-	ErrProxyRevoked    ErrorCode = "proxy_revoked"
-	ErrHMACFailure     ErrorCode = "hmac_failure"
+	ErrInvalidToken   ErrorCode = "invalid_token"
+	ErrTokenExpired   ErrorCode = "token_expired"
+	ErrTokenExhausted ErrorCode = "token_exhausted"
+	ErrValidationFail ErrorCode = "validation_failed"
+	ErrProxyRevoked   ErrorCode = "proxy_revoked"
+	ErrHMACFailure    ErrorCode = "hmac_failure"
 )
 
 // APIError is a typed error returned by the control plane API.
