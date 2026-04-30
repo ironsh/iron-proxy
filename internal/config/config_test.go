@@ -376,6 +376,67 @@ tls:
 	})
 }
 
+func TestLoad_Management(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		cfg, err := Load(strings.NewReader(validYAML()))
+		require.NoError(t, err)
+		require.Equal(t, "", cfg.Management.Listen)
+		require.Equal(t, "", cfg.Management.APIKeyEnv)
+	})
+
+	t.Run("api_key_env defaults when listen set", func(t *testing.T) {
+		t.Setenv("IRON_MANAGEMENT_API_KEY", "secret")
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+management:
+  listen: "127.0.0.1:9092"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1:9092", cfg.Management.Listen)
+		require.Equal(t, "IRON_MANAGEMENT_API_KEY", cfg.Management.APIKeyEnv)
+	})
+
+	t.Run("api_key_env override honored", func(t *testing.T) {
+		t.Setenv("CUSTOM_KEY", "secret")
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+management:
+  listen: "127.0.0.1:9092"
+  api_key_env: "CUSTOM_KEY"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, "CUSTOM_KEY", cfg.Management.APIKeyEnv)
+	})
+
+	t.Run("missing env var rejected", func(t *testing.T) {
+		// Ensure the default env var is unset for this test.
+		t.Setenv("IRON_MANAGEMENT_API_KEY", "")
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+management:
+  listen: "127.0.0.1:9092"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_MANAGEMENT_API_KEY")
+		require.Contains(t, err.Error(), "is not set")
+	})
+}
+
 func TestLoad_UpstreamResponseHeaderTimeout(t *testing.T) {
 	t.Run("default applied when unset", func(t *testing.T) {
 		yaml := `
