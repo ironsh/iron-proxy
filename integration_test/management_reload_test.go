@@ -6,10 +6,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"strings"
 	"testing"
-	"time"
 
+	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,26 +41,18 @@ func TestManagementReload(t *testing.T) {
 	defer upstream.Close()
 	upstreamPort := upstream.Listener.Addr().(*net.TCPAddr).Port
 
-	// Pre-allocate fixed ports for the management server (TCP) and the
-	// proxy's DNS server (UDP). The management server logs only its
-	// configured Addr (not the resolved listener), and the DNS port has
-	// to be known up front so we can point the proxy's upstream resolver
-	// back at itself in the YAML.
-	mgmtAddr := "127.0.0.1:" + freePort(t)
-	dnsPort := freeUDPPort(t)
+	// In-process DNS server that resolves host-a.test and host-b.test to
+	// 127.0.0.1. The proxy's upstream_resolver is pointed at this so the
+	// proxy can dial those hostnames to our local httptest upstream. The
+	// server binds a real port, so there's no preallocate-and-race.
+	testDNSAddr := startTestDNSResolver(t)
 
-	data := struct {
-		MgmtAddr string
-		DNSPort  string
-	}{
-		MgmtAddr: mgmtAddr,
-		DNSPort:  dnsPort,
-	}
+	data := struct{ TestDNSAddr string }{TestDNSAddr: testDNSAddr}
 
 	// Render config A; this writes <tmpDir>/config.yaml.
 	cfgPath := renderConfig(t, tmpDir, "reload_a.yaml", data)
 	proxy := startProxy(t, binary, cfgPath, nil)
-	waitForTCP(t, mgmtAddr)
+	mgmtAddr := proxy.AddrFor(t, "management server starting")
 
 	hostA := fmt.Sprintf("host-a.test:%d", upstreamPort)
 	hostB := fmt.Sprintf("host-b.test:%d", upstreamPort)
@@ -124,29 +116,48 @@ func doSecretRequest(t *testing.T, proxyAddr, hostHeader string) (string, int) {
 	return resp.Header.Get("X-Got-Reload-Secret"), resp.StatusCode
 }
 
-// waitForTCP polls addr until a TCP connect succeeds. The management server
-// starts in its own goroutine after the proxy logs "http proxy starting", so
-// it may not be listening yet when startProxy returns.
-func waitForTCP(t *testing.T, addr string) {
+// startTestDNSResolver starts a tiny UDP DNS server on a random port that
+// resolves host-a.test and host-b.test to 127.0.0.1 and returns its addr.
+// The server is shut down when the test completes.
+func startTestDNSResolver(t *testing.T) string {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		_ = c.Close()
-		return true
-	}, 5*time.Second, 50*time.Millisecond, "tcp listener never accepted at %s", addr)
-}
-
-// freeUDPPort asks the OS for a free UDP port and returns it as a string.
-// Used to pin the proxy's DNS server to a port we know in advance so we can
-// point upstream_resolver back at it.
-func freeUDPPort(t *testing.T) string {
-	t.Helper()
-	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
-	port := c.LocalAddr().(*net.UDPAddr).Port
-	require.NoError(t, c.Close())
-	return strconv.Itoa(port)
+
+	answers := map[string]string{
+		"host-a.test.": "127.0.0.1",
+		"host-b.test.": "127.0.0.1",
+	}
+
+	srv := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(m)
+			resp.Authoritative = true
+			for _, q := range m.Question {
+				if q.Qtype != dns.TypeA {
+					continue
+				}
+				ip, ok := answers[strings.ToLower(q.Name)]
+				if !ok {
+					continue
+				}
+				rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN A %s", q.Name, ip))
+				if err != nil {
+					continue
+				}
+				resp.Answer = append(resp.Answer, rr)
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = srv.ActivateAndServe() }()
+	<-started
+
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
 }

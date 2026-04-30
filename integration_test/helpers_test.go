@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"text/template"
 	"time"
@@ -19,18 +21,40 @@ import (
 type proxyInstance struct {
 	HTTPAddr string
 	cmd      *exec.Cmd
+
+	addrsMu sync.Mutex
+	addrs   map[string]string
+}
+
+// AddrFor blocks until a JSON log line with the given "starting" msg has been
+// observed and returns its addr field. Useful for services configured with
+// listen ":0" — the actual bound port is only known via the log.
+func (p *proxyInstance) AddrFor(t *testing.T, msg string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p.addrsMu.Lock()
+		addr, ok := p.addrs[msg]
+		p.addrsMu.Unlock()
+		if ok {
+			return addr
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for log line %q", msg)
+			return ""
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // startProxy compiles (if needed) and starts the iron-proxy binary with the
-// given config and environment. It parses the JSON log output to discover
-// the actual HTTP listen address (supports :0). The proxy is killed when the
-// test completes.
+// given config and environment. It scans the JSON log output to discover
+// listen addresses (supports :0). The proxy is killed when the test completes.
 func startProxy(t *testing.T, binary, cfgPath string, env []string) *proxyInstance {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Pipe stderr so we can read JSON log lines.
 	stderrR, stderrW := io.Pipe()
 
 	cmd := exec.CommandContext(ctx, binary, "-config", cfgPath)
@@ -46,55 +70,42 @@ func startProxy(t *testing.T, binary, cfgPath string, env []string) *proxyInstan
 		_ = stderrW.Close()
 	})
 
-	// Tee stderr to os.Stderr so all log lines are visible while we scan
-	// for the HTTP listen address.
-	tee := io.TeeReader(stderrR, os.Stderr)
-	httpAddr := parseHTTPAddr(t, tee)
-
-	// Continue draining stderr after we have the address.
-	go func() {
-		_, _ = io.Copy(os.Stderr, tee)
-	}()
-
-	return &proxyInstance{
-		HTTPAddr: httpAddr,
-		cmd:      cmd,
+	p := &proxyInstance{
+		cmd:   cmd,
+		addrs: make(map[string]string),
 	}
+
+	go scanLogs(stderrR, p)
+
+	p.HTTPAddr = p.AddrFor(t, "http proxy starting")
+	return p
 }
 
-// parseHTTPAddr reads JSON log lines from r until it finds the
-// "http proxy starting" message and returns the addr field.
-func parseHTTPAddr(t *testing.T, r io.Reader) string {
-	t.Helper()
-
+// scanLogs reads the proxy's stderr line-by-line, tees raw bytes to os.Stderr
+// for visibility, and records the addr field of every "X starting" log line
+// for later lookup via AddrFor.
+func scanLogs(r io.Reader, p *proxyInstance) {
 	type logLine struct {
 		Msg  string `json:"msg"`
 		Addr string `json:"addr"`
 	}
 
 	scanner := bufio.NewScanner(r)
-	deadline := time.After(10 * time.Second)
-	found := make(chan string, 1)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		_, _ = os.Stderr.Write(append(append([]byte{}, line...), '\n'))
 
-	go func() {
-		for scanner.Scan() {
-			var line logLine
-			if json.Unmarshal(scanner.Bytes(), &line) != nil {
-				continue
-			}
-			if line.Msg == "http proxy starting" && line.Addr != "" {
-				found <- line.Addr
-				return
-			}
+		var entry logLine
+		if json.Unmarshal(line, &entry) != nil {
+			continue
 		}
-	}()
-
-	select {
-	case addr := <-found:
-		return addr
-	case <-deadline:
-		t.Fatal("timed out waiting for proxy to log HTTP listen address")
-		return ""
+		if !strings.HasSuffix(entry.Msg, "starting") || entry.Addr == "" {
+			continue
+		}
+		p.addrsMu.Lock()
+		p.addrs[entry.Msg] = entry.Addr
+		p.addrsMu.Unlock()
 	}
 }
 

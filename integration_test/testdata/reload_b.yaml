@@ -1,14 +1,7 @@
 dns:
   proxy_ip: "127.0.0.1"
-  listen: "127.0.0.1:{{.DNSPort}}"
-  upstream_resolver: "127.0.0.1:{{.DNSPort}}"
-  records:
-    - name: "host-a.test"
-      type: "A"
-      value: "127.0.0.1"
-    - name: "host-b.test"
-      type: "A"
-      value: "127.0.0.1"
+  listen: "127.0.0.1:0"
+  upstream_resolver: "{{.TestDNSAddr}}"
 
 proxy:
   http_listen: "127.0.0.1:0"
@@ -38,7 +31,7 @@ transforms:
             - host: "host-b.test"
 
 management:
-  listen: "{{.MgmtAddr}}"
+  listen: "127.0.0.1:0"
   api_key_env: IRON_RELOAD_ITEST_API_KEY
 
 metrics:
