@@ -221,7 +221,26 @@ func transformContextToProto(tctx *transform.TransformContext) *transformv1.Tran
 	if tctx.ClientCert != nil {
 		pb.ClientCertDer = tctx.ClientCert.Raw
 	}
+	if tctx.Tunnel != nil {
+		pb.Tunnel = &transformv1.TunnelInfo{
+			Target:      tctx.Tunnel.Target,
+			Annotations: stringAnnotations(tctx.Tunnel.Annotations),
+		}
+	}
 	return pb
+}
+
+func stringAnnotations(annotations map[string]any) map[string]string {
+	if len(annotations) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(annotations))
+	for k, v := range annotations {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }
 
 func httpRequestToProto(req *http.Request, sendBody bool) (*transformv1.HttpRequest, error) {

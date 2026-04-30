@@ -274,6 +274,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.TLS != nil {
 		tctx.SNI = r.TLS.ServerName
 	}
+	if tunnelInfo, ok := r.Context().Value(tunnelInfoKey).(*transform.TunnelInfo); ok {
+		tctx.Tunnel = tunnelInfo
+	}
 
 	result := &transform.PipelineResult{
 		Host:       r.Host,
@@ -282,6 +285,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr: r.RemoteAddr,
 		SNI:        tctx.SNI,
 		Mode:       transform.ModeMITM,
+		Tunnel:     tctx.Tunnel,
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()

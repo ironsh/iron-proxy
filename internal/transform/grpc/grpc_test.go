@@ -111,6 +111,31 @@ func TestTransformRequest_Continue(t *testing.T) {
 	require.Equal(t, "hello", srv.lastReqProto.GetRequest().GetHeaders()["X-Test"].GetValues()[0])
 }
 
+func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
+	srv := &fakeServer{reqAction: transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE}
+	addr := startFakeServer(t, srv)
+
+	gt := newTestTransform(t, "test", addr, false, false)
+	req, _ := http.NewRequest("GET", "https://example.com/foo", nil)
+	tctx := &transform.TransformContext{
+		Tunnel: &transform.TunnelInfo{
+			Target: "example.com:443",
+			Annotations: map[string]any{
+				"user_id": "alice",
+				"count":   3,
+			},
+		},
+	}
+
+	result, err := gt.TransformRequest(context.Background(), tctx, req)
+
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, result.Action)
+	require.Equal(t, "example.com:443", srv.lastReqProto.GetContext().GetTunnel().GetTarget())
+	require.Equal(t, "alice", srv.lastReqProto.GetContext().GetTunnel().GetAnnotations()["user_id"])
+	require.NotContains(t, srv.lastReqProto.GetContext().GetTunnel().GetAnnotations(), "count")
+}
+
 func TestTransformRequest_Reject(t *testing.T) {
 	srv := &fakeServer{
 		reqAction: transformv1.TransformAction_TRANSFORM_ACTION_REJECT,

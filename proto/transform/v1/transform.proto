@@ -22,6 +22,12 @@ enum TransformAction {
 message TransformContext {
   string sni = 1;
   bytes client_cert_der = 2;
+  TunnelInfo tunnel = 3;
+}
+
+message TunnelInfo {
+  string target = 1;
+  map<string, string> annotations = 2;
 }
 
 // --- Request transform ---

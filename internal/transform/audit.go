@@ -36,6 +36,12 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
 			),
 		}
+		if result.Tunnel != nil {
+			attrs = append(attrs, slog.Group("tunnel",
+				slog.String("target", result.Tunnel.Target),
+				slog.Any("annotations", result.Tunnel.Annotations),
+			))
+		}
 
 		// Add rejected_by for reject actions
 		if result.Action == ActionReject {
