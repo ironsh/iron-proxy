@@ -15,8 +15,9 @@ tls:
 transforms:
   - name: allowlist
     config:
+      cidrs:
+        - "127.0.0.1/32"
       domains:
-        - "127.0.0.1"
         - "only-in-config-b.example"
 
   - name: secrets
