@@ -351,12 +351,9 @@ Secret sources:
   `OP_SERVICE_ACCOUNT_TOKEN` by default; override with `token_env`. Optional
   `ttl` is supported.
 
-  > **Note:** iron-proxy uses a [fork of `onepassword-sdk-go`](https://github.com/ironsh/onepassword-sdk-go)
-  > pinned via a `replace` directive in `go.mod`. Upstream v0.4.0 places a
-  > hardcoded compile error inside `WithDesktopAppIntegration` that fires
-  > whenever `CGO_ENABLED=0`, even when the function is never called. The fork
-  > converts that compile error into a runtime error so the SDK can be built
-  > without CGo. The fork will be retired once the fix lands upstream.
+  > **Note:** a bug in `onepassword-sdk-go` breaks builds with `CGO_ENABLED=0`,
+  > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)
+  > via a `replace` directive in `go.mod` until the fix lands upstream.
 
 ### Judge
 
