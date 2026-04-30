@@ -19,6 +19,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/controlplane"
 	idns "github.com/ironsh/iron-proxy/internal/dns"
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/metrics"
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/proxy"
@@ -172,6 +173,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build the upstream-dial deny guard. config.Validate has already
+	// confirmed the entries parse, so this should not fail.
+	guard, err := dnsguard.New(cfg.Proxy.UpstreamDenyCIDRs.Values)
+	if err != nil {
+		logger.Error("initializing upstream deny guard", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if len(cfg.Proxy.UpstreamDenyCIDRs.Values) > 0 {
+		logger.Info("upstream deny list active",
+			slog.Any("cidrs", cfg.Proxy.UpstreamDenyCIDRs.Values),
+		)
+	}
+
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
@@ -181,6 +195,7 @@ func main() {
 		CertCache:                     certCache,
 		Pipeline:                      holder,
 		Resolver:                      resolver,
+		Guard:                         guard,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 	})

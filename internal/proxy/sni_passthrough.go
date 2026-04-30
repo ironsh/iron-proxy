@@ -99,9 +99,11 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 
 	// Dial upstream using the proxy's resolver so SNI → IP lookup goes via
 	// the configured upstream DNS (not the proxy's own intercepting server).
+	// The guard's DialControl rejects denied IPs after resolution.
 	dialer := &net.Dialer{
 		Timeout:  sniUpstreamDial,
 		Resolver: p.resolver,
+		Control:  p.guard.DialControl,
 	}
 	port := p.sniUpstreamPort
 	if port == "" {
