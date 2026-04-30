@@ -27,14 +27,6 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: Install Zig (used as CGo cross-compiler)
-        run: |
-          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
-          echo "$PWD/zig-linux-x86_64-0.13.0" >> "$GITHUB_PATH"
-          mkdir -p "$RUNNER_TEMP/zig-cache"
-          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
-          echo "ZIG_LOCAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
@@ -56,7 +48,6 @@ jobs:
             release
             ${{ !startsWith(github.ref, 'refs/tags/v') && '--snapshot' || '' }}
             --clean
-            --parallelism 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

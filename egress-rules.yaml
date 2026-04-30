@@ -41,6 +41,3 @@ domains:
 
   # 1Password (for 1password secret source integration tests)
   - "ironsh.1password.com"
-
-  # Zig (used as CGo cross-compiler for release builds)
-  - "ziglang.org"

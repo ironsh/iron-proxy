@@ -1,51 +1,16 @@
 version: 2
 
 builds:
-  - id: linux-amd64
-    main: ./cmd/iron-proxy
+  - main: ./cmd/iron-proxy
     binary: iron-proxy
     env:
-      - CGO_ENABLED=1
-      - CC=zig cc -target x86_64-linux-gnu
-      - CXX=zig c++ -target x86_64-linux-gnu
-    goos: [linux]
-    goarch: [amd64]
-    ldflags:
-      - -s -w -X github.com/ironsh/iron-proxy/internal/version.Version={{.Version}}
-
-  - id: linux-arm64
-    main: ./cmd/iron-proxy
-    binary: iron-proxy
-    env:
-      - CGO_ENABLED=1
-      - CC=zig cc -target aarch64-linux-gnu
-      - CXX=zig c++ -target aarch64-linux-gnu
-    goos: [linux]
-    goarch: [arm64]
-    ldflags:
-      - -s -w -X github.com/ironsh/iron-proxy/internal/version.Version={{.Version}}
-
-  - id: darwin-amd64
-    main: ./cmd/iron-proxy
-    binary: iron-proxy
-    env:
-      - CGO_ENABLED=1
-      - CC=zig cc -target x86_64-macos
-      - CXX=zig c++ -target x86_64-macos
-    goos: [darwin]
-    goarch: [amd64]
-    ldflags:
-      - -s -w -X github.com/ironsh/iron-proxy/internal/version.Version={{.Version}}
-
-  - id: darwin-arm64
-    main: ./cmd/iron-proxy
-    binary: iron-proxy
-    env:
-      - CGO_ENABLED=1
-      - CC=zig cc -target aarch64-macos
-      - CXX=zig c++ -target aarch64-macos
-    goos: [darwin]
-    goarch: [arm64]
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
     ldflags:
       - -s -w -X github.com/ironsh/iron-proxy/internal/version.Version={{.Version}}
 
