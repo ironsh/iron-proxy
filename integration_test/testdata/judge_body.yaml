@@ -6,6 +6,7 @@ proxy:
   http_listen: "127.0.0.1:0"
   https_listen: "127.0.0.1:0"
   max_request_body_bytes: 1048576
+  upstream_deny_cidrs: []
 
 tls:
   ca_cert: tmp/ca.crt
