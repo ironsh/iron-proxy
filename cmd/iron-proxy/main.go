@@ -24,6 +24,7 @@ import (
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/version"
 
 	// Register built-in transforms.
 	_ "github.com/ironsh/iron-proxy/internal/transform/allowlist"
@@ -32,9 +33,6 @@ import (
 	_ "github.com/ironsh/iron-proxy/internal/transform/judge"
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
-
-// version is set at build time via -ldflags.
-var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -46,7 +44,7 @@ func main() {
 			runInit(os.Args[2:])
 			return
 		case "version", "--version", "-v":
-			fmt.Println(version)
+			fmt.Println(version.Version)
 			return
 		}
 	}
@@ -272,7 +270,7 @@ func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan
 		logger.Info("registering with control plane")
 		var regErr error
 		cred, regErr = client.Register(ctx, enrollmentToken, controlplane.RegisterMetadata{
-			Version: version,
+			Version: version.Version,
 		})
 		if regErr != nil {
 			logger.Error("registration failed", slog.String("error", regErr.Error()))
