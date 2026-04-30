@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
 func validYAML() string {
@@ -298,6 +300,80 @@ tls:
 	require.Equal(t, "internal.example.com", cfg.DNS.Records[0].Name)
 	require.Equal(t, "A", cfg.DNS.Records[0].Type)
 	require.Equal(t, "10.0.0.5", cfg.DNS.Records[0].Value)
+}
+
+func TestLoad_UpstreamDenyCIDRs(t *testing.T) {
+	t.Run("default applied when unset", func(t *testing.T) {
+		cfg, err := Load(strings.NewReader(validYAML()))
+		require.NoError(t, err)
+		require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+		require.Equal(t, dnsguard.DefaultDenyCIDRs, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("explicit empty list opts out", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_deny_cidrs: []
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+		require.Empty(t, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("explicit list replaces defaults", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_deny_cidrs:
+    - "169.254.169.254/32"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, []string{"169.254.169.254/32"}, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("bare IP rejected", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_deny_cidrs:
+    - "1.2.3.4"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "proxy.upstream_deny_cidrs")
+		require.Contains(t, err.Error(), "must be CIDR notation")
+	})
+
+	t.Run("malformed CIDR rejected", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  upstream_deny_cidrs:
+    - "not-an-ip/24"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "proxy.upstream_deny_cidrs")
+	})
 }
 
 func TestLoad_UpstreamResponseHeaderTimeout(t *testing.T) {

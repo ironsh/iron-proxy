@@ -26,6 +26,11 @@ Single binary. Single YAML config.
 - **Default-deny egress.** Every outbound request is blocked unless the
   destination matches your allowlist. List your domains and CIDRs, everything
   else gets a 403.
+- **Upstream IP deny list.** Even when a host is allowed, the proxy refuses
+  to dial it if its resolved address falls inside a denied CIDR — closing
+  the SSRF/DNS-rebinding gap where an allowlisted hostname points at IMDS
+  or loopback. Cloud metadata endpoints (`169.254.169.254`) and loopback are
+  denied by default; override via `proxy.upstream_deny_cidrs`.
 - **Boundary-level secret injection.** Workloads send proxy tokens; iron-proxy
   replaces them with real secrets before the request leaves. If the sandbox is
   compromised, the attacker gets tokens that are useless outside the proxy.

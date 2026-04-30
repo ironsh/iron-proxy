@@ -20,6 +20,7 @@ import (
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -40,6 +41,7 @@ type Proxy struct {
 	pipeline       *transform.PipelineHolder
 	transport      *http.Transport
 	resolver       *net.Resolver
+	guard          *dnsguard.Guard
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -62,6 +64,7 @@ type Options struct {
 	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
+	Guard      *dnsguard.Guard // nil is treated as an empty (no-op) guard
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -76,6 +79,10 @@ func New(opts Options) *Proxy {
 		opts.TLSMode = config.TLSModeMITM
 	}
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	guard := opts.Guard
+	if guard == nil {
+		guard, _ = dnsguard.New(nil)
+	}
 	p := &Proxy{
 		httpsAddr:      opts.HTTPSAddr,
 		tlsMode:        opts.TLSMode,
@@ -83,8 +90,9 @@ func New(opts Options) *Proxy {
 		tunnelDone:     make(chan struct{}),
 		certCache:      opts.CertCache,
 		pipeline:       opts.Pipeline,
-		transport:      buildTransport(opts.Resolver, opts.UpstreamResponseHeaderTimeout),
+		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout),
 		resolver:       opts.Resolver,
+		guard:          guard,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -395,14 +403,19 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 		}
 	}
 
+	dialer := &net.Dialer{
+		Timeout:  30 * time.Second,
+		Resolver: p.resolver,
+		Control:  p.guard.DialControl,
+	}
 	if upstreamScheme == "wss" {
 		upstreamConn, err = tls.DialWithDialer(
-			&net.Dialer{Timeout: 30 * time.Second},
+			dialer,
 			"tcp", upstreamHost,
 			&tls.Config{MinVersion: tls.VersionTLS12},
 		)
 	} else {
-		upstreamConn, err = net.DialTimeout("tcp", upstreamHost, 30*time.Second)
+		upstreamConn, err = dialer.DialContext(r.Context(), "tcp", upstreamHost)
 	}
 	if err != nil {
 		p.logger.Error("websocket upstream dial failed",
@@ -537,13 +550,16 @@ func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 // buildTransport creates the HTTP transport used for upstream requests.
 // If resolver is non-nil, the transport's dialer uses it instead of the OS
 // default — this prevents resolution loops when iron-proxy owns the system DNS.
+// guard's DialControl is wired in so a hostname that resolves to a denied IP
+// is rejected before the TCP connect.
 // responseHeaderTimeout overrides the default 30-second
 // ResponseHeaderTimeout when greater than zero; pass 0 to keep the default.
-func buildTransport(resolver *net.Resolver, responseHeaderTimeout time.Duration) *http.Transport {
+func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeaderTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Resolver:  resolver,
+		Control:   guard.DialControl,
 	}
 	if responseHeaderTimeout <= 0 {
 		responseHeaderTimeout = config.DefaultUpstreamResponseHeaderTimeout

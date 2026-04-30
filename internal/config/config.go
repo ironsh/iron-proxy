@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
 // DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
@@ -76,6 +78,25 @@ type Proxy struct {
 	// (e.g. LLM context compaction) that legitimately take longer than the
 	// 30-second default to begin replying.
 	UpstreamResponseHeaderTimeout Duration `yaml:"upstream_response_header_timeout"`
+	// UpstreamDenyCIDRs lists CIDR ranges the proxy refuses to dial. Enforced
+	// at connect time against the resolved address. When unset, a secure
+	// default (IMDS + loopback) is applied; set to an empty list to disable.
+	UpstreamDenyCIDRs CIDRList `yaml:"upstream_deny_cidrs"`
+}
+
+// CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
+// from absence: an explicit empty list opts out of any default population,
+// while an unset field signals "apply the default".
+type CIDRList struct {
+	Values []string
+	Set    bool
+}
+
+// UnmarshalYAML records that the field was present in the source document,
+// even when the value is an empty list.
+func (l *CIDRList) UnmarshalYAML(value *yaml.Node) error {
+	l.Set = true
+	return value.Decode(&l.Values)
 }
 
 // TLS configures certificate authority and cert caching for MITM.
@@ -182,6 +203,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Proxy.UpstreamResponseHeaderTimeout == 0 {
 		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(DefaultUpstreamResponseHeaderTimeout)
 	}
+	if !cfg.Proxy.UpstreamDenyCIDRs.Set {
+		cfg.Proxy.UpstreamDenyCIDRs.Values = append([]string(nil), dnsguard.DefaultDenyCIDRs...)
+		cfg.Proxy.UpstreamDenyCIDRs.Set = true
+	}
 	if cfg.TLS.Mode == "" {
 		cfg.TLS.Mode = TLSModeMITM
 	}
@@ -225,6 +250,10 @@ func Validate(cfg *Config) error {
 
 	if cfg.Proxy.UpstreamResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
+	}
+
+	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
+		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
 	}
 
 	for i, rec := range cfg.DNS.Records {

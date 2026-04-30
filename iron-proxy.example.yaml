@@ -32,6 +32,25 @@ proxy:
   # Bump this for upstream endpoints that legitimately take longer than 30s
   # to begin replying (e.g. LLM context-compaction endpoints).
   # upstream_response_header_timeout: "5m"
+  #
+  # CIDRs the proxy refuses to dial upstream. Enforced at TCP connect time
+  # against the resolved address — defeats DNS rebinding and TOCTOU between
+  # allowlist evaluation and the eventual connect. CIDR notation is required
+  # (bare IPs are rejected).
+  #
+  # When this key is omitted, a secure default is applied that blocks cloud
+  # instance metadata (IMDS) and loopback:
+  #   - 169.254.169.254/32   AWS / GCP / Azure IPv4 IMDS
+  #   - fd00:ec2::254/128    AWS IPv6 IMDS
+  #   - 127.0.0.0/8          IPv4 loopback
+  #   - ::1/128              IPv6 loopback
+  #
+  # Set an explicit list to override the defaults. Use an empty list
+  # (upstream_deny_cidrs: []) if you intentionally need to allow IMDS or
+  # loopback traffic to upstreams.
+  # upstream_deny_cidrs:
+  #   - "169.254.169.254/32"
+  #   - "127.0.0.0/8"
 
 # TLS / MITM configuration
 tls:
