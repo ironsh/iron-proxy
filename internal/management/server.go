@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -71,8 +72,12 @@ func New(opts Options) *Server {
 
 // ListenAndServe starts the server. It blocks until the server is shut down.
 func (s *Server) ListenAndServe() error {
-	s.logger.Info("management server starting", slog.String("addr", s.server.Addr))
-	return s.server.ListenAndServe()
+	ln, err := net.Listen("tcp", s.server.Addr)
+	if err != nil {
+		return err
+	}
+	s.logger.Info("management server starting", slog.String("addr", ln.Addr().String()))
+	return s.server.Serve(ln)
 }
 
 // Shutdown gracefully stops the server.
