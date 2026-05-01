@@ -767,6 +767,34 @@ existing JSON stderr logs. The log record carries the same schema as the JSON
 audit entry: `host`, `method`, `path`, `action`, `status_code`, `duration_ms`,
 and the full `request_transforms`/`response_transforms` arrays with annotations.
 
+## Management API
+
+iron-proxy can optionally expose an authenticated HTTP API for operational
+tasks. Currently it serves a single endpoint, `POST /v1/reload`, which re-reads
+the YAML config from disk and atomically swaps in a freshly built transform
+pipeline. The running pipeline is preserved if the new config is invalid.
+
+The management server is disabled by default. To enable, add a `management`
+block to your config:
+
+```yaml
+management:
+  # Bind on loopback unless you front this with a private network or auth proxy:
+  # /v1/reload can rebuild the entire transform pipeline.
+  listen: "127.0.0.1:9092"
+  # Env var that holds the bearer token. Defaults to IRON_MANAGEMENT_API_KEY.
+  api_key_env: "IRON_MANAGEMENT_API_KEY"
+```
+
+Standalone mode only — incompatible with control-plane managed mode.
+
+Reload a running proxy:
+
+```bash
+curl -X POST http://127.0.0.1:9092/v1/reload \
+  -H "Authorization: Bearer $IRON_MANAGEMENT_API_KEY"
+```
+
 ## iron.sh
 
 Need Vault/KMS secret backends, a Kubernetes operator, or centralized policy
