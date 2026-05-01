@@ -64,13 +64,8 @@ func New(cfg config.DNS, resolver Resolver, logger *slog.Logger) (*Server, error
 
 // ListenAndServe starts the DNS server. It blocks until the server is shut down.
 func (s *Server) ListenAndServe() error {
-	pc, err := net.ListenPacket("udp", s.server.Addr)
-	if err != nil {
-		return err
-	}
-	s.server.PacketConn = pc
-	s.logger.Info("dns server starting", slog.String("addr", pc.LocalAddr().String()))
-	return s.server.ActivateAndServe()
+	s.logger.Info("dns server starting", slog.String("addr", s.server.Addr))
+	return s.server.ListenAndServe()
 }
 
 // Shutdown gracefully stops the DNS server.
