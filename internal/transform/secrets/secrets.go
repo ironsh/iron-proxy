@@ -140,7 +140,7 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 			return nil, fmt.Errorf("secrets[%d]: %w", i, err)
 		}
 
-		rules, err := hostmatch.CompileRules(entry.Rules, hostmatch.NullResolver{}, fmt.Sprintf("secrets[%d]", i))
+		rules, err := hostmatch.CompileRules(entry.Rules, fmt.Sprintf("secrets[%d]", i))
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +261,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	var swapped, injected []secretRecord
 
 	for _, sec := range s.secrets {
-		if !hostmatch.MatchAnyRule(ctx, sec.rules, req) {
+		if !hostmatch.MatchAnyRule(sec.rules, req) {
 			continue
 		}
 

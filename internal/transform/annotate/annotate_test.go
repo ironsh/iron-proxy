@@ -14,7 +14,7 @@ import (
 
 func makeAnnotate(t *testing.T, groups []annotationGroup) *Annotate {
 	t.Helper()
-	a, err := newFromConfig(annotateConfig{Annotations: groups}, hostmatch.NullResolver{})
+	a, err := newFromConfig(annotateConfig{Annotations: groups})
 	require.NoError(t, err)
 	return a
 }
@@ -223,7 +223,7 @@ func TestAnnotate_MultipleHeaderValues(t *testing.T) {
 // --- Validation tests ---
 
 func TestAnnotate_EmptyAnnotationsValidation(t *testing.T) {
-	_, err := newFromConfig(annotateConfig{}, hostmatch.NullResolver{})
+	_, err := newFromConfig(annotateConfig{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "at least one annotation group is required")
 }
@@ -233,7 +233,7 @@ func TestAnnotate_EmptyRulesValidation(t *testing.T) {
 		Annotations: []annotationGroup{{
 			Headers: []string{"x-foo"},
 		}},
-	}, hostmatch.NullResolver{})
+	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "at least one rule is required")
 }
@@ -243,7 +243,7 @@ func TestAnnotate_EmptyHeadersValidation(t *testing.T) {
 		Annotations: []annotationGroup{{
 			Rules: []hostmatch.RuleConfig{{Host: "example.com"}},
 		}},
-	}, hostmatch.NullResolver{})
+	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "at least one header is required")
 }

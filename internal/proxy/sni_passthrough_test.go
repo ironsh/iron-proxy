@@ -27,19 +27,10 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
 
-// sniTestHosts covers every hostname used across the SNI passthrough tests.
-// The staticResolver maps each to 127.0.0.1 so the proxy's dial lands on our
-// local test upstream.
-var sniTestHosts = map[string][]string{
-	"localhost":       {"127.0.0.1"},
-	"blocked.example": {"127.0.0.1"},
-	"allowed.example": {"127.0.0.1"},
-}
-
 // startEchoTLSServer starts a TLS server on 127.0.0.1:0 that responds to any
 // request with "echo <path>\n". Returns the host:port address and a cert pool
-// trusting the server's self-signed leaf, whose SANs cover the hostnames in
-// sniTestHosts.
+// trusting the server's self-signed leaf, whose SANs cover localhost,
+// blocked.example, and allowed.example.
 func startEchoTLSServer(t *testing.T) (addr string, pool *x509.CertPool) {
 	t.Helper()
 	cert, pool := newLocalhostTLSCert(t)
@@ -85,7 +76,7 @@ func buildSNIProxy(t *testing.T, allowed []string, withTunnel bool) (*Proxy, fun
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	al, err := allowlist.New(allowed, nil, &staticResolver{hosts: sniTestHosts})
+	al, err := allowlist.New(allowed, nil)
 	require.NoError(t, err)
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 

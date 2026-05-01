@@ -39,7 +39,7 @@ func TestUpstreamDenyGuard_HTTP(t *testing.T) {
 
 	build := func(t *testing.T, denyCIDRs []string) (proxyHTTPAddr string, audits func() []transform.PipelineResult) {
 		t.Helper()
-		al, err := allowlist.New([]string{"*"}, nil, &staticResolver{})
+		al, err := allowlist.New([]string{"*"}, nil)
 		require.NoError(t, err)
 		pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
@@ -140,7 +140,7 @@ func TestUpstreamDenyGuard_SNIPassthrough(t *testing.T) {
 	_, upstreamPort, err := net.SplitHostPort(upstreamAddr)
 	require.NoError(t, err)
 
-	al, err := allowlist.New([]string{"*"}, nil, &staticResolver{hosts: sniTestHosts})
+	al, err := allowlist.New([]string{"*"}, nil)
 	require.NoError(t, err)
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 
