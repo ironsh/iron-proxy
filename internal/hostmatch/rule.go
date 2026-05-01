@@ -1,7 +1,6 @@
 package hostmatch
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -23,8 +22,8 @@ type Rule struct {
 }
 
 // Matches returns true if the request matches this rule.
-func (r *Rule) Matches(ctx context.Context, host, method, path string) bool {
-	if !r.Matcher.Matches(ctx, host) {
+func (r *Rule) Matches(host, method, path string) bool {
+	if !r.Matcher.Matches(host) {
 		return false
 	}
 	if r.Methods != nil && !r.Methods[method] {
@@ -38,7 +37,7 @@ func (r *Rule) Matches(ctx context.Context, host, method, path string) bool {
 
 // CompileRules compiles a list of RuleConfigs into Rules.
 // The prefix is used for error messages (e.g. "allowlist" or "grpc transform \"foo\"").
-func CompileRules(configs []RuleConfig, resolver Resolver, prefix string) ([]Rule, error) {
+func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 	var rules []Rule
 	for i, rc := range configs {
 		if rc.Host != "" && rc.CIDR != "" {
@@ -56,7 +55,7 @@ func CompileRules(configs []RuleConfig, resolver Resolver, prefix string) ([]Rul
 			cidrs = []string{rc.CIDR}
 		}
 
-		m, err := New(domains, cidrs, resolver)
+		m, err := New(domains, cidrs)
 		if err != nil {
 			return nil, fmt.Errorf("%s: rules[%d]: %w", prefix, i, err)
 		}
@@ -88,10 +87,10 @@ func isWildcard(methods []string) bool {
 }
 
 // MatchAnyRule returns true if the request matches any rule in the list.
-func MatchAnyRule(ctx context.Context, rules []Rule, req *http.Request) bool {
+func MatchAnyRule(rules []Rule, req *http.Request) bool {
 	host := StripPort(req.Host)
 	for _, r := range rules {
-		if r.Matches(ctx, host, req.Method, req.URL.Path) {
+		if r.Matches(host, req.Method, req.URL.Path) {
 			return true
 		}
 	}

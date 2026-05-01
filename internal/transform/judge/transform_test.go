@@ -79,7 +79,7 @@ func makeJudge(t *testing.T, adapter llm.Adapter, overrides func(*judgeConfig)) 
 	if overrides != nil {
 		overrides(&cfg)
 	}
-	rules, err := hostmatch.CompileRules(cfg.Rules, hostmatch.NullResolver{}, "test")
+	rules, err := hostmatch.CompileRules(cfg.Rules, "test")
 	require.NoError(t, err)
 	j, err := newFromConfig(cfg, adapter, rules, slog.Default())
 	require.NoError(t, err)
@@ -281,7 +281,7 @@ func TestJudge_Name(t *testing.T) {
 
 func TestJudge_ConfigValidation(t *testing.T) {
 	// These tests go through newFromConfig to bypass the yaml.Node plumbing.
-	rules, err := hostmatch.CompileRules([]hostmatch.RuleConfig{{Host: "x"}}, hostmatch.NullResolver{}, "test")
+	rules, err := hostmatch.CompileRules([]hostmatch.RuleConfig{{Host: "x"}}, "test")
 	require.NoError(t, err)
 
 	_, err = newFromConfig(judgeConfig{Name: "j", Prompt: "p", Fallback: "maybe"}, &fakeAdapter{}, rules, nil)

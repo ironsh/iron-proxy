@@ -49,7 +49,7 @@ func startTunnelIntegrationProxy(t *testing.T, allowedHosts []string, logger *sl
 
 	ca := newIntegrationCA(t)
 
-	al, err := allowlist.New(allowedHosts, nil, &staticResolver{})
+	al, err := allowlist.New(allowedHosts, nil)
 	require.NoError(t, err)
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 	holder := transform.NewPipelineHolder(pipeline)
@@ -111,11 +111,7 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	ca := newIntegrationCA(t)
 
 	// 3. Build transform pipeline with allowlist
-	al, err := allowlist.New(
-		[]string{fakeHost},
-		nil,
-		&staticResolver{},
-	)
+	al, err := allowlist.New([]string{fakeHost}, nil)
 	require.NoError(t, err)
 
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
@@ -498,15 +494,3 @@ func TestIntegration_SOCKS5(t *testing.T) {
 	})
 }
 
-// staticResolver is a test resolver that returns preconfigured addresses.
-type staticResolver struct {
-	hosts map[string][]string
-}
-
-func (r *staticResolver) LookupHost(_ context.Context, host string) ([]string, error) {
-	addrs, ok := r.hosts[host]
-	if !ok {
-		return nil, fmt.Errorf("no such host: %s", host)
-	}
-	return addrs, nil
-}

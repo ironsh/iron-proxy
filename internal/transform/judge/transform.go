@@ -101,7 +101,7 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 		return nil, fmt.Errorf("judge transform %q: %w", c.Name, err)
 	}
 
-	rules, err := hostmatch.CompileRules(c.Rules, hostmatch.DefaultResolver(), fmt.Sprintf("judge transform %q", c.Name))
+	rules, err := hostmatch.CompileRules(c.Rules, fmt.Sprintf("judge transform %q", c.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (j *Judge) TransformResponse(_ context.Context, _ *transform.TransformConte
 // TransformRequest runs the judge over a request. See the package doc-style
 // comment on the judge transform for the full control-flow description.
 func (j *Judge) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if !hostmatch.MatchAnyRule(ctx, j.rules, req) {
+	if !hostmatch.MatchAnyRule(j.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

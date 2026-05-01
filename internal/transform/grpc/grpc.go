@@ -106,7 +106,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 	}
 
 	prefix := fmt.Sprintf("grpc transform %q", cfg.Name)
-	rules, err := hostmatch.CompileRules(cfg.Rules, hostmatch.DefaultResolver(), prefix)
+	rules, err := hostmatch.CompileRules(cfg.Rules, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 func (g *GRPCTransform) Name() string { return g.name }
 
 func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(ctx, g.rules, req) {
+	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
@@ -166,7 +166,7 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 }
 
 func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.TransformContext, req *http.Request, resp *http.Response) (*transform.TransformResult, error) {
-	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(ctx, g.rules, req) {
+	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

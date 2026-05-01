@@ -43,10 +43,10 @@ func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing annotate config: %w", err)
 	}
-	return newFromConfig(c, hostmatch.NullResolver{})
+	return newFromConfig(c)
 }
 
-func newFromConfig(cfg annotateConfig, resolver hostmatch.Resolver) (*Annotate, error) {
+func newFromConfig(cfg annotateConfig) (*Annotate, error) {
 	if len(cfg.Annotations) == 0 {
 		return nil, fmt.Errorf("annotate: at least one annotation group is required")
 	}
@@ -60,7 +60,7 @@ func newFromConfig(cfg annotateConfig, resolver hostmatch.Resolver) (*Annotate, 
 			return nil, fmt.Errorf("annotate: annotations[%d]: at least one header is required", i)
 		}
 
-		compiled, err := hostmatch.CompileRules(ag.Rules, resolver, fmt.Sprintf("annotate annotations[%d]", i))
+		compiled, err := hostmatch.CompileRules(ag.Rules, fmt.Sprintf("annotate annotations[%d]", i))
 		if err != nil {
 			return nil, err
 		}
@@ -78,9 +78,9 @@ func newFromConfig(cfg annotateConfig, resolver hostmatch.Resolver) (*Annotate, 
 
 func (a *Annotate) Name() string { return "annotate" }
 
-func (a *Annotate) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+func (a *Annotate) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	for _, g := range a.groups {
-		if !hostmatch.MatchAnyRule(ctx, g.rules, req) {
+		if !hostmatch.MatchAnyRule(g.rules, req) {
 			continue
 		}
 		for _, h := range g.headers {
