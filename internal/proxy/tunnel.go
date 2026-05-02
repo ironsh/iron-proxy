@@ -18,12 +18,6 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-// tunnelInfoKey is the context key for tunnel metadata propagated to inner
-// HTTP requests within the same tunnel.
-type tunnelInfoKeyType struct{}
-
-var tunnelInfoKey = tunnelInfoKeyType{}
-
 // listenTunnel starts the CONNECT/SOCKS5 tunnel listener.
 func (p *Proxy) listenTunnel() error {
 	ln, err := net.Listen("tcp", p.tunnelAddr)
@@ -373,7 +367,9 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *t
 
 	ln := newOneConnListener(tlsConn)
 	srv := &http.Server{
-		Handler: p.withTunnelInfo(tunnelInfo),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.handleHTTP(w, r, tunnelInfo)
+		}),
 	}
 	return srv.Serve(ln)
 }
@@ -384,20 +380,11 @@ func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string, tunnelInfo *
 
 	ln := newOneConnListener(clientConn)
 	srv := &http.Server{
-		Handler: p.withTunnelInfo(tunnelInfo),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.handleHTTP(w, r, tunnelInfo)
+		}),
 	}
 	return srv.Serve(ln)
-}
-
-// withTunnelInfo wraps handleHTTP to inject CONNECT metadata into the request
-// context so inner requests can read tunnel identity and policy annotations.
-func (p *Proxy) withTunnelInfo(tunnelInfo *transform.TunnelInfo) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tunnelInfo != nil {
-			r = r.WithContext(context.WithValue(r.Context(), tunnelInfoKey, cloneTunnelInfo(tunnelInfo)))
-		}
-		p.handleHTTP(w, r)
-	})
 }
 
 func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
