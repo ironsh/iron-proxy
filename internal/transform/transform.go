@@ -67,8 +67,11 @@ type TunnelInfo struct {
 	// Target is the host:port from the CONNECT request or SOCKS5 target.
 	Target string
 
-	// Annotations are merged from CONNECT-time request transforms.
-	Annotations map[string]any
+	// RequestTransforms are the traces from the CONNECT/SOCKS5 request
+	// pipeline, in the order the transforms ran. Inner request transforms and
+	// audit consume this to attribute tunnel-level annotations to the
+	// transform that produced them.
+	RequestTransforms []TransformTrace
 }
 
 // Annotate attaches audit metadata to the current transform's trace.

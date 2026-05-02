@@ -420,7 +420,9 @@ func TestTunnelInfoPropagatesToInnerTransforms(t *testing.T) {
 	select {
 	case info := <-seen:
 		require.Equal(t, target, info.Target)
-		require.Equal(t, "alice", info.Annotations["user_id"])
+		require.Len(t, info.RequestTransforms, 1)
+		require.Equal(t, "tunnel-info", info.RequestTransforms[0].Name)
+		require.Equal(t, "alice", info.RequestTransforms[0].Annotations["user_id"])
 	case <-time.After(2 * time.Second):
 		t.Fatal("inner transform did not receive tunnel info")
 	}

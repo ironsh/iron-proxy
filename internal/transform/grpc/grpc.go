@@ -223,13 +223,29 @@ func transformContextToProto(tctx *transform.TransformContext) *transformv1.Tran
 	}
 	if tctx.Tunnel != nil {
 		pb.Tunnel = &transformv1.TunnelInfo{
-			Target:      tctx.Tunnel.Target,
-			Annotations: stringAnnotations(tctx.Tunnel.Annotations),
+			Target:            tctx.Tunnel.Target,
+			RequestTransforms: tunnelTransformsToProto(tctx.Tunnel.RequestTransforms),
 		}
 	}
 	return pb
 }
 
+func tunnelTransformsToProto(traces []transform.TransformTrace) []*transformv1.TunnelRequestTransform {
+	if len(traces) == 0 {
+		return nil
+	}
+	out := make([]*transformv1.TunnelRequestTransform, 0, len(traces))
+	for _, tr := range traces {
+		out = append(out, &transformv1.TunnelRequestTransform{
+			Name:        tr.Name,
+			Annotations: stringAnnotations(tr.Annotations),
+		})
+	}
+	return out
+}
+
+// stringAnnotations narrows annotations to string-valued entries since the
+// proto schema is map<string, string>. Non-string values are dropped.
 func stringAnnotations(annotations map[string]any) map[string]string {
 	if len(annotations) == 0 {
 		return nil

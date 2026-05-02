@@ -37,10 +37,13 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 			),
 		}
 		if result.Tunnel != nil {
-			attrs = append(attrs, slog.Group("tunnel",
-				slog.String("target", result.Tunnel.Target),
-				slog.Any("annotations", result.Tunnel.Annotations),
-			))
+			tunnelAttrs := []any{slog.String("target", result.Tunnel.Target)}
+			if len(result.Tunnel.RequestTransforms) > 0 {
+				tunnelAttrs = append(tunnelAttrs,
+					slog.Any("request_transforms", buildTraceEntries(result.Tunnel.RequestTransforms)),
+				)
+			}
+			attrs = append(attrs, slog.Group("tunnel", tunnelAttrs...))
 		}
 
 		// Add rejected_by for reject actions

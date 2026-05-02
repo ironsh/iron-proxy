@@ -97,8 +97,15 @@ func TestAudit_TunnelInfo(t *testing.T) {
 		Action:     ActionContinue,
 		StatusCode: 200,
 		Tunnel: &TunnelInfo{
-			Target:      "example.com:443",
-			Annotations: map[string]any{"user_id": "alice"},
+			Target: "example.com:443",
+			RequestTransforms: []TransformTrace{
+				{
+					Name:        "auth",
+					Action:      ActionContinue,
+					Duration:    250 * time.Microsecond,
+					Annotations: map[string]any{"user_id": "alice"},
+				},
+			},
 		},
 	}
 
@@ -106,7 +113,12 @@ func TestAudit_TunnelInfo(t *testing.T) {
 
 	tunnel := parsed["tunnel"].(map[string]any)
 	require.Equal(t, "example.com:443", tunnel["target"])
-	annotations := tunnel["annotations"].(map[string]any)
+	traces := tunnel["request_transforms"].([]any)
+	require.Len(t, traces, 1)
+	trace := traces[0].(map[string]any)
+	require.Equal(t, "auth", trace["name"])
+	require.Equal(t, "allow", trace["action"])
+	annotations := trace["annotations"].(map[string]any)
 	require.Equal(t, "alice", annotations["user_id"])
 }
 

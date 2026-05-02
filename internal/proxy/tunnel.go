@@ -305,19 +305,11 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 		return false, rejectResp, nil
 	}
 
-	// Collect annotations from all CONNECT transforms.
-	annotations := make(map[string]any)
-	for _, tr := range result.RequestTransforms {
-		for k, v := range tr.Annotations {
-			annotations[k] = v
-		}
-	}
-
 	result.Action = transform.ActionContinue
 	result.StatusCode = http.StatusOK
 	return true, nil, &transform.TunnelInfo{
-		Target:      target,
-		Annotations: annotations,
+		Target:            target,
+		RequestTransforms: append([]transform.TransformTrace(nil), result.RequestTransforms...),
 	}
 }
 
@@ -391,14 +383,21 @@ func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
 	if info == nil {
 		return nil
 	}
-	clone := &transform.TunnelInfo{
-		Target:      info.Target,
-		Annotations: make(map[string]any, len(info.Annotations)),
+	traces := make([]transform.TransformTrace, len(info.RequestTransforms))
+	for i, tr := range info.RequestTransforms {
+		traces[i] = tr
+		if tr.Annotations != nil {
+			clonedAnn := make(map[string]any, len(tr.Annotations))
+			for k, v := range tr.Annotations {
+				clonedAnn[k] = v
+			}
+			traces[i].Annotations = clonedAnn
+		}
 	}
-	for k, v := range info.Annotations {
-		clone.Annotations[k] = v
+	return &transform.TunnelInfo{
+		Target:            info.Target,
+		RequestTransforms: traces,
 	}
-	return clone
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.

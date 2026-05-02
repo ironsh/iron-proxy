@@ -27,6 +27,13 @@ message TransformContext {
 
 message TunnelInfo {
   string target = 1;
+  // Per-transform annotations from the CONNECT/SOCKS5 request pipeline,
+  // in the order the transforms ran.
+  repeated TunnelRequestTransform request_transforms = 2;
+}
+
+message TunnelRequestTransform {
+  string name = 1;
   map<string, string> annotations = 2;
 }
 

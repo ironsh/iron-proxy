@@ -120,9 +120,18 @@ func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
 	tctx := &transform.TransformContext{
 		Tunnel: &transform.TunnelInfo{
 			Target: "example.com:443",
-			Annotations: map[string]any{
-				"user_id": "alice",
-				"count":   3,
+			RequestTransforms: []transform.TransformTrace{
+				{
+					Name: "auth",
+					Annotations: map[string]any{
+						"user_id": "alice",
+						"count":   3,
+					},
+				},
+				{
+					Name:        "policy",
+					Annotations: map[string]any{"tier": "gold"},
+				},
 			},
 		},
 	}
@@ -131,9 +140,15 @@ func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionContinue, result.Action)
-	require.Equal(t, "example.com:443", srv.lastReqProto.GetContext().GetTunnel().GetTarget())
-	require.Equal(t, "alice", srv.lastReqProto.GetContext().GetTunnel().GetAnnotations()["user_id"])
-	require.NotContains(t, srv.lastReqProto.GetContext().GetTunnel().GetAnnotations(), "count")
+	tunnel := srv.lastReqProto.GetContext().GetTunnel()
+	require.Equal(t, "example.com:443", tunnel.GetTarget())
+	traces := tunnel.GetRequestTransforms()
+	require.Len(t, traces, 2)
+	require.Equal(t, "auth", traces[0].GetName())
+	require.Equal(t, "alice", traces[0].GetAnnotations()["user_id"])
+	require.NotContains(t, traces[0].GetAnnotations(), "count")
+	require.Equal(t, "policy", traces[1].GetName())
+	require.Equal(t, "gold", traces[1].GetAnnotations()["tier"])
 }
 
 func TestTransformRequest_Reject(t *testing.T) {
