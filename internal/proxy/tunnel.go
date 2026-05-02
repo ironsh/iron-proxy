@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -383,16 +385,9 @@ func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
 	if info == nil {
 		return nil
 	}
-	traces := make([]transform.TransformTrace, len(info.RequestTransforms))
-	for i, tr := range info.RequestTransforms {
-		traces[i] = tr
-		if tr.Annotations != nil {
-			clonedAnn := make(map[string]any, len(tr.Annotations))
-			for k, v := range tr.Annotations {
-				clonedAnn[k] = v
-			}
-			traces[i].Annotations = clonedAnn
-		}
+	traces := slices.Clone(info.RequestTransforms)
+	for i := range traces {
+		traces[i].Annotations = maps.Clone(traces[i].Annotations)
 	}
 	return &transform.TunnelInfo{
 		Target:            info.Target,
