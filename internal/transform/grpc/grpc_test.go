@@ -111,6 +111,49 @@ func TestTransformRequest_Continue(t *testing.T) {
 	require.Equal(t, "hello", srv.lastReqProto.GetRequest().GetHeaders()["X-Test"].GetValues()[0])
 }
 
+func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
+	srv := &fakeServer{reqAction: transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE}
+	addr := startFakeServer(t, srv)
+
+	gt := newTestTransform(t, "test", addr, false, false)
+	req, _ := http.NewRequest("GET", "https://example.com/foo", nil)
+	tctx := &transform.TransformContext{
+		Tunnel: &transform.TunnelInfo{
+			Target: "example.com:443",
+			RequestTransforms: []transform.TransformTrace{
+				{
+					Name: "auth",
+					Annotations: map[string]any{
+						"user_id": "alice",
+						"count":   3,
+						"vip":     true,
+					},
+				},
+				{
+					Name:        "policy",
+					Annotations: map[string]any{"tier": "gold"},
+				},
+			},
+		},
+	}
+
+	result, err := gt.TransformRequest(context.Background(), tctx, req)
+
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, result.Action)
+	tunnel := srv.lastReqProto.GetContext().GetTunnel()
+	require.Equal(t, "example.com:443", tunnel.GetTarget())
+	traces := tunnel.GetRequestTransforms()
+	require.Len(t, traces, 2)
+	require.Equal(t, "auth", traces[0].GetName())
+	authAnn := traces[0].GetAnnotations().AsMap()
+	require.Equal(t, "alice", authAnn["user_id"])
+	require.Equal(t, float64(3), authAnn["count"])
+	require.Equal(t, true, authAnn["vip"])
+	require.Equal(t, "policy", traces[1].GetName())
+	require.Equal(t, "gold", traces[1].GetAnnotations().AsMap()["tier"])
+}
+
 func TestTransformRequest_Reject(t *testing.T) {
 	srv := &fakeServer{
 		reqAction: transformv1.TransformAction_TRANSFORM_ACTION_REJECT,

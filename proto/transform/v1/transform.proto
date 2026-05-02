@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package transform.v1;
 
+import "google/protobuf/struct.proto";
+
 option go_package = "github.com/ironsh/iron-proxy/gen/transform/v1;transformv1";
 
 // TransformService is the gRPC equivalent of the Transformer interface.
@@ -22,6 +24,21 @@ enum TransformAction {
 message TransformContext {
   string sni = 1;
   bytes client_cert_der = 2;
+  TunnelInfo tunnel = 3;
+}
+
+message TunnelInfo {
+  string target = 1;
+  // Per-transform annotations from the CONNECT/SOCKS5 request pipeline,
+  // in the order the transforms ran.
+  repeated TunnelRequestTransform request_transforms = 2;
+}
+
+message TunnelRequestTransform {
+  string name = 1;
+  // Annotations are dynamically typed (string, bool, number, list, struct).
+  // Values that can't be represented in a Struct are dropped.
+  google.protobuf.Struct annotations = 2;
 }
 
 // --- Request transform ---

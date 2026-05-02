@@ -54,10 +54,24 @@ type TransformContext struct {
 	ClientCert *x509.Certificate
 	Logger     *slog.Logger
 	Mode       Mode
+	Tunnel     *TunnelInfo
 
 	// annotations is written by transforms via Annotate and read by the pipeline
 	// to build TransformTrace. Not exported — transforms use the Annotate method.
 	annotations map[string]any
+}
+
+// TunnelInfo carries metadata from the CONNECT/SOCKS5 tunnel that established
+// an inner request.
+type TunnelInfo struct {
+	// Target is the host:port from the CONNECT request or SOCKS5 target.
+	Target string
+
+	// RequestTransforms are the traces from the CONNECT/SOCKS5 request
+	// pipeline, in the order the transforms ran. Inner request transforms and
+	// audit consume this to attribute tunnel-level annotations to the
+	// transform that produced them.
+	RequestTransforms []TransformTrace
 }
 
 // Annotate attaches audit metadata to the current transform's trace.
@@ -90,6 +104,8 @@ type PipelineResult struct {
 
 	Action     TransformAction
 	StatusCode int
+
+	Tunnel *TunnelInfo
 
 	RequestTransforms  []TransformTrace
 	ResponseTransforms []TransformTrace

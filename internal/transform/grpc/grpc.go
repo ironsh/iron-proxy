@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/yaml.v3"
 
 	transformv1 "github.com/ironsh/iron-proxy/gen/transform/v1"
@@ -221,7 +222,48 @@ func transformContextToProto(tctx *transform.TransformContext) *transformv1.Tran
 	if tctx.ClientCert != nil {
 		pb.ClientCertDer = tctx.ClientCert.Raw
 	}
+	if tctx.Tunnel != nil {
+		pb.Tunnel = &transformv1.TunnelInfo{
+			Target:            tctx.Tunnel.Target,
+			RequestTransforms: tunnelTransformsToProto(tctx.Tunnel.RequestTransforms),
+		}
+	}
 	return pb
+}
+
+func tunnelTransformsToProto(traces []transform.TransformTrace) []*transformv1.TunnelRequestTransform {
+	if len(traces) == 0 {
+		return nil
+	}
+	out := make([]*transformv1.TunnelRequestTransform, 0, len(traces))
+	for _, tr := range traces {
+		out = append(out, &transformv1.TunnelRequestTransform{
+			Name:        tr.Name,
+			Annotations: annotationsToStruct(tr.Annotations),
+		})
+	}
+	return out
+}
+
+// annotationsToStruct marshals an annotations map into a google.protobuf.Struct.
+// Entries whose values can't be represented (e.g. arbitrary structs, channels)
+// are dropped rather than failing the whole conversion.
+func annotationsToStruct(annotations map[string]any) *structpb.Struct {
+	if len(annotations) == 0 {
+		return nil
+	}
+	fields := make(map[string]*structpb.Value, len(annotations))
+	for k, v := range annotations {
+		val, err := structpb.NewValue(v)
+		if err != nil {
+			continue
+		}
+		fields[k] = val
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return &structpb.Struct{Fields: fields}
 }
 
 func httpRequestToProto(req *http.Request, sendBody bool) (*transformv1.HttpRequest, error) {

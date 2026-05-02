@@ -100,12 +100,12 @@ func New(opts Options) *Proxy {
 
 	p.httpServer = &http.Server{
 		Addr:    opts.HTTPAddr,
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: http.HandlerFunc(p.handleDirectHTTP),
 	}
 
 	p.httpsServer = &http.Server{
 		Addr:    opts.HTTPSAddr,
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: http.HandlerFunc(p.handleDirectHTTP),
 		TLSConfig: &tls.Config{
 			GetCertificate: p.getCertificate,
 		},
@@ -238,7 +238,13 @@ func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.P
 	}
 }
 
-func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
+	p.handleHTTP(w, r, nil)
+}
+
+// handleHTTP is the core HTTP request handler. tunnelInfo is non-nil only
+// when r originated inside a CONNECT/SOCKS5 tunnel.
+func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo) {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -266,10 +272,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build transform context and audit state
+	// Clone tunnelInfo so a transform that mutates the annotations map can't
+	// leak state into sibling requests that share the same tunnel.
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
 		Mode:   transform.ModeMITM,
+		Tunnel: cloneTunnelInfo(tunnelInfo),
 	}
 	if r.TLS != nil {
 		tctx.SNI = r.TLS.ServerName
@@ -282,6 +290,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr: r.RemoteAddr,
 		SNI:        tctx.SNI,
 		Mode:       transform.ModeMITM,
+		Tunnel:     tctx.Tunnel,
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()

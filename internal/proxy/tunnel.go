@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -90,9 +92,20 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), host) {
-		if _, err := fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\n\r\n"); err != nil {
-			return fmt.Errorf("write 403: %w", err)
+	ok, rejectResp, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header)
+	if !ok {
+		if rejectResp == nil {
+			rejectResp = &http.Response{
+				StatusCode: http.StatusForbidden,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     http.Header{},
+				Body:       http.NoBody,
+			}
+		}
+		if err := rejectResp.Write(conn); err != nil {
+			return fmt.Errorf("write rejection: %w", err)
 		}
 		return nil
 	}
@@ -102,7 +115,7 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("write 200: %w", err)
 	}
 
-	return p.serveTunnel(conn, host)
+	return p.serveTunnel(conn, host, tunnelInfo)
 }
 
 // handleSOCKS5 handles SOCKS5 tunnel requests.
@@ -202,7 +215,8 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	if !p.tunnelTransformCheck(conn.RemoteAddr().String(), target) {
+	ok, _, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil)
+	if !ok {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
 		}
@@ -215,7 +229,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("write success reply: %w", err)
 	}
 
-	return p.serveTunnel(conn, target)
+	return p.serveTunnel(conn, target, tunnelInfo)
 }
 
 // socks5Reply sends a SOCKS5 reply with the given status code.
@@ -226,15 +240,23 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 }
 
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
-// pipeline to decide whether the tunnel should be allowed.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
+// pipeline to decide whether the tunnel should be allowed. When connectHeaders
+// is non-nil the headers from the original CONNECT request (e.g.
+// Proxy-Authorization) are forwarded to transforms so they can make
+// authentication and policy decisions at the tunnel level.
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response, *transform.TunnelInfo) {
 	host, _, _ := net.SplitHostPort(target)
+
+	hdr := http.Header{}
+	if connectHeaders != nil {
+		hdr = connectHeaders.Clone()
+	}
 
 	req := &http.Request{
 		Method:     http.MethodConnect,
 		Host:       target,
 		URL:        &url.URL{Host: target},
-		Header:     http.Header{},
+		Header:     hdr,
 		RemoteAddr: remoteAddr,
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
@@ -273,7 +295,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 			slog.String("target", target),
 			slog.String("error", err.Error()),
 		)
-		return false
+		return false, nil, nil
 	}
 	if rejectResp != nil {
 		result.Action = transform.ActionReject
@@ -282,18 +304,21 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string) bool {
 			slog.String("target", target),
 			slog.Int("status", rejectResp.StatusCode),
 		)
-		return false
+		return false, rejectResp, nil
 	}
 
 	result.Action = transform.ActionContinue
 	result.StatusCode = http.StatusOK
-	return true
+	return true, nil, &transform.TunnelInfo{
+		Target:            target,
+		RequestTransforms: result.RequestTransforms,
+	}
 }
 
 // serveTunnel peeks at the client's first byte after the CONNECT/SOCKS5
 // handshake to detect TLS (0x16) vs plain HTTP. TLS connections get MITM'd;
 // plain HTTP is served directly through handleHTTP. Anything else is rejected.
-func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnel(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	br := bufio.NewReader(clientConn)
 	first, err := br.Peek(1)
 	if err != nil {
@@ -305,12 +330,12 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 
 	if first[0] == 0x16 {
 		// TLS ClientHello: MITM
-		return p.serveTunnelTLS(peekedConn, target)
+		return p.serveTunnelTLS(peekedConn, target, tunnelInfo)
 	}
 
 	if isHTTPMethodByte(first[0]) {
 		// Plain HTTP request
-		return p.serveTunnelHTTP(peekedConn, target)
+		return p.serveTunnelHTTP(peekedConn, target, tunnelInfo)
 	}
 
 	return fmt.Errorf("unsupported protocol (first byte 0x%02x) for target %s", first[0], target)
@@ -320,7 +345,7 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string) error {
 // it terminates TLS and serves HTTP via handleHTTP; in sni-only mode it
 // peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
 // port is ignored to prevent port-pivot attacks).
-func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	if p.tlsMode == config.TLSModeSNIOnly {
 		return p.serveSNIPassthrough(clientConn)
 	}
@@ -336,20 +361,38 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string) error {
 
 	ln := newOneConnListener(tlsConn)
 	srv := &http.Server{
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.handleHTTP(w, r, tunnelInfo)
+		}),
 	}
 	return srv.Serve(ln)
 }
 
 // serveTunnelHTTP serves plain HTTP requests through the normal handleHTTP handler.
-func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string) error {
+func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	defer clientConn.Close()
 
 	ln := newOneConnListener(clientConn)
 	srv := &http.Server{
-		Handler: http.HandlerFunc(p.handleHTTP),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.handleHTTP(w, r, tunnelInfo)
+		}),
 	}
 	return srv.Serve(ln)
+}
+
+func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
+	if info == nil {
+		return nil
+	}
+	traces := slices.Clone(info.RequestTransforms)
+	for i := range traces {
+		traces[i].Annotations = maps.Clone(traces[i].Annotations)
+	}
+	return &transform.TunnelInfo{
+		Target:            info.Target,
+		RequestTransforms: traces,
+	}
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.

@@ -350,6 +350,84 @@ func TestTunnel_TransformReject(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestTunnel_CONNECTHeadersAndRejectResponse(t *testing.T) {
+	auth := &connectHeaderAuthTransform{}
+
+	_, tunnelAddr, _ := startTunnelProxy(t, []transform.Transformer{auth})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	require.NoError(t, err)
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	require.Equal(t, `Basic realm="proxy"`, resp.Header.Get("Proxy-Authenticate"))
+	require.Equal(t, "example.com:443", auth.lastTarget)
+
+	conn2, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn2.Close()
+
+	_, err = fmt.Fprintf(conn2, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic ok\r\n\r\n")
+	require.NoError(t, err)
+
+	resp2, err := http.ReadResponse(bufio.NewReader(conn2), nil)
+	require.NoError(t, err)
+	_ = resp2.Body.Close()
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+}
+
+func TestTunnelInfoPropagatesToInnerTransforms(t *testing.T) {
+	seen := make(chan *transform.TunnelInfo, 1)
+	tunnelInfoTransform := &tunnelInfoTransform{seen: seen}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxy(t, []transform.Transformer{tunnelInfoTransform})
+	target := upstream.Listener.Addr().String()
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	require.NoError(t, err)
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	_, err = fmt.Fprintf(conn, "GET /test HTTP/1.1\r\nHost: %s\r\n\r\n", target)
+	require.NoError(t, err)
+
+	resp2, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	_ = resp2.Body.Close()
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	select {
+	case info := <-seen:
+		require.Equal(t, target, info.Target)
+		require.Len(t, info.RequestTransforms, 1)
+		require.Equal(t, "tunnel-info", info.RequestTransforms[0].Name)
+		require.Equal(t, "alice", info.RequestTransforms[0].Annotations["user_id"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("inner transform did not receive tunnel info")
+	}
+}
+
 func TestTunnel_SOCKS5_TransformReject(t *testing.T) {
 	rejecter := &rejectTransform{}
 
@@ -387,5 +465,60 @@ func (r *rejectTransform) TransformRequest(_ context.Context, _ *transform.Trans
 }
 
 func (r *rejectTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+type connectHeaderAuthTransform struct {
+	lastTarget string
+}
+
+func (c *connectHeaderAuthTransform) Name() string { return "connect-auth" }
+
+func (c *connectHeaderAuthTransform) TransformRequest(_ context.Context, _ *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	if req.Method != http.MethodConnect {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+	c.lastTarget = req.Host
+	if req.Header.Get("Proxy-Authorization") == "Basic ok" {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+	return &transform.TransformResult{
+		Action: transform.ActionReject,
+		Response: &http.Response{
+			StatusCode: http.StatusProxyAuthRequired,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     http.Header{"Proxy-Authenticate": []string{`Basic realm="proxy"`}},
+			Body:       http.NoBody,
+		},
+	}, nil
+}
+
+func (c *connectHeaderAuthTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+type tunnelInfoTransform struct {
+	seen chan<- *transform.TunnelInfo
+}
+
+func (t *tunnelInfoTransform) Name() string { return "tunnel-info" }
+
+func (t *tunnelInfoTransform) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	if req.Method == http.MethodConnect {
+		tctx.Annotate("user_id", "alice")
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+	if tctx.Tunnel != nil {
+		select {
+		case t.seen <- tctx.Tunnel:
+		default:
+		}
+	}
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+func (t *tunnelInfoTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }

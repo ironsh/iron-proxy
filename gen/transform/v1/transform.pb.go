@@ -9,6 +9,7 @@ package transformv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -76,6 +77,7 @@ type TransformContext struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Sni           string                 `protobuf:"bytes,1,opt,name=sni,proto3" json:"sni,omitempty"`
 	ClientCertDer []byte                 `protobuf:"bytes,2,opt,name=client_cert_der,json=clientCertDer,proto3" json:"client_cert_der,omitempty"`
+	Tunnel        *TunnelInfo            `protobuf:"bytes,3,opt,name=tunnel,proto3" json:"tunnel,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -124,6 +126,121 @@ func (x *TransformContext) GetClientCertDer() []byte {
 	return nil
 }
 
+func (x *TransformContext) GetTunnel() *TunnelInfo {
+	if x != nil {
+		return x.Tunnel
+	}
+	return nil
+}
+
+type TunnelInfo struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Target string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	// Per-transform annotations from the CONNECT/SOCKS5 request pipeline,
+	// in the order the transforms ran.
+	RequestTransforms []*TunnelRequestTransform `protobuf:"bytes,2,rep,name=request_transforms,json=requestTransforms,proto3" json:"request_transforms,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *TunnelInfo) Reset() {
+	*x = TunnelInfo{}
+	mi := &file_transform_v1_transform_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TunnelInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TunnelInfo) ProtoMessage() {}
+
+func (x *TunnelInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_transform_v1_transform_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TunnelInfo.ProtoReflect.Descriptor instead.
+func (*TunnelInfo) Descriptor() ([]byte, []int) {
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *TunnelInfo) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *TunnelInfo) GetRequestTransforms() []*TunnelRequestTransform {
+	if x != nil {
+		return x.RequestTransforms
+	}
+	return nil
+}
+
+type TunnelRequestTransform struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Annotations are dynamically typed (string, bool, number, list, struct).
+	// Values that can't be represented in a Struct are dropped.
+	Annotations   *structpb.Struct `protobuf:"bytes,2,opt,name=annotations,proto3" json:"annotations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TunnelRequestTransform) Reset() {
+	*x = TunnelRequestTransform{}
+	mi := &file_transform_v1_transform_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TunnelRequestTransform) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TunnelRequestTransform) ProtoMessage() {}
+
+func (x *TunnelRequestTransform) ProtoReflect() protoreflect.Message {
+	mi := &file_transform_v1_transform_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TunnelRequestTransform.ProtoReflect.Descriptor instead.
+func (*TunnelRequestTransform) Descriptor() ([]byte, []int) {
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *TunnelRequestTransform) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *TunnelRequestTransform) GetAnnotations() *structpb.Struct {
+	if x != nil {
+		return x.Annotations
+	}
+	return nil
+}
+
 type HttpRequest struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
 	Method        string                   `protobuf:"bytes,1,opt,name=method,proto3" json:"method,omitempty"`
@@ -138,7 +255,7 @@ type HttpRequest struct {
 
 func (x *HttpRequest) Reset() {
 	*x = HttpRequest{}
-	mi := &file_transform_v1_transform_proto_msgTypes[1]
+	mi := &file_transform_v1_transform_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -150,7 +267,7 @@ func (x *HttpRequest) String() string {
 func (*HttpRequest) ProtoMessage() {}
 
 func (x *HttpRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[1]
+	mi := &file_transform_v1_transform_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -163,7 +280,7 @@ func (x *HttpRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HttpRequest.ProtoReflect.Descriptor instead.
 func (*HttpRequest) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{1}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *HttpRequest) GetMethod() string {
@@ -217,7 +334,7 @@ type HeaderValues struct {
 
 func (x *HeaderValues) Reset() {
 	*x = HeaderValues{}
-	mi := &file_transform_v1_transform_proto_msgTypes[2]
+	mi := &file_transform_v1_transform_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -229,7 +346,7 @@ func (x *HeaderValues) String() string {
 func (*HeaderValues) ProtoMessage() {}
 
 func (x *HeaderValues) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[2]
+	mi := &file_transform_v1_transform_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -242,7 +359,7 @@ func (x *HeaderValues) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeaderValues.ProtoReflect.Descriptor instead.
 func (*HeaderValues) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{2}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *HeaderValues) GetValues() []string {
@@ -263,7 +380,7 @@ type HttpResponse struct {
 
 func (x *HttpResponse) Reset() {
 	*x = HttpResponse{}
-	mi := &file_transform_v1_transform_proto_msgTypes[3]
+	mi := &file_transform_v1_transform_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -275,7 +392,7 @@ func (x *HttpResponse) String() string {
 func (*HttpResponse) ProtoMessage() {}
 
 func (x *HttpResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[3]
+	mi := &file_transform_v1_transform_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -288,7 +405,7 @@ func (x *HttpResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HttpResponse.ProtoReflect.Descriptor instead.
 func (*HttpResponse) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{3}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HttpResponse) GetStatusCode() int32 {
@@ -322,7 +439,7 @@ type TransformRequestRequest struct {
 
 func (x *TransformRequestRequest) Reset() {
 	*x = TransformRequestRequest{}
-	mi := &file_transform_v1_transform_proto_msgTypes[4]
+	mi := &file_transform_v1_transform_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +451,7 @@ func (x *TransformRequestRequest) String() string {
 func (*TransformRequestRequest) ProtoMessage() {}
 
 func (x *TransformRequestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[4]
+	mi := &file_transform_v1_transform_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +464,7 @@ func (x *TransformRequestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransformRequestRequest.ProtoReflect.Descriptor instead.
 func (*TransformRequestRequest) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{4}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TransformRequestRequest) GetContext() *TransformContext {
@@ -380,7 +497,7 @@ type TransformRequestResponse struct {
 
 func (x *TransformRequestResponse) Reset() {
 	*x = TransformRequestResponse{}
-	mi := &file_transform_v1_transform_proto_msgTypes[5]
+	mi := &file_transform_v1_transform_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -392,7 +509,7 @@ func (x *TransformRequestResponse) String() string {
 func (*TransformRequestResponse) ProtoMessage() {}
 
 func (x *TransformRequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[5]
+	mi := &file_transform_v1_transform_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -405,7 +522,7 @@ func (x *TransformRequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransformRequestResponse.ProtoReflect.Descriptor instead.
 func (*TransformRequestResponse) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{5}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *TransformRequestResponse) GetAction() TransformAction {
@@ -447,7 +564,7 @@ type TransformResponseRequest struct {
 
 func (x *TransformResponseRequest) Reset() {
 	*x = TransformResponseRequest{}
-	mi := &file_transform_v1_transform_proto_msgTypes[6]
+	mi := &file_transform_v1_transform_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -459,7 +576,7 @@ func (x *TransformResponseRequest) String() string {
 func (*TransformResponseRequest) ProtoMessage() {}
 
 func (x *TransformResponseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[6]
+	mi := &file_transform_v1_transform_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,7 +589,7 @@ func (x *TransformResponseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransformResponseRequest.ProtoReflect.Descriptor instead.
 func (*TransformResponseRequest) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{6}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TransformResponseRequest) GetContext() *TransformContext {
@@ -509,7 +626,7 @@ type TransformResponseResponse struct {
 
 func (x *TransformResponseResponse) Reset() {
 	*x = TransformResponseResponse{}
-	mi := &file_transform_v1_transform_proto_msgTypes[7]
+	mi := &file_transform_v1_transform_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +638,7 @@ func (x *TransformResponseResponse) String() string {
 func (*TransformResponseResponse) ProtoMessage() {}
 
 func (x *TransformResponseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transform_v1_transform_proto_msgTypes[7]
+	mi := &file_transform_v1_transform_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +651,7 @@ func (x *TransformResponseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransformResponseResponse.ProtoReflect.Descriptor instead.
 func (*TransformResponseResponse) Descriptor() ([]byte, []int) {
-	return file_transform_v1_transform_proto_rawDescGZIP(), []int{7}
+	return file_transform_v1_transform_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TransformResponseResponse) GetAction() TransformAction {
@@ -562,10 +679,18 @@ var File_transform_v1_transform_proto protoreflect.FileDescriptor
 
 const file_transform_v1_transform_proto_rawDesc = "" +
 	"\n" +
-	"\x1ctransform/v1/transform.proto\x12\ftransform.v1\"L\n" +
+	"\x1ctransform/v1/transform.proto\x12\ftransform.v1\x1a\x1cgoogle/protobuf/struct.proto\"~\n" +
 	"\x10TransformContext\x12\x10\n" +
 	"\x03sni\x18\x01 \x01(\tR\x03sni\x12&\n" +
-	"\x0fclient_cert_der\x18\x02 \x01(\fR\rclientCertDer\"\x9a\x02\n" +
+	"\x0fclient_cert_der\x18\x02 \x01(\fR\rclientCertDer\x120\n" +
+	"\x06tunnel\x18\x03 \x01(\v2\x18.transform.v1.TunnelInfoR\x06tunnel\"y\n" +
+	"\n" +
+	"TunnelInfo\x12\x16\n" +
+	"\x06target\x18\x01 \x01(\tR\x06target\x12S\n" +
+	"\x12request_transforms\x18\x02 \x03(\v2$.transform.v1.TunnelRequestTransformR\x11requestTransforms\"g\n" +
+	"\x16TunnelRequestTransform\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x129\n" +
+	"\vannotations\x18\x02 \x01(\v2\x17.google.protobuf.StructR\vannotations\"\x9a\x02\n" +
 	"\vHttpRequest\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12@\n" +
@@ -630,48 +755,54 @@ func file_transform_v1_transform_proto_rawDescGZIP() []byte {
 }
 
 var file_transform_v1_transform_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_transform_v1_transform_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_transform_v1_transform_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_transform_v1_transform_proto_goTypes = []any{
 	(TransformAction)(0),              // 0: transform.v1.TransformAction
 	(*TransformContext)(nil),          // 1: transform.v1.TransformContext
-	(*HttpRequest)(nil),               // 2: transform.v1.HttpRequest
-	(*HeaderValues)(nil),              // 3: transform.v1.HeaderValues
-	(*HttpResponse)(nil),              // 4: transform.v1.HttpResponse
-	(*TransformRequestRequest)(nil),   // 5: transform.v1.TransformRequestRequest
-	(*TransformRequestResponse)(nil),  // 6: transform.v1.TransformRequestResponse
-	(*TransformResponseRequest)(nil),  // 7: transform.v1.TransformResponseRequest
-	(*TransformResponseResponse)(nil), // 8: transform.v1.TransformResponseResponse
-	nil,                               // 9: transform.v1.HttpRequest.HeadersEntry
-	nil,                               // 10: transform.v1.HttpResponse.HeadersEntry
-	nil,                               // 11: transform.v1.TransformRequestResponse.AnnotationsEntry
-	nil,                               // 12: transform.v1.TransformResponseResponse.AnnotationsEntry
+	(*TunnelInfo)(nil),                // 2: transform.v1.TunnelInfo
+	(*TunnelRequestTransform)(nil),    // 3: transform.v1.TunnelRequestTransform
+	(*HttpRequest)(nil),               // 4: transform.v1.HttpRequest
+	(*HeaderValues)(nil),              // 5: transform.v1.HeaderValues
+	(*HttpResponse)(nil),              // 6: transform.v1.HttpResponse
+	(*TransformRequestRequest)(nil),   // 7: transform.v1.TransformRequestRequest
+	(*TransformRequestResponse)(nil),  // 8: transform.v1.TransformRequestResponse
+	(*TransformResponseRequest)(nil),  // 9: transform.v1.TransformResponseRequest
+	(*TransformResponseResponse)(nil), // 10: transform.v1.TransformResponseResponse
+	nil,                               // 11: transform.v1.HttpRequest.HeadersEntry
+	nil,                               // 12: transform.v1.HttpResponse.HeadersEntry
+	nil,                               // 13: transform.v1.TransformRequestResponse.AnnotationsEntry
+	nil,                               // 14: transform.v1.TransformResponseResponse.AnnotationsEntry
+	(*structpb.Struct)(nil),           // 15: google.protobuf.Struct
 }
 var file_transform_v1_transform_proto_depIdxs = []int32{
-	9,  // 0: transform.v1.HttpRequest.headers:type_name -> transform.v1.HttpRequest.HeadersEntry
-	10, // 1: transform.v1.HttpResponse.headers:type_name -> transform.v1.HttpResponse.HeadersEntry
-	1,  // 2: transform.v1.TransformRequestRequest.context:type_name -> transform.v1.TransformContext
-	2,  // 3: transform.v1.TransformRequestRequest.request:type_name -> transform.v1.HttpRequest
-	0,  // 4: transform.v1.TransformRequestResponse.action:type_name -> transform.v1.TransformAction
-	4,  // 5: transform.v1.TransformRequestResponse.response:type_name -> transform.v1.HttpResponse
-	2,  // 6: transform.v1.TransformRequestResponse.modified_request:type_name -> transform.v1.HttpRequest
-	11, // 7: transform.v1.TransformRequestResponse.annotations:type_name -> transform.v1.TransformRequestResponse.AnnotationsEntry
-	1,  // 8: transform.v1.TransformResponseRequest.context:type_name -> transform.v1.TransformContext
-	2,  // 9: transform.v1.TransformResponseRequest.request:type_name -> transform.v1.HttpRequest
-	4,  // 10: transform.v1.TransformResponseRequest.response:type_name -> transform.v1.HttpResponse
-	0,  // 11: transform.v1.TransformResponseResponse.action:type_name -> transform.v1.TransformAction
-	4,  // 12: transform.v1.TransformResponseResponse.modified_response:type_name -> transform.v1.HttpResponse
-	12, // 13: transform.v1.TransformResponseResponse.annotations:type_name -> transform.v1.TransformResponseResponse.AnnotationsEntry
-	3,  // 14: transform.v1.HttpRequest.HeadersEntry.value:type_name -> transform.v1.HeaderValues
-	3,  // 15: transform.v1.HttpResponse.HeadersEntry.value:type_name -> transform.v1.HeaderValues
-	5,  // 16: transform.v1.TransformService.TransformRequest:input_type -> transform.v1.TransformRequestRequest
-	7,  // 17: transform.v1.TransformService.TransformResponse:input_type -> transform.v1.TransformResponseRequest
-	6,  // 18: transform.v1.TransformService.TransformRequest:output_type -> transform.v1.TransformRequestResponse
-	8,  // 19: transform.v1.TransformService.TransformResponse:output_type -> transform.v1.TransformResponseResponse
-	18, // [18:20] is the sub-list for method output_type
-	16, // [16:18] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	2,  // 0: transform.v1.TransformContext.tunnel:type_name -> transform.v1.TunnelInfo
+	3,  // 1: transform.v1.TunnelInfo.request_transforms:type_name -> transform.v1.TunnelRequestTransform
+	15, // 2: transform.v1.TunnelRequestTransform.annotations:type_name -> google.protobuf.Struct
+	11, // 3: transform.v1.HttpRequest.headers:type_name -> transform.v1.HttpRequest.HeadersEntry
+	12, // 4: transform.v1.HttpResponse.headers:type_name -> transform.v1.HttpResponse.HeadersEntry
+	1,  // 5: transform.v1.TransformRequestRequest.context:type_name -> transform.v1.TransformContext
+	4,  // 6: transform.v1.TransformRequestRequest.request:type_name -> transform.v1.HttpRequest
+	0,  // 7: transform.v1.TransformRequestResponse.action:type_name -> transform.v1.TransformAction
+	6,  // 8: transform.v1.TransformRequestResponse.response:type_name -> transform.v1.HttpResponse
+	4,  // 9: transform.v1.TransformRequestResponse.modified_request:type_name -> transform.v1.HttpRequest
+	13, // 10: transform.v1.TransformRequestResponse.annotations:type_name -> transform.v1.TransformRequestResponse.AnnotationsEntry
+	1,  // 11: transform.v1.TransformResponseRequest.context:type_name -> transform.v1.TransformContext
+	4,  // 12: transform.v1.TransformResponseRequest.request:type_name -> transform.v1.HttpRequest
+	6,  // 13: transform.v1.TransformResponseRequest.response:type_name -> transform.v1.HttpResponse
+	0,  // 14: transform.v1.TransformResponseResponse.action:type_name -> transform.v1.TransformAction
+	6,  // 15: transform.v1.TransformResponseResponse.modified_response:type_name -> transform.v1.HttpResponse
+	14, // 16: transform.v1.TransformResponseResponse.annotations:type_name -> transform.v1.TransformResponseResponse.AnnotationsEntry
+	5,  // 17: transform.v1.HttpRequest.HeadersEntry.value:type_name -> transform.v1.HeaderValues
+	5,  // 18: transform.v1.HttpResponse.HeadersEntry.value:type_name -> transform.v1.HeaderValues
+	7,  // 19: transform.v1.TransformService.TransformRequest:input_type -> transform.v1.TransformRequestRequest
+	9,  // 20: transform.v1.TransformService.TransformResponse:input_type -> transform.v1.TransformResponseRequest
+	8,  // 21: transform.v1.TransformService.TransformRequest:output_type -> transform.v1.TransformRequestResponse
+	10, // 22: transform.v1.TransformService.TransformResponse:output_type -> transform.v1.TransformResponseResponse
+	21, // [21:23] is the sub-list for method output_type
+	19, // [19:21] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_transform_v1_transform_proto_init() }
@@ -685,7 +816,7 @@ func file_transform_v1_transform_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transform_v1_transform_proto_rawDesc), len(file_transform_v1_transform_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

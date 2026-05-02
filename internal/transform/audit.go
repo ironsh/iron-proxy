@@ -36,6 +36,15 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
 			),
 		}
+		if result.Tunnel != nil {
+			tunnelAttrs := []any{slog.String("target", result.Tunnel.Target)}
+			if len(result.Tunnel.RequestTransforms) > 0 {
+				tunnelAttrs = append(tunnelAttrs,
+					slog.Any("request_transforms", buildTraceEntries(result.Tunnel.RequestTransforms)),
+				)
+			}
+			attrs = append(attrs, slog.Group("tunnel", tunnelAttrs...))
+		}
 
 		// Add rejected_by for reject actions
 		if result.Action == ActionReject {
