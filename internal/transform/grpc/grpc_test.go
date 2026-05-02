@@ -126,6 +126,7 @@ func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
 					Annotations: map[string]any{
 						"user_id": "alice",
 						"count":   3,
+						"vip":     true,
 					},
 				},
 				{
@@ -145,10 +146,12 @@ func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
 	traces := tunnel.GetRequestTransforms()
 	require.Len(t, traces, 2)
 	require.Equal(t, "auth", traces[0].GetName())
-	require.Equal(t, "alice", traces[0].GetAnnotations()["user_id"])
-	require.NotContains(t, traces[0].GetAnnotations(), "count")
+	authAnn := traces[0].GetAnnotations().AsMap()
+	require.Equal(t, "alice", authAnn["user_id"])
+	require.Equal(t, float64(3), authAnn["count"])
+	require.Equal(t, true, authAnn["vip"])
 	require.Equal(t, "policy", traces[1].GetName())
-	require.Equal(t, "gold", traces[1].GetAnnotations()["tier"])
+	require.Equal(t, "gold", traces[1].GetAnnotations().AsMap()["tier"])
 }
 
 func TestTransformRequest_Reject(t *testing.T) {

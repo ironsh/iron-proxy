@@ -9,6 +9,7 @@ package transformv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -187,9 +188,11 @@ func (x *TunnelInfo) GetRequestTransforms() []*TunnelRequestTransform {
 }
 
 type TunnelRequestTransform struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Annotations   map[string]string      `protobuf:"bytes,2,rep,name=annotations,proto3" json:"annotations,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Annotations are dynamically typed (string, bool, number, list, struct).
+	// Values that can't be represented in a Struct are dropped.
+	Annotations   *structpb.Struct `protobuf:"bytes,2,opt,name=annotations,proto3" json:"annotations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -231,7 +234,7 @@ func (x *TunnelRequestTransform) GetName() string {
 	return ""
 }
 
-func (x *TunnelRequestTransform) GetAnnotations() map[string]string {
+func (x *TunnelRequestTransform) GetAnnotations() *structpb.Struct {
 	if x != nil {
 		return x.Annotations
 	}
@@ -676,7 +679,7 @@ var File_transform_v1_transform_proto protoreflect.FileDescriptor
 
 const file_transform_v1_transform_proto_rawDesc = "" +
 	"\n" +
-	"\x1ctransform/v1/transform.proto\x12\ftransform.v1\"~\n" +
+	"\x1ctransform/v1/transform.proto\x12\ftransform.v1\x1a\x1cgoogle/protobuf/struct.proto\"~\n" +
 	"\x10TransformContext\x12\x10\n" +
 	"\x03sni\x18\x01 \x01(\tR\x03sni\x12&\n" +
 	"\x0fclient_cert_der\x18\x02 \x01(\fR\rclientCertDer\x120\n" +
@@ -684,13 +687,10 @@ const file_transform_v1_transform_proto_rawDesc = "" +
 	"\n" +
 	"TunnelInfo\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12S\n" +
-	"\x12request_transforms\x18\x02 \x03(\v2$.transform.v1.TunnelRequestTransformR\x11requestTransforms\"\xc5\x01\n" +
+	"\x12request_transforms\x18\x02 \x03(\v2$.transform.v1.TunnelRequestTransformR\x11requestTransforms\"g\n" +
 	"\x16TunnelRequestTransform\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12W\n" +
-	"\vannotations\x18\x02 \x03(\v25.transform.v1.TunnelRequestTransform.AnnotationsEntryR\vannotations\x1a>\n" +
-	"\x10AnnotationsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x02\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x129\n" +
+	"\vannotations\x18\x02 \x01(\v2\x17.google.protobuf.StructR\vannotations\"\x9a\x02\n" +
 	"\vHttpRequest\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12@\n" +
@@ -755,7 +755,7 @@ func file_transform_v1_transform_proto_rawDescGZIP() []byte {
 }
 
 var file_transform_v1_transform_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_transform_v1_transform_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_transform_v1_transform_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_transform_v1_transform_proto_goTypes = []any{
 	(TransformAction)(0),              // 0: transform.v1.TransformAction
 	(*TransformContext)(nil),          // 1: transform.v1.TransformContext
@@ -768,30 +768,30 @@ var file_transform_v1_transform_proto_goTypes = []any{
 	(*TransformRequestResponse)(nil),  // 8: transform.v1.TransformRequestResponse
 	(*TransformResponseRequest)(nil),  // 9: transform.v1.TransformResponseRequest
 	(*TransformResponseResponse)(nil), // 10: transform.v1.TransformResponseResponse
-	nil,                               // 11: transform.v1.TunnelRequestTransform.AnnotationsEntry
-	nil,                               // 12: transform.v1.HttpRequest.HeadersEntry
-	nil,                               // 13: transform.v1.HttpResponse.HeadersEntry
-	nil,                               // 14: transform.v1.TransformRequestResponse.AnnotationsEntry
-	nil,                               // 15: transform.v1.TransformResponseResponse.AnnotationsEntry
+	nil,                               // 11: transform.v1.HttpRequest.HeadersEntry
+	nil,                               // 12: transform.v1.HttpResponse.HeadersEntry
+	nil,                               // 13: transform.v1.TransformRequestResponse.AnnotationsEntry
+	nil,                               // 14: transform.v1.TransformResponseResponse.AnnotationsEntry
+	(*structpb.Struct)(nil),           // 15: google.protobuf.Struct
 }
 var file_transform_v1_transform_proto_depIdxs = []int32{
 	2,  // 0: transform.v1.TransformContext.tunnel:type_name -> transform.v1.TunnelInfo
 	3,  // 1: transform.v1.TunnelInfo.request_transforms:type_name -> transform.v1.TunnelRequestTransform
-	11, // 2: transform.v1.TunnelRequestTransform.annotations:type_name -> transform.v1.TunnelRequestTransform.AnnotationsEntry
-	12, // 3: transform.v1.HttpRequest.headers:type_name -> transform.v1.HttpRequest.HeadersEntry
-	13, // 4: transform.v1.HttpResponse.headers:type_name -> transform.v1.HttpResponse.HeadersEntry
+	15, // 2: transform.v1.TunnelRequestTransform.annotations:type_name -> google.protobuf.Struct
+	11, // 3: transform.v1.HttpRequest.headers:type_name -> transform.v1.HttpRequest.HeadersEntry
+	12, // 4: transform.v1.HttpResponse.headers:type_name -> transform.v1.HttpResponse.HeadersEntry
 	1,  // 5: transform.v1.TransformRequestRequest.context:type_name -> transform.v1.TransformContext
 	4,  // 6: transform.v1.TransformRequestRequest.request:type_name -> transform.v1.HttpRequest
 	0,  // 7: transform.v1.TransformRequestResponse.action:type_name -> transform.v1.TransformAction
 	6,  // 8: transform.v1.TransformRequestResponse.response:type_name -> transform.v1.HttpResponse
 	4,  // 9: transform.v1.TransformRequestResponse.modified_request:type_name -> transform.v1.HttpRequest
-	14, // 10: transform.v1.TransformRequestResponse.annotations:type_name -> transform.v1.TransformRequestResponse.AnnotationsEntry
+	13, // 10: transform.v1.TransformRequestResponse.annotations:type_name -> transform.v1.TransformRequestResponse.AnnotationsEntry
 	1,  // 11: transform.v1.TransformResponseRequest.context:type_name -> transform.v1.TransformContext
 	4,  // 12: transform.v1.TransformResponseRequest.request:type_name -> transform.v1.HttpRequest
 	6,  // 13: transform.v1.TransformResponseRequest.response:type_name -> transform.v1.HttpResponse
 	0,  // 14: transform.v1.TransformResponseResponse.action:type_name -> transform.v1.TransformAction
 	6,  // 15: transform.v1.TransformResponseResponse.modified_response:type_name -> transform.v1.HttpResponse
-	15, // 16: transform.v1.TransformResponseResponse.annotations:type_name -> transform.v1.TransformResponseResponse.AnnotationsEntry
+	14, // 16: transform.v1.TransformResponseResponse.annotations:type_name -> transform.v1.TransformResponseResponse.AnnotationsEntry
 	5,  // 17: transform.v1.HttpRequest.HeadersEntry.value:type_name -> transform.v1.HeaderValues
 	5,  // 18: transform.v1.HttpResponse.HeadersEntry.value:type_name -> transform.v1.HeaderValues
 	7,  // 19: transform.v1.TransformService.TransformRequest:input_type -> transform.v1.TransformRequestRequest
@@ -816,7 +816,7 @@ func file_transform_v1_transform_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transform_v1_transform_proto_rawDesc), len(file_transform_v1_transform_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

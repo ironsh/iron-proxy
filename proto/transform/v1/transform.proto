@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package transform.v1;
 
+import "google/protobuf/struct.proto";
+
 option go_package = "github.com/ironsh/iron-proxy/gen/transform/v1;transformv1";
 
 // TransformService is the gRPC equivalent of the Transformer interface.
@@ -34,7 +36,9 @@ message TunnelInfo {
 
 message TunnelRequestTransform {
   string name = 1;
-  map<string, string> annotations = 2;
+  // Annotations are dynamically typed (string, bool, number, list, struct).
+  // Values that can't be represented in a Struct are dropped.
+  google.protobuf.Struct annotations = 2;
 }
 
 // --- Request transform ---
