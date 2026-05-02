@@ -309,7 +309,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	result.StatusCode = http.StatusOK
 	return true, nil, &transform.TunnelInfo{
 		Target:            target,
-		RequestTransforms: append([]transform.TransformTrace(nil), result.RequestTransforms...),
+		RequestTransforms: result.RequestTransforms,
 	}
 }
 
