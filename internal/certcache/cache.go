@@ -118,7 +118,9 @@ func (c *Cache) generate(domain string) (*tls.Certificate, error) {
 	}
 
 	return &tls.Certificate{
-		Certificate: [][]byte{certDER},
+		// Include the signing CA so clients can build the full chain when the
+		// configured CA is an intermediate and clients trust its parent root.
+		Certificate: [][]byte{certDER, c.caCert.Raw},
 		PrivateKey:  key,
 		Leaf:        leaf,
 	}, nil

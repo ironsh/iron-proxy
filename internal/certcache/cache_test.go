@@ -239,7 +239,7 @@ func TestLoadCA_ECKey(t *testing.T) {
 
 func TestGetOrCreate_GeneratesCert(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,10)
+	c := newTestCache(t, caCert, caKey, 10)
 
 	cert, err := c.GetOrCreate("example.com")
 	require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestGetOrCreate_GeneratesCert(t *testing.T) {
 
 func TestGetOrCreate_VerifiesAgainstCA(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,10)
+	c := newTestCache(t, caCert, caKey, 10)
 
 	cert, err := c.GetOrCreate("example.com")
 	require.NoError(t, err)
@@ -266,9 +266,56 @@ func TestGetOrCreate_VerifiesAgainstCA(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestGetOrCreate_ServesSigningCAForIntermediateChain(t *testing.T) {
+	rootCert, rootKey := generateTestCA(t)
+
+	intermediateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Test Intermediate CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	intermediateDER, err := x509.CreateCertificate(
+		rand.Reader,
+		intermediateTemplate,
+		rootCert,
+		&intermediateKey.PublicKey,
+		rootKey,
+	)
+	require.NoError(t, err)
+	intermediateCert, err := x509.ParseCertificate(intermediateDER)
+	require.NoError(t, err)
+
+	c := newTestCache(t, intermediateCert, intermediateKey, 10)
+	cert, err := c.GetOrCreate("example.com")
+	require.NoError(t, err)
+	require.Len(t, cert.Certificate, 2)
+
+	servedIntermediate, err := x509.ParseCertificate(cert.Certificate[1])
+	require.NoError(t, err)
+	require.Equal(t, intermediateCert.Raw, servedIntermediate.Raw)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+	intermediates := x509.NewCertPool()
+	intermediates.AddCert(servedIntermediate)
+
+	_, err = cert.Leaf.Verify(x509.VerifyOptions{
+		DNSName:       "example.com",
+		Roots:         roots,
+		Intermediates: intermediates,
+	})
+	require.NoError(t, err)
+}
+
 func TestGetOrCreate_CacheHit(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,10)
+	c := newTestCache(t, caCert, caKey, 10)
 
 	cert1, err := c.GetOrCreate("example.com")
 	require.NoError(t, err)
@@ -283,7 +330,7 @@ func TestGetOrCreate_CacheHit(t *testing.T) {
 
 func TestGetOrCreate_DifferentDomains(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,10)
+	c := newTestCache(t, caCert, caKey, 10)
 
 	cert1, err := c.GetOrCreate("a.example.com")
 	require.NoError(t, err)
@@ -297,7 +344,7 @@ func TestGetOrCreate_DifferentDomains(t *testing.T) {
 
 func TestGetOrCreate_Eviction(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,3)
+	c := newTestCache(t, caCert, caKey, 3)
 
 	// Fill the cache
 	for _, domain := range []string{"a.com", "b.com", "c.com"} {
@@ -320,7 +367,7 @@ func TestGetOrCreate_Eviction(t *testing.T) {
 
 func TestGetOrCreate_LRUTouchPreventsEviction(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,3)
+	c := newTestCache(t, caCert, caKey, 3)
 
 	// Fill: a, b, c
 	_, err := c.GetOrCreate("a.com")
@@ -346,7 +393,7 @@ func TestGetOrCreate_LRUTouchPreventsEviction(t *testing.T) {
 
 func TestGetOrCreate_Concurrent(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
-	c := newTestCache(t, caCert, caKey,100)
+	c := newTestCache(t, caCert, caKey, 100)
 
 	var wg sync.WaitGroup
 	domains := []string{"a.com", "b.com", "c.com", "d.com", "e.com"}
