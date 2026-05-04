@@ -325,6 +325,8 @@ iron-proxy scans outbound requests and replaces proxy tokens with the real
 values before forwarding upstream. You control where it looks:
 
 - **`match_headers`:** list of header names to scan. Empty list = all headers.
+  Entries delimited by `/.../` are compiled as case-insensitive regular
+  expressions matched against canonical header names (e.g. `/^x-.*-key$/`).
 - **`match_body`:** scan the request body (buffered up to `max_request_body_bytes`).
 - **`match_path`:** scan the URL path. Defaults to `false`; opt in for upstreams
   like Telegram that embed the secret in the path (e.g.

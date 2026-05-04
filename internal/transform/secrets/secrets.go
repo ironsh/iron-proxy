@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
@@ -67,7 +68,7 @@ type resolvedSecret struct {
 
 	// replace mode fields
 	proxyValue   string
-	matchHeaders []string // empty = all headers
+	matchHeaders []headerMatcher // empty = all headers
 	matchBody    bool
 	matchPath    bool
 	require      bool
@@ -76,6 +77,34 @@ type resolvedSecret struct {
 	injectHeader     string
 	injectQueryParam string
 	formatter        *template.Template // nil = identity (raw value)
+}
+
+// headerMatcher selects request headers to scan. Exactly one of name or re is set.
+type headerMatcher struct {
+	name string         // canonical header name; "" if regex
+	re   *regexp.Regexp // nil if literal name match
+}
+
+// parseHeaderMatchers compiles match_headers entries. Patterns delimited by
+// "/.../" are compiled as case-insensitive regular expressions matched against
+// canonical header names; all other entries are literal header names.
+func parseHeaderMatchers(patterns []string, ctx string) ([]headerMatcher, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	matchers := make([]headerMatcher, 0, len(patterns))
+	for _, p := range patterns {
+		if len(p) >= 2 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/") {
+			re, err := regexp.Compile("(?i)" + p[1:len(p)-1])
+			if err != nil {
+				return nil, fmt.Errorf("%s: invalid match_headers regex %q: %w", ctx, p, err)
+			}
+			matchers = append(matchers, headerMatcher{re: re})
+			continue
+		}
+		matchers = append(matchers, headerMatcher{name: http.CanonicalHeaderKey(p)})
+	}
+	return matchers, nil
 }
 
 // formatterData is the template context for inject formatters.
@@ -163,12 +192,16 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 			}
 			resolved = append(resolved, sec)
 		} else {
+			matchers, err := parseHeaderMatchers(replace.MatchHeaders, fmt.Sprintf("secrets[%d]", i))
+			if err != nil {
+				return nil, err
+			}
 			resolved = append(resolved, resolvedSecret{
 				name:         result.Name,
 				mode:         "replace",
 				proxyValue:   replace.ProxyValue,
 				getValue:     result.GetValue,
-				matchHeaders: replace.MatchHeaders,
+				matchHeaders: matchers,
 				matchBody:    replace.MatchBody,
 				matchPath:    replace.MatchPath,
 				require:      replace.Require,
@@ -352,22 +385,7 @@ func (s *Secrets) TransformResponse(_ context.Context, _ *transform.TransformCon
 
 func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue string) []string {
 	var locations []string
-	if len(sec.matchHeaders) > 0 {
-		for _, name := range sec.matchHeaders {
-			if vals := req.Header.Values(name); len(vals) > 0 {
-				for _, v := range vals {
-					if headerContains(name, v, sec.proxyValue) {
-						locations = append(locations, "header:"+name)
-						break
-					}
-				}
-				req.Header.Del(name)
-				for _, v := range vals {
-					req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, realValue))
-				}
-			}
-		}
-	} else {
+	if len(sec.matchHeaders) == 0 {
 		for name, vals := range req.Header {
 			for i, v := range vals {
 				if headerContains(name, v, sec.proxyValue) {
@@ -376,6 +394,44 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 				}
 			}
 		}
+		return locations
+	}
+
+	processed := make(map[string]struct{})
+	swap := func(name string) {
+		if _, done := processed[name]; done {
+			return
+		}
+		processed[name] = struct{}{}
+		vals := req.Header.Values(name)
+		if len(vals) == 0 {
+			return
+		}
+		hit := false
+		for _, v := range vals {
+			if headerContains(name, v, sec.proxyValue) {
+				hit = true
+				break
+			}
+		}
+		req.Header.Del(name)
+		for _, v := range vals {
+			req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, realValue))
+		}
+		if hit {
+			locations = append(locations, "header:"+name)
+		}
+	}
+	for _, m := range sec.matchHeaders {
+		if m.re != nil {
+			for name := range req.Header {
+				if m.re.MatchString(name) {
+					swap(name)
+				}
+			}
+			continue
+		}
+		swap(m.name)
 	}
 	return locations
 }
