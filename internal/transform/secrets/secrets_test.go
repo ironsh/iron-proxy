@@ -262,6 +262,98 @@ func TestSecrets_EmptyMatchHeadersSearchesAll(t *testing.T) {
 	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Custom"))
 }
 
+func TestSecrets_RegexMatchHeaders(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{`/^X-.*-Key$/`}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123")
+	req.Header.Set("X-Other-Key", "proxy-openai-abc123")
+	req.Header.Set("Authorization", "Bearer proxy-openai-abc123") // not matched
+	req.Header.Set("X-Trace", "proxy-openai-abc123")              // not matched
+
+	doTransform(t, s, req)
+
+	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Api-Key"))
+	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Other-Key"))
+	require.Equal(t, "Bearer proxy-openai-abc123", req.Header.Get("Authorization"))
+	require.Equal(t, "proxy-openai-abc123", req.Header.Get("X-Trace"))
+}
+
+func TestSecrets_RegexMatchHeaders_CaseInsensitiveByDefault(t *testing.T) {
+	// Lowercase pattern matches the canonical "Authorization" header.
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{`/^authorization$/`}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
+
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
+}
+
+func TestSecrets_RegexMatchHeaders_MixedWithLiteral(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{"Authorization", `/^X-Api-.*$/`}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123")
+	req.Header.Set("X-Custom", "proxy-openai-abc123") // not matched
+
+	doTransform(t, s, req)
+
+	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
+	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Api-Key"))
+	require.Equal(t, "proxy-openai-abc123", req.Header.Get("X-Custom"))
+}
+
+func TestSecrets_RegexMatchHeaders_OverlappingPatternsDontDoubleSwap(t *testing.T) {
+	// Two patterns that both match "X-Api-Key": ensure the swap runs once and
+	// doesn't replace twice (which would be idempotent for non-Basic, but the
+	// location annotation would duplicate).
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{"X-Api-Key", `/^X-.*$/`}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123")
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Api-Key"))
+}
+
+func TestSecrets_RegexMatchHeaders_RequireRejectsWhenNoMatch(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{`/^X-.*-Key$/`}
+		e.Require = true
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "no-token-here")
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+func TestSecrets_RegexMatchHeaders_InvalidRegex(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{{
+		Source:       envSource("OPENAI_API_KEY"),
+		ProxyValue:   "proxy-tok",
+		MatchHeaders: []string{`/[invalid/`},
+		Rules:        []hostmatch.RuleConfig{{Host: "example.com"}},
+	}}}
+	_, err := newFromConfig(context.Background(), cfg, testRegistry())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid match_headers regex")
+}
+
 func TestSecrets_ConfigErrors(t *testing.T) {
 	tests := []struct {
 		name   string
