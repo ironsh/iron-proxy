@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 )
 
@@ -103,6 +105,20 @@ type Server struct {
 type Tool struct {
 	Name    string
 	clauses []clause
+}
+
+// LoadFromNode decodes a raw yaml.Node into a Config and compiles it. An
+// empty node (the mcp: block absent from the source document) returns
+// (nil, nil) so callers can treat "no MCP policy" as a normal case.
+func LoadFromNode(node yaml.Node) (*Policy, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	var c Config
+	if err := node.Decode(&c); err != nil {
+		return nil, fmt.Errorf("decoding mcp config: %w", err)
+	}
+	return Compile(c)
 }
 
 // Compile validates and compiles a Config into a Policy. Returns nil when the

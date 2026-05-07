@@ -198,11 +198,9 @@ func main() {
 		)
 	}
 
-	// Compile MCP policy from the top-level mcp: block, if present. Validate
-	// has already vetted the config; Compile here returns the runtime form.
-	mcpPolicy, err := mcp.Compile(cfg.MCP)
+	mcpPolicy, err := mcp.LoadFromNode(cfg.MCP)
 	if err != nil {
-		logger.Error("compiling mcp policy", slog.String("error", err.Error()))
+		logger.Error("loading mcp policy", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 	if mcpPolicy != nil {

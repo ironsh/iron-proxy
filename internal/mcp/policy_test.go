@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 )
@@ -31,6 +32,48 @@ func TestCompileEmptyConfig(t *testing.T) {
 	p, err := Compile(Config{})
 	require.NoError(t, err)
 	require.Nil(t, p)
+}
+
+func TestLoadFromNodeAbsent(t *testing.T) {
+	p, err := LoadFromNode(yaml.Node{})
+	require.NoError(t, err)
+	require.Nil(t, p)
+}
+
+func TestLoadFromNodeRoundTrip(t *testing.T) {
+	src := `
+error:
+  code: -32099
+  message: "denied"
+servers:
+  - name: github
+    rules:
+      - host: "mcp.github.com"
+    tools:
+      - name: search_repositories
+`
+	var n yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(src), &n))
+	// yaml.Unmarshal into a Node yields a document node; descend to the
+	// mapping the way config.LoadConfig does when it pulls cfg.MCP out of
+	// the parent struct.
+	require.Equal(t, yaml.DocumentNode, n.Kind)
+	require.Len(t, n.Content, 1)
+
+	p, err := LoadFromNode(*n.Content[0])
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.Equal(t, -32099, p.ErrorCode())
+	require.Equal(t, "denied", p.ErrorMessage())
+	require.Len(t, p.servers, 1)
+}
+
+func TestLoadFromNodeDecodeError(t *testing.T) {
+	// Wrong shape: servers should be a list, not a string.
+	var n yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(`servers: "not a list"`), &n))
+	_, err := LoadFromNode(*n.Content[0])
+	require.Error(t, err)
 }
 
 func TestCompileCustomError(t *testing.T) {

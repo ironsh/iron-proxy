@@ -10,7 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
-	"github.com/ironsh/iron-proxy/internal/mcp"
 )
 
 // DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
@@ -41,12 +40,17 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // Config is the top-level configuration for iron-proxy.
+//
+// The MCP block is parsed as a raw yaml.Node and decoded by internal/mcp at
+// pipeline-build time, mirroring how Transforms are handled: the config
+// package stays decoupled from the consumer's typed schema, and validation
+// errors surface where the value is actually used.
 type Config struct {
 	DNS        DNS         `yaml:"dns"`
 	Proxy      Proxy       `yaml:"proxy"`
 	TLS        TLS         `yaml:"tls"`
 	Transforms []Transform `yaml:"transforms"`
-	MCP        mcp.Config  `yaml:"mcp"`
+	MCP        yaml.Node   `yaml:"mcp"`
 	Metrics    Metrics     `yaml:"metrics"`
 	Management Management  `yaml:"management"`
 	Log        Log         `yaml:"log"`
@@ -279,10 +283,6 @@ func Validate(cfg *Config) error {
 		if os.Getenv(cfg.Management.APIKeyEnv) == "" {
 			return fmt.Errorf("management.api_key_env %q is not set in the environment", cfg.Management.APIKeyEnv)
 		}
-	}
-
-	if _, err := mcp.Compile(cfg.MCP); err != nil {
-		return fmt.Errorf("mcp: %w", err)
 	}
 
 	for i, rec := range cfg.DNS.Records {
