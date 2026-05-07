@@ -78,6 +78,17 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 				Value: transformTracesValue(result.ResponseTransforms),
 			})
 		}
+		if result.MCP != nil && result.MCP.MCPServer() != "" {
+			mcpKVs := []log.KeyValue{log.String("server", result.MCP.MCPServer())}
+			if msgs := result.MCP.MCPMessages(); len(msgs) > 0 {
+				vals := make([]log.Value, len(msgs))
+				for i, m := range msgs {
+					vals[i] = toLogValue(m)
+				}
+				mcpKVs = append(mcpKVs, log.KeyValue{Key: "messages", Value: log.SliceValue(vals...)})
+			}
+			attrs = append(attrs, log.KeyValue{Key: "mcp", Value: log.MapValue(mcpKVs...)})
+		}
 
 		rec.AddAttributes(attrs...)
 		logger.Emit(context.Background(), rec)
@@ -166,6 +177,10 @@ func toLogValue(v any) log.Value {
 		return log.BoolValue(x)
 	case string:
 		return log.StringValue(x)
+	case int:
+		return log.Int64Value(int64(x))
+	case int64:
+		return log.Int64Value(x)
 	case float64:
 		return log.Float64Value(x)
 	case []any:

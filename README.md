@@ -461,6 +461,50 @@ trace, including `judge.instance`, `judge.decision`, `judge.reason`,
 Credits: thanks to Brex for their CrabTrap project (MIT-licensed), which
 informed this design.
 
+## MCP policy
+
+iron-proxy can speak [MCP's Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports). When a request matches a configured MCP server, the proxy parses the JSON-RPC body, applies a default-deny tool allowlist, and filters `tools/list` responses so denied tools never reach the agent. SSE responses are filtered per event so long-lived MCP streams stay live.
+
+This is a first-class proxy capability rather than a transform: MCP responses can be open-ended SSE streams carrying arbitrary server-initiated messages, which does not fit the request/response transform contract.
+
+```yaml
+mcp:
+  # JSON-RPC error envelope returned to the agent on policy denial.
+  # Defaults: code -32001, message "blocked by iron-proxy policy".
+  error:
+    code: -32001
+    message: "blocked by iron-proxy policy"
+  servers:
+    - name: github                         # appears in audit as mcp.server
+      rules:                               # standard host/method/path rules
+        - host: "mcp.github.com"
+          paths: ["/mcp", "/mcp/*"]
+      tools:
+        - name: "search_repositories"      # always allowed
+        - name: "create_issue"
+          when:                            # all clauses must hold; otherwise deny
+            - path: "owner"                # dotted path against arguments
+              equals: "ironsh"
+            - path: "repo"
+              in: ["iron-proxy", "tunis-v2"]
+        # Anything not listed is denied (default-deny).
+```
+
+Behavior:
+
+- **`tools/call` enforcement.** Calls to tools that are not in the server's `tools` list, or whose `arguments` fail any `when` clause, are rejected without reaching upstream. The proxy returns a JSON-RPC error response with the configured code and message and the request's original `id`, so the MCP client sees a normal protocol error rather than an HTTP failure.
+- **`tools/list` filtering.** Responses to `tools/list` have any tool not on the allowlist removed before reaching the agent. Works for both `application/json` and `text/event-stream` responses; SSE filtering operates per event so heartbeats and other messages on the stream pass through untouched.
+- **Argument matching.** Each `when` clause has a dotted `path` (e.g. `arguments.repo`, `labels.0`) and one of `equals` (any JSON scalar), `in` (a list of scalars), or `matches` (a regex on string values). Clauses AND together. Omitting `when` allows the tool unconditionally.
+- **Audit.** Every observed JSON-RPC message is recorded under a new `mcp` section in the audit log entry: server name, direction (`request` or `response`), method, tool, decision (`allow`, `deny`, or `filtered`), reason on denials, and the count of tools removed on filter events.
+
+Pipeline ordering: the MCP interceptor runs after the transform pipeline, so `allowlist` still gates which hosts can be reached and `secrets` has already swapped proxy tokens by the time the interceptor evaluates the body.
+
+Limitations in v1:
+
+- Only Streamable HTTP transport is supported. The legacy HTTP+SSE transport (separate `/messages` and `/sse` endpoints) is not.
+- A JSON-RPC batch with any denied entry is rejected as a whole batch; partial-batch forwarding is not supported.
+- Resources and prompts are not enforced. Agents can still call `resources/list`, `resources/read`, etc. without policy filtering.
+
 ### Body limits
 
 Transforms that inspect or forward request/response bodies (secrets body

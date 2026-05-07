@@ -110,7 +110,26 @@ type PipelineResult struct {
 	RequestTransforms  []TransformTrace
 	ResponseTransforms []TransformTrace
 
+	// MCP carries audit data from the MCP policy interceptor when the
+	// request matched a configured server. nil otherwise. Populated and
+	// consumed by the proxy and rendered by the audit functions; the
+	// transform package treats it as opaque to avoid an import cycle with
+	// internal/mcp.
+	MCP MCPAudit
+
 	Err error
+}
+
+// MCPAudit is the read-only view of the MCP interceptor's per-request audit
+// trace. The interface decouples internal/transform's audit renderers from
+// the concrete *mcp.Trace type so we can render its data without importing
+// the mcp package.
+type MCPAudit interface {
+	// MCPServer returns the matched server name, or "" when nothing matched.
+	MCPServer() string
+	// MCPMessages returns the audit messages in observed order. Each entry
+	// is a flat key/value map suitable for JSON encoding (string-keyed).
+	MCPMessages() []map[string]any
 }
 
 // TransformTrace records what a single transform did.

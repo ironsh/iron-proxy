@@ -21,6 +21,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -42,6 +43,7 @@ type Proxy struct {
 	transport      *http.Transport
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
+	mcpPolicy      *mcp.Policy
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -65,6 +67,7 @@ type Options struct {
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
 	Guard      *dnsguard.Guard // nil is treated as an empty (no-op) guard
+	MCPPolicy  *mcp.Policy     // optional MCP-aware policy interceptor
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -93,6 +96,7 @@ func New(opts Options) *Proxy {
 		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout),
 		resolver:       opts.Resolver,
 		guard:          guard,
+		mcpPolicy:      opts.MCPPolicy,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -313,6 +317,32 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 
+	// MCP policy: evaluate the request against any matching MCP server. Runs
+	// after the transform pipeline so allowlist/secrets have already applied.
+	var mcpServer *mcp.Server
+	var mcpTrace *mcp.Trace
+	if p.mcpPolicy != nil {
+		if s := p.mcpPolicy.MatchServer(r); s != nil {
+			mcpServer = s
+			mcpTrace = &mcp.Trace{Server: s.Name}
+			result.MCP = mcpTrace
+			rejectResp, err := p.mcpPolicy.EvaluateRequest(s, r, mcpTrace)
+			if err != nil {
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			if rejectResp != nil {
+				result.Action = transform.ActionReject
+				result.StatusCode = rejectResp.StatusCode
+				p.writeResponse(w, rejectResp)
+				return
+			}
+		}
+	}
+
 	// WebSocket upgrade: hijack and proxy bidirectionally
 	if isWebSocketUpgrade(r) {
 		result.Action = transform.ActionContinue
@@ -375,6 +405,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 
 	result.Action = transform.ActionContinue
 	result.StatusCode = finalResp.StatusCode
+
+	// MCP response wrapping: filter tools/list payloads and other JSON-RPC
+	// messages on streams from a matched MCP server. WrapResponseBody
+	// returns a *transform.BufferedBody (or the original body untouched)
+	// so the proxy's streamSSE/writeResponse paths can consume it directly.
+	if mcpServer != nil && p.mcpPolicy != nil {
+		ct := finalResp.Header.Get("Content-Type")
+		wrapped, err := p.mcpPolicy.WrapResponseBody(mcpServer, ct, finalResp.Body, mcpTrace)
+		if err != nil {
+			p.logger.Warn("mcp response wrap error", slog.String("error", err.Error()))
+		} else if wrapped != nil {
+			finalResp.Body = wrapped
+		}
+	}
 
 	// SSE: stream with flushing
 	if isSSE(finalResp) {

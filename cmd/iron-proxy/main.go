@@ -21,6 +21,7 @@ import (
 	idns "github.com/ironsh/iron-proxy/internal/dns"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/management"
+	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/metrics"
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/proxy"
@@ -197,6 +198,15 @@ func main() {
 		)
 	}
 
+	mcpPolicy, err := mcp.LoadFromNode(cfg.MCP)
+	if err != nil {
+		logger.Error("loading mcp policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if mcpPolicy != nil {
+		logger.Info("mcp policy enabled")
+	}
+
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
@@ -207,6 +217,7 @@ func main() {
 		Pipeline:                      holder,
 		Resolver:                      resolver,
 		Guard:                         guard,
+		MCPPolicy:                     mcpPolicy,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 	})

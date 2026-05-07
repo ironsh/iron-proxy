@@ -68,6 +68,13 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 		if len(result.ResponseTransforms) > 0 {
 			attrs = append(attrs, slog.Any("response_transforms", buildTraceEntries(result.ResponseTransforms)))
 		}
+		if result.MCP != nil && result.MCP.MCPServer() != "" {
+			mcpAttrs := []any{slog.String("server", result.MCP.MCPServer())}
+			if msgs := result.MCP.MCPMessages(); len(msgs) > 0 {
+				mcpAttrs = append(mcpAttrs, slog.Any("messages", msgs))
+			}
+			attrs = append(attrs, slog.Group("mcp", mcpAttrs...))
+		}
 
 		switch {
 		case result.Err != nil:

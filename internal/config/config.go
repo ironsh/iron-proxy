@@ -40,11 +40,17 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // Config is the top-level configuration for iron-proxy.
+//
+// The MCP block is parsed as a raw yaml.Node and decoded by internal/mcp at
+// pipeline-build time, mirroring how Transforms are handled: the config
+// package stays decoupled from the consumer's typed schema, and validation
+// errors surface where the value is actually used.
 type Config struct {
 	DNS        DNS         `yaml:"dns"`
 	Proxy      Proxy       `yaml:"proxy"`
 	TLS        TLS         `yaml:"tls"`
 	Transforms []Transform `yaml:"transforms"`
+	MCP        yaml.Node   `yaml:"mcp"`
 	Metrics    Metrics     `yaml:"metrics"`
 	Management Management  `yaml:"management"`
 	Log        Log         `yaml:"log"`

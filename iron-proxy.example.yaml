@@ -284,6 +284,38 @@ transforms:
         repository under review. Deny writes to user settings, organization
         management, billing, or any repository the agent is not reviewing.
 
+# MCP-aware policy. Inspects Streamable HTTP JSON-RPC traffic to a configured
+# MCP server, blocks tools/call invocations that are not on the allowlist,
+# and filters tools/list responses so denied tools are hidden from the agent.
+# When this block is omitted, MCP traffic is treated as opaque JSON like any
+# other HTTP body.
+#
+# Pipeline placement: the MCP interceptor runs AFTER transforms, so allowlist
+# still gates which hosts can be reached. Argument matchers see whatever wire
+# form transforms (e.g. secrets) have already produced.
+# mcp:
+#   # JSON-RPC error envelope returned to the agent on policy denial. Both
+#   # fields are optional. Defaults: code: -32001, message: "blocked by
+#   # iron-proxy policy". Code -32001 is in the JSON-RPC server-defined range.
+#   error:
+#     code: -32001
+#     message: "blocked by iron-proxy policy"
+#   servers:
+#     - name: github                       # appears in audit as mcp.server
+#       rules:                             # standard host/method/path rules
+#         - host: "mcp.github.com"
+#           paths: ["/mcp", "/mcp/*"]
+#       tools:
+#         - name: "search_repositories"    # always allowed
+#         - name: "create_issue"
+#           when:                          # all clauses must hold; otherwise deny
+#             - path: "owner"              # dotted path against arguments
+#               equals: "ironsh"
+#             - path: "repo"
+#               in: ["iron-proxy", "tunis-v2"]
+#             # `matches: "^safe-"` is also supported (regex on string values)
+#         # Anything not listed is denied (default-deny).
+
 # Optional management API. When `listen` is empty (default), the management
 # server is disabled. When set, the proxy serves an authenticated
 # POST /v1/reload endpoint that re-reads this YAML file and atomically swaps in
