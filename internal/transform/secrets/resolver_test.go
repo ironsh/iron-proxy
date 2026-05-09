@@ -42,8 +42,8 @@ func staticSMClient(out *secretsmanager.GetSecretValueOutput, err error) *mockSM
 	}}
 }
 
-func newTestAWSSMResolver(client smClient) *awsSMResolver {
-	return &awsSMResolver{
+func newTestAWSSMBuilder(client smClient) *awsSMBuilder {
+	return &awsSMBuilder{
 		clientFor: func(_ context.Context, _ string) (smClient, error) {
 			return client, nil
 		},
@@ -67,8 +67,8 @@ func staticSSMClient(out *ssm.GetParameterOutput, err error) *mockSSMClient {
 	}}
 }
 
-func newTestAWSSSMResolver(client ssmClient) *awsSSMResolver {
-	return &awsSSMResolver{
+func newTestAWSSSMBuilder(client ssmClient) *awsSSMBuilder {
+	return &awsSSMBuilder{
 		clientFor: func(_ context.Context, _ string) (ssmClient, error) {
 			return client, nil
 		},
@@ -76,26 +76,26 @@ func newTestAWSSSMResolver(client ssmClient) *awsSSMResolver {
 	}
 }
 
-// --- envResolver tests ---
+// --- envBuilder tests ---
 
-func TestEnvResolver_HappyPath(t *testing.T) {
-	r := &envResolver{getenv: func(key string) string {
+func TestEnvBuilder_HappyPath(t *testing.T) {
+	r := &envBuilder{getenv: func(key string) string {
 		if key == "MY_SECRET" {
 			return "real-value"
 		}
 		return ""
 	}, logger: slog.Default()}
 	node := yamlNode(t, map[string]string{"type": "env", "var": "MY_SECRET"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
-	require.Equal(t, "MY_SECRET", result.Name)
+	require.Equal(t, "MY_SECRET", result.Name())
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-value", val)
 }
 
-func TestEnvResolver_Errors(t *testing.T) {
+func TestEnvBuilder_Errors(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  map[string]string
@@ -106,7 +106,7 @@ func TestEnvResolver_Errors(t *testing.T) {
 			name:   "missing var field",
 			input:  map[string]string{"type": "env"},
 			errMsg: "\"var\" field",
-			errAt:  "resolve",
+			errAt:  "build",
 		},
 		{
 			name:   "empty value",
@@ -117,79 +117,79 @@ func TestEnvResolver_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &envResolver{getenv: func(string) string { return "" }, logger: slog.Default()}
+			r := &envBuilder{getenv: func(string) string { return "" }, logger: slog.Default()}
 			node := yamlNode(t, tt.input)
-			result, err := r.Resolve(context.Background(), node)
-			if tt.errAt == "resolve" {
+			result, err := r.Build(node)
+			if tt.errAt == "build" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.errMsg)
 				return
 			}
 			require.NoError(t, err)
-			_, err = result.GetValue(context.Background())
+			_, err = result.Get(context.Background())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})
 	}
 }
 
-// --- awsSMResolver tests ---
+// --- awsSMBuilder tests ---
 
-func TestAWSSMResolver_PlainString(t *testing.T) {
+func TestAWSSMBuilder_PlainString(t *testing.T) {
 	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String("my-secret-value"),
 	}, nil)
-	r := newTestAWSSMResolver(client)
+	r := newTestAWSSMBuilder(client)
 	node := yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:aws:sm:us-east-1:123:secret:foo"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
-	require.Equal(t, "arn:aws:sm:us-east-1:123:secret:foo", result.Name)
+	require.Equal(t, "arn:aws:sm:us-east-1:123:secret:foo", result.Name())
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "my-secret-value", val)
 }
 
-func TestAWSSMResolver_JSONKey(t *testing.T) {
+func TestAWSSMBuilder_JSONKey(t *testing.T) {
 	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String(`{"api_key": "sk-abc123", "other": "val"}`),
 	}, nil)
-	r := newTestAWSSMResolver(client)
+	r := newTestAWSSMBuilder(client)
 	node := yamlNode(t, map[string]string{
 		"type":      "aws_sm",
 		"secret_id": "arn:aws:sm:us-east-1:123:secret:foo",
 		"json_key":  "api_key",
 	})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "sk-abc123", val)
 }
 
-func TestAWSSMResolver_TTLReturnsCachedValue(t *testing.T) {
+func TestAWSSMBuilder_TTLReturnsCachedValue(t *testing.T) {
 	client := staticSMClient(&secretsmanager.GetSecretValueOutput{
 		SecretString: aws.String("value"),
 	}, nil)
-	r := newTestAWSSMResolver(client)
+	r := newTestAWSSMBuilder(client)
 	node := yamlNode(t, map[string]string{
 		"type":      "aws_sm",
 		"secret_id": "arn:aws:sm:us-east-1:123:secret:foo",
 		"ttl":       "15m",
 	})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
 
 	// GetValue should return cached value without re-fetching.
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "value", val)
 }
 
-func TestAWSSMResolver_Errors(t *testing.T) {
-	// errAt: "resolve" for static config errors; "fetch" for network/value errors
-	// that surface lazily on first GetValue call.
+func TestAWSSMBuilder_Errors(t *testing.T) {
+	// errAt: "build" for static config errors; "fetch" for network/value errors
+	// that surface lazily on first Get call.
 	tests := []struct {
 		name   string
 		client *mockSMClient
@@ -202,14 +202,14 @@ func TestAWSSMResolver_Errors(t *testing.T) {
 			client: staticSMClient(nil, nil),
 			input:  map[string]string{"type": "aws_sm"},
 			errMsg: "\"secret_id\" field",
-			errAt:  "resolve",
+			errAt:  "build",
 		},
 		{
 			name:   "invalid TTL",
 			client: staticSMClient(nil, nil),
 			input:  map[string]string{"type": "aws_sm", "secret_id": "arn:foo", "ttl": "not-a-duration"},
 			errMsg: "parsing ttl",
-			errAt:  "resolve",
+			errAt:  "build",
 		},
 		{
 			name:   "aws error",
@@ -257,76 +257,76 @@ func TestAWSSMResolver_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newTestAWSSMResolver(tt.client)
+			r := newTestAWSSMBuilder(tt.client)
 			node := yamlNode(t, tt.input)
-			result, err := r.Resolve(context.Background(), node)
-			if tt.errAt == "resolve" {
+			result, err := r.Build(node)
+			if tt.errAt == "build" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.errMsg)
 				return
 			}
 			require.NoError(t, err)
-			_, err = result.GetValue(context.Background())
+			_, err = result.Get(context.Background())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})
 	}
 }
 
-// --- awsSSMResolver tests ---
+// --- awsSSMBuilder tests ---
 
-func TestAWSSSMResolver_PlainString(t *testing.T) {
+func TestAWSSSMBuilder_PlainString(t *testing.T) {
 	client := staticSSMClient(&ssm.GetParameterOutput{
 		Parameter: &ssmtypes.Parameter{Value: aws.String("my-param-value")},
 	}, nil)
-	r := newTestAWSSSMResolver(client)
+	r := newTestAWSSSMBuilder(client)
 	node := yamlNode(t, map[string]string{"type": "aws_ssm", "name": "/myapp/api-key"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
-	require.Equal(t, "/myapp/api-key", result.Name)
+	require.Equal(t, "/myapp/api-key", result.Name())
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "my-param-value", val)
 }
 
-func TestAWSSSMResolver_JSONKey(t *testing.T) {
+func TestAWSSSMBuilder_JSONKey(t *testing.T) {
 	client := staticSSMClient(&ssm.GetParameterOutput{
 		Parameter: &ssmtypes.Parameter{Value: aws.String(`{"api_key": "sk-abc123", "other": "val"}`)},
 	}, nil)
-	r := newTestAWSSSMResolver(client)
+	r := newTestAWSSSMBuilder(client)
 	node := yamlNode(t, map[string]string{
 		"type":     "aws_ssm",
 		"name":     "/myapp/config",
 		"json_key": "api_key",
 	})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "sk-abc123", val)
 }
 
-func TestAWSSSMResolver_TTLReturnsCachedValue(t *testing.T) {
+func TestAWSSSMBuilder_TTLReturnsCachedValue(t *testing.T) {
 	client := staticSSMClient(&ssm.GetParameterOutput{
 		Parameter: &ssmtypes.Parameter{Value: aws.String("value")},
 	}, nil)
-	r := newTestAWSSSMResolver(client)
+	r := newTestAWSSSMBuilder(client)
 	node := yamlNode(t, map[string]string{
 		"type": "aws_ssm",
 		"name": "/myapp/secret",
 		"ttl":  "15m",
 	})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
 
-	val, err := result.GetValue(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "value", val)
 }
 
-func TestAWSSSMResolver_WithDecryption(t *testing.T) {
+func TestAWSSSMBuilder_WithDecryption(t *testing.T) {
 	tests := []struct {
 		name string
 		raw  map[string]any
@@ -358,11 +358,11 @@ func TestAWSSSMResolver_WithDecryption(t *testing.T) {
 					Parameter: &ssmtypes.Parameter{Value: aws.String("decrypted-value")},
 				}, nil
 			}}
-			r := newTestAWSSSMResolver(client)
-			result, err := r.Resolve(context.Background(), yamlNode(t, tt.raw))
+			r := newTestAWSSSMBuilder(client)
+			result, err := r.Build(yamlNode(t, tt.raw))
 			require.NoError(t, err)
 
-			val, err := result.GetValue(context.Background())
+			val, err := result.Get(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, "decrypted-value", val)
 			require.Equal(t, tt.want, aws.ToBool(capturedInput.WithDecryption))
@@ -370,12 +370,12 @@ func TestAWSSSMResolver_WithDecryption(t *testing.T) {
 	}
 }
 
-func TestAWSSSMResolver_Region(t *testing.T) {
+func TestAWSSSMBuilder_Region(t *testing.T) {
 	client := staticSSMClient(&ssm.GetParameterOutput{
 		Parameter: &ssmtypes.Parameter{Value: aws.String("value")},
 	}, nil)
 	var gotRegion string
-	r := &awsSSMResolver{
+	r := &awsSSMBuilder{
 		clientFor: func(_ context.Context, region string) (ssmClient, error) {
 			gotRegion = region
 			return client, nil
@@ -383,18 +383,18 @@ func TestAWSSSMResolver_Region(t *testing.T) {
 		logger: slog.Default(),
 	}
 
-	result, err := r.Resolve(context.Background(), yamlNode(t, map[string]string{
+	result, err := r.Build(yamlNode(t, map[string]string{
 		"type":   "aws_ssm",
 		"name":   "/myapp/secret",
 		"region": "us-east-1",
 	}))
 	require.NoError(t, err)
-	_, err = result.GetValue(context.Background())
+	_, err = result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "us-east-1", gotRegion)
 }
 
-func TestAWSSSMResolver_Errors(t *testing.T) {
+func TestAWSSSMBuilder_Errors(t *testing.T) {
 	tests := []struct {
 		name   string
 		client *mockSSMClient
@@ -407,14 +407,14 @@ func TestAWSSSMResolver_Errors(t *testing.T) {
 			client: staticSSMClient(nil, nil),
 			input:  map[string]string{"type": "aws_ssm"},
 			errMsg: "\"name\" field",
-			errAt:  "resolve",
+			errAt:  "build",
 		},
 		{
 			name:   "invalid TTL",
 			client: staticSSMClient(nil, nil),
 			input:  map[string]string{"type": "aws_ssm", "name": "/myapp/key", "ttl": "not-a-duration"},
 			errMsg: "parsing ttl",
-			errAt:  "resolve",
+			errAt:  "build",
 		},
 		{
 			name:   "aws error",
@@ -458,16 +458,16 @@ func TestAWSSSMResolver_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newTestAWSSSMResolver(tt.client)
+			r := newTestAWSSSMBuilder(tt.client)
 			node := yamlNode(t, tt.input)
-			result, err := r.Resolve(context.Background(), node)
-			if tt.errAt == "resolve" {
+			result, err := r.Build(node)
+			if tt.errAt == "build" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.errMsg)
 				return
 			}
 			require.NoError(t, err)
-			_, err = result.GetValue(context.Background())
+			_, err = result.Get(context.Background())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})
@@ -542,7 +542,7 @@ func TestCachedValue_ServesStaleOnError(t *testing.T) {
 		expiresAt:   time.Now().Add(-time.Hour), // already expired
 	}
 
-	val, err := cv.get(context.Background())
+	val, err := cv.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "initial", val)
 	require.Equal(t, 1, calls)
@@ -560,13 +560,13 @@ func TestCachedValue_LazyInitFetchOnFirstGet(t *testing.T) {
 			return "value", nil
 		},
 	}
-	val, err := cv.get(context.Background())
+	val, err := cv.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "value", val)
 	require.Equal(t, 1, calls)
 
 	// Second get within successTTL: cached, no fetch.
-	val, err = cv.get(context.Background())
+	val, err = cv.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "value", val)
 	require.Equal(t, 1, calls)
@@ -586,18 +586,18 @@ func TestCachedValue_FailureCachedForTTL(t *testing.T) {
 		},
 	}
 
-	_, err := cv.get(context.Background())
+	_, err := cv.Get(context.Background())
 	require.Error(t, err)
 	require.Equal(t, 1, calls)
 
 	// Within failureTTL: cached error returned, no fetch.
-	_, err = cv.get(context.Background())
+	_, err = cv.Get(context.Background())
 	require.Error(t, err)
 	require.Equal(t, 1, calls)
 
 	// Advance past failureTTL: fetch retried.
 	now = now.Add(31 * time.Second)
-	_, err = cv.get(context.Background())
+	_, err = cv.Get(context.Background())
 	require.Error(t, err)
 	require.Equal(t, 2, calls)
 }
@@ -619,17 +619,17 @@ func TestCachedValue_FailureRecovers(t *testing.T) {
 		},
 	}
 
-	_, err := cv.get(context.Background())
+	_, err := cv.Get(context.Background())
 	require.Error(t, err)
 
 	// Advance past failureTTL.
 	now = now.Add(31 * time.Second)
-	val, err := cv.get(context.Background())
+	val, err := cv.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-value", val)
 
 	// Subsequent gets: cached, no further fetches.
-	val, err = cv.get(context.Background())
+	val, err = cv.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-value", val)
 	require.Equal(t, 2, calls)
@@ -648,7 +648,7 @@ func TestCachedValue_ZeroSuccessTTLCachesForever(t *testing.T) {
 		},
 	}
 	for range 5 {
-		val, err := cv.get(context.Background())
+		val, err := cv.Get(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "value", val)
 	}
@@ -668,16 +668,16 @@ func TestParseTTL(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestBuildLazyResult_FailureTTLDefaults(t *testing.T) {
+func TestBuildLazySource_FailureTTLDefaults(t *testing.T) {
 	// Empty failure_ttl falls back to defaultFailureTTL regardless of success TTL.
-	result, err := buildLazyResult("name", "1h", "", slog.Default(), func(context.Context) (string, error) {
+	result, err := buildLazySource("name", "1h", "", slog.Default(), func(context.Context) (string, error) {
 		return "v", nil
 	})
 	require.NoError(t, err)
-	require.NotNil(t, result.GetValue)
+	require.NotNil(t, result)
 }
 
-func TestBuildLazyResult_FailureTTLOverride(t *testing.T) {
+func TestBuildLazySource_FailureTTLOverride(t *testing.T) {
 	now := time.Now()
 	calls := 0
 	successTTL, err := parseTTL("1h")
@@ -694,78 +694,78 @@ func TestBuildLazyResult_FailureTTLOverride(t *testing.T) {
 			return "", fmt.Errorf("boom")
 		},
 	}
-	_, err = cv.get(context.Background())
+	_, err = cv.Get(context.Background())
 	require.Error(t, err)
 
 	// Within 5s the error is cached.
 	now = now.Add(4 * time.Second)
-	_, err = cv.get(context.Background())
+	_, err = cv.Get(context.Background())
 	require.Error(t, err)
 	require.Equal(t, 1, calls)
 
 	// After 5s, retry — even though successTTL is 1h.
 	now = now.Add(2 * time.Second)
-	_, err = cv.get(context.Background())
+	_, err = cv.Get(context.Background())
 	require.Error(t, err)
 	require.Equal(t, 2, calls)
 }
 
-func TestBuildLazyResult_InvalidFailureTTL(t *testing.T) {
-	_, err := buildLazyResult("name", "", "not-a-duration", slog.Default(), func(context.Context) (string, error) {
+func TestBuildLazySource_InvalidFailureTTL(t *testing.T) {
+	_, err := buildLazySource("name", "", "not-a-duration", slog.Default(), func(context.Context) (string, error) {
 		return "v", nil
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failure_ttl")
 }
 
-// Lazy-init tests: each resolver's Resolve should not call the underlying client.
+// Lazy-init tests: each builder's Build should not call the underlying client.
 
-func TestAWSSMResolver_ResolveDoesNotFetch(t *testing.T) {
+func TestAWSSMBuilder_BuildDoesNotFetch(t *testing.T) {
 	calls := 0
 	client := &mockSMClient{fn: func(_ context.Context, _ *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error) {
 		calls++
 		return &secretsmanager.GetSecretValueOutput{SecretString: aws.String("v")}, nil
 	}}
-	r := newTestAWSSMResolver(client)
+	r := newTestAWSSMBuilder(client)
 	node := yamlNode(t, map[string]string{"type": "aws_sm", "secret_id": "arn:test"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
-	require.Equal(t, 0, calls, "Resolve must not call AWS")
+	require.Equal(t, 0, calls, "Build must not call AWS")
 
-	_, err = result.GetValue(context.Background())
+	_, err = result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, calls, "first GetValue triggers fetch")
 }
 
-func TestAWSSSMResolver_ResolveDoesNotFetch(t *testing.T) {
+func TestAWSSSMBuilder_BuildDoesNotFetch(t *testing.T) {
 	calls := 0
 	client := &mockSSMClient{fn: func(_ context.Context, _ *ssm.GetParameterInput) (*ssm.GetParameterOutput, error) {
 		calls++
 		return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: aws.String("v")}}, nil
 	}}
-	r := newTestAWSSSMResolver(client)
+	r := newTestAWSSSMBuilder(client)
 	node := yamlNode(t, map[string]string{"type": "aws_ssm", "name": "/p"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
 	require.Equal(t, 0, calls)
 
-	_, err = result.GetValue(context.Background())
+	_, err = result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, calls)
 }
 
-func TestEnvResolver_ResolveDoesNotReadEnv(t *testing.T) {
+func TestEnvBuilder_BuildDoesNotReadEnv(t *testing.T) {
 	calls := 0
-	r := &envResolver{getenv: func(_ string) string {
+	r := &envBuilder{getenv: func(_ string) string {
 		calls++
 		return "value"
 	}, logger: slog.Default()}
 	node := yamlNode(t, map[string]string{"type": "env", "var": "FOO"})
-	result, err := r.Resolve(context.Background(), node)
+	result, err := r.Build(node)
 	require.NoError(t, err)
-	require.Equal(t, 0, calls, "Resolve must not call getenv")
+	require.Equal(t, 0, calls, "Build must not call getenv")
 
-	_, err = result.GetValue(context.Background())
+	_, err = result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, calls)
 }

@@ -24,16 +24,16 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-// fakeResolver is a test secretResolver. Resolve only validates that the
+// fakeBuilder is a test secretSourceBuilder. Build only validates that the
 // source has a recognizable name field; the lookup against secrets (and any
-// failure) is deferred to GetValue.
-type fakeResolver struct {
+// failure) is deferred to Get.
+type fakeBuilder struct {
 	mu         sync.Mutex
 	secrets    map[string]string
 	fetchCalls map[string]int
 }
 
-func (f *fakeResolver) extractName(raw yaml.Node) (string, error) {
+func (f *fakeBuilder) extractName(raw yaml.Node) (string, error) {
 	var env envConfig
 	if err := raw.Decode(&env); err == nil && env.Var != "" {
 		return env.Var, nil
@@ -49,12 +49,12 @@ func (f *fakeResolver) extractName(raw yaml.Node) (string, error) {
 	return "", &resolveError{"unknown"}
 }
 
-func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+func (f *fakeBuilder) Build(raw yaml.Node) (secretSource, error) {
 	name, err := f.extractName(raw)
 	if err != nil {
-		return ResolveResult{}, err
+		return nil, err
 	}
-	fetch := func(context.Context) (string, error) {
+	return newLazyValue(name, 0, defaultFailureTTL, slog.Default(), func(context.Context) (string, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.fetchCalls == nil {
@@ -66,28 +66,24 @@ func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult,
 			return "", &resolveError{name}
 		}
 		return val, nil
-	}
-	return ResolveResult{
-		Name:     name,
-		GetValue: newLazyValue(name, 0, defaultFailureTTL, slog.Default(), fetch),
-	}, nil
+	}), nil
 }
 
 type resolveError struct{ name string }
 
 func (e *resolveError) Error() string { return e.name + " not found" }
 
-func testRegistry() resolverRegistry {
-	return resolverRegistry{
-		"env": &fakeResolver{secrets: map[string]string{
+func testRegistry() sourceBuilderRegistry {
+	return sourceBuilderRegistry{
+		"env": &fakeBuilder{secrets: map[string]string{
 			"OPENAI_API_KEY":    "sk-real-openai-key",
 			"ANTHROPIC_API_KEY": "sk-real-anthropic-key",
 			"INTERNAL_TOKEN":    "real-internal-token",
 		}},
-		"aws_sm": &fakeResolver{secrets: map[string]string{
+		"aws_sm": &fakeBuilder{secrets: map[string]string{
 			"arn:aws:sm:test": "aws-secret-value",
 		}},
-		"aws_ssm": &fakeResolver{secrets: map[string]string{
+		"aws_ssm": &fakeBuilder{secrets: map[string]string{
 			"/myapp/api-key": "ssm-secret-value",
 		}},
 	}
@@ -123,7 +119,7 @@ func defaultEntry(opts ...func(*secretEntry)) secretEntry {
 func makeSecrets(t *testing.T, entries []secretEntry) *Secrets {
 	t.Helper()
 	cfg := secretsConfig{Secrets: entries}
-	s, err := newFromConfig(context.Background(), cfg, testRegistry())
+	s, err := newFromConfig(cfg, testRegistry())
 	require.NoError(t, err)
 	return s
 }
@@ -364,7 +360,7 @@ func TestSecrets_RegexMatchHeaders_InvalidRegex(t *testing.T) {
 		MatchHeaders: []string{`/[invalid/`},
 		Rules:        []hostmatch.RuleConfig{{Host: "example.com"}},
 	}}}
-	_, err := newFromConfig(context.Background(), cfg, testRegistry())
+	_, err := newFromConfig(cfg, testRegistry())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid match_headers regex")
 }
@@ -404,7 +400,7 @@ func TestSecrets_ConfigErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := newFromConfig(context.Background(), tt.cfg, testRegistry())
+			_, err := newFromConfig(tt.cfg, testRegistry())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})
@@ -693,10 +689,10 @@ func TestSecrets_MixedSourceTypes(t *testing.T) {
 	require.Equal(t, "ssm-secret-value", req.Header.Get("X-SSM-Key"))
 }
 
-// --- End-to-end tests with real awsSMResolver and mock AWS client ---
+// --- End-to-end tests with real awsSMBuilder and mock AWS client ---
 
-func awsSMRegistry(client smClient) resolverRegistry {
-	return resolverRegistry{"aws_sm": &awsSMResolver{
+func awsSMRegistry(client smClient) sourceBuilderRegistry {
+	return sourceBuilderRegistry{"aws_sm": &awsSMBuilder{
 		clientFor: func(_ context.Context, _ string) (smClient, error) {
 			return client, nil
 		},
@@ -707,7 +703,7 @@ func awsSMRegistry(client smClient) resolverRegistry {
 func makeAWSSMSecrets(t *testing.T, client smClient, entries []secretEntry) *Secrets {
 	t.Helper()
 	cfg := secretsConfig{Secrets: entries}
-	s, err := newFromConfig(context.Background(), cfg, awsSMRegistry(client))
+	s, err := newFromConfig(cfg, awsSMRegistry(client))
 	require.NoError(t, err)
 	return s
 }
@@ -896,10 +892,10 @@ func TestAWSSM_EndToEnd_RequireRejectsWithoutToken(t *testing.T) {
 	require.Equal(t, transform.ActionReject, res.Action)
 }
 
-// --- End-to-end tests with real awsSSMResolver and mock AWS client ---
+// --- End-to-end tests with real awsSSMBuilder and mock AWS client ---
 
-func awsSSMRegistry(client ssmClient) resolverRegistry {
-	return resolverRegistry{"aws_ssm": &awsSSMResolver{
+func awsSSMRegistry(client ssmClient) sourceBuilderRegistry {
+	return sourceBuilderRegistry{"aws_ssm": &awsSSMBuilder{
 		clientFor: func(_ context.Context, _ string) (ssmClient, error) {
 			return client, nil
 		},
@@ -910,7 +906,7 @@ func awsSSMRegistry(client ssmClient) resolverRegistry {
 func makeAWSSSMSecrets(t *testing.T, client ssmClient, entries []secretEntry) *Secrets {
 	t.Helper()
 	cfg := secretsConfig{Secrets: entries}
-	s, err := newFromConfig(context.Background(), cfg, awsSSMRegistry(client))
+	s, err := newFromConfig(cfg, awsSSMRegistry(client))
 	require.NoError(t, err)
 	return s
 }
@@ -1145,7 +1141,7 @@ func TestInject_ConfigErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := newFromConfig(context.Background(), tt.cfg, testRegistry())
+			_, err := newFromConfig(tt.cfg, testRegistry())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})
@@ -1248,9 +1244,9 @@ func TestInject_ConcurrentSafety(t *testing.T) {
 
 // --- Lazy resolution + require-on-resolve-failure tests ---
 
-func missingSecretRegistry() resolverRegistry {
-	return resolverRegistry{
-		"env": &fakeResolver{secrets: map[string]string{}},
+func missingSecretRegistry() sourceBuilderRegistry {
+	return sourceBuilderRegistry{
+		"env": &fakeBuilder{secrets: map[string]string{}},
 	}
 }
 
@@ -1269,14 +1265,14 @@ func missingSecretEntry(opts ...func(*secretEntry)) secretEntry {
 
 func TestLazy_PipelineBuildsWhenSecretBackendUnreachable(t *testing.T) {
 	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
-	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	s, err := newFromConfig(cfg, missingSecretRegistry())
 	require.NoError(t, err, "pipeline must build even when the secret can't be fetched")
 	require.NotNil(t, s)
 }
 
 func TestLazy_RequestSkipsUnavailableSecretWhenNotRequired(t *testing.T) {
 	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
-	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	s, err := newFromConfig(cfg, missingSecretRegistry())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
@@ -1295,7 +1291,7 @@ func TestLazy_RequestRejectedWhenReplaceRequireAndSecretUnavailable(t *testing.T
 	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry(func(e *secretEntry) {
 		e.Require = true
 	})}}
-	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	s, err := newFromConfig(cfg, missingSecretRegistry())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
@@ -1313,7 +1309,7 @@ func TestLazy_RequestRejectedWhenInjectRequireAndSecretUnavailable(t *testing.T)
 		Inject: &injectConfig{Header: "Authorization", Require: true},
 		Rules:  []hostmatch.RuleConfig{{Host: "api.example.com"}},
 	}}}
-	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	s, err := newFromConfig(cfg, missingSecretRegistry())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
@@ -1330,7 +1326,7 @@ func TestLazy_InjectRequireFalseSkipsOnUnavailable(t *testing.T) {
 		Inject: &injectConfig{Header: "Authorization"},
 		Rules:  []hostmatch.RuleConfig{{Host: "api.example.com"}},
 	}}}
-	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	s, err := newFromConfig(cfg, missingSecretRegistry())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
@@ -1344,8 +1340,8 @@ func TestLazy_InjectRequireFalseSkipsOnUnavailable(t *testing.T) {
 }
 
 func TestLazy_MixedAvailableAndUnavailable(t *testing.T) {
-	registry := resolverRegistry{
-		"env": &fakeResolver{secrets: map[string]string{
+	registry := sourceBuilderRegistry{
+		"env": &fakeBuilder{secrets: map[string]string{
 			"OPENAI_API_KEY": "sk-real-openai-key",
 		}},
 	}
@@ -1363,7 +1359,7 @@ func TestLazy_MixedAvailableAndUnavailable(t *testing.T) {
 			Rules:        []hostmatch.RuleConfig{{Host: "api.openai.com"}},
 		},
 	}}
-	s, err := newFromConfig(context.Background(), cfg, registry)
+	s, err := newFromConfig(cfg, registry)
 	require.NoError(t, err)
 
 	req := openaiReq("GET", "/v1/chat")
@@ -1379,11 +1375,11 @@ func TestLazy_MixedAvailableAndUnavailable(t *testing.T) {
 }
 
 func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
-	fr := &fakeResolver{secrets: map[string]string{}}
-	registry := resolverRegistry{"env": fr}
+	fr := &fakeBuilder{secrets: map[string]string{}}
+	registry := sourceBuilderRegistry{"env": fr}
 
 	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
-	s, err := newFromConfig(context.Background(), cfg, registry)
+	s, err := newFromConfig(cfg, registry)
 	require.NoError(t, err)
 
 	for range 5 {

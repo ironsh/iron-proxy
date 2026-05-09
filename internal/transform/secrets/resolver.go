@@ -16,28 +16,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// secretResolver resolves a real secret value from a source configuration.
-// Each implementation defines and decodes its own config from the raw YAML node.
-type secretResolver interface {
-	// Resolve validates the source config and returns a deferred GetValue
-	// that performs the network fetch lazily on first call. Resolve must
-	// not perform I/O.
-	Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error)
+// secretSource is a prepared secret. Get fetches the current value, possibly
+// from a cache; Name returns a stable display name for logging.
+type secretSource interface {
+	Name() string
+	Get(ctx context.Context) (string, error)
 }
 
-// ResolveResult holds the resolved secret and a function to get its current value.
-type ResolveResult struct {
-	Name     string                                    // display name for logging
-	GetValue func(ctx context.Context) (string, error) // returns the current secret value
+// secretSourceBuilder validates source config and returns a secretSource that
+// fetches lazily on first Get. Build must not perform I/O — only static
+// config validation.
+type secretSourceBuilder interface {
+	Build(raw yaml.Node) (secretSource, error)
 }
 
-// sourceTypeHint is used to peek at the type field before dispatching to a resolver.
+// sourceTypeHint is used to peek at the type field before dispatching to a builder.
 type sourceTypeHint struct {
 	Type string `yaml:"type"`
 }
 
-// resolverRegistry maps source type names to their resolvers.
-type resolverRegistry map[string]secretResolver
+// sourceBuilderRegistry maps source type names to their builders.
+type sourceBuilderRegistry map[string]secretSourceBuilder
 
 const defaultFailureTTL = time.Minute
 
@@ -48,8 +47,8 @@ func parseTTL(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-func newLazyValue(name string, successTTL, failureTTL time.Duration, logger *slog.Logger, fetch func(context.Context) (string, error)) func(context.Context) (string, error) {
-	cv := &cachedValue{
+func newLazyValue(name string, successTTL, failureTTL time.Duration, logger *slog.Logger, fetch func(context.Context) (string, error)) *cachedValue {
+	return &cachedValue{
 		name:       name,
 		logger:     logger,
 		fetch:      fetch,
@@ -57,35 +56,31 @@ func newLazyValue(name string, successTTL, failureTTL time.Duration, logger *slo
 		failureTTL: failureTTL,
 		now:        time.Now,
 	}
-	return cv.get
 }
 
-// buildLazyResult parses the TTL strings and returns a ResolveResult whose
-// GetValue lazily invokes fetch. successTTL of 0 (empty ttlStr) caches the
-// value forever after first success. An empty failureTTLStr defaults to
+// buildLazySource parses the TTL strings and returns a secretSource that
+// lazily invokes fetch. successTTL of 0 (empty ttlStr) caches the value
+// forever after first success. An empty failureTTLStr defaults to
 // defaultFailureTTL.
-func buildLazyResult(name, ttlStr, failureTTLStr string, logger *slog.Logger, fetch func(context.Context) (string, error)) (ResolveResult, error) {
+func buildLazySource(name, ttlStr, failureTTLStr string, logger *slog.Logger, fetch func(context.Context) (string, error)) (secretSource, error) {
 	successTTL, err := parseTTL(ttlStr)
 	if err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", ttlStr, err)
+		return nil, fmt.Errorf("parsing ttl %q: %w", ttlStr, err)
 	}
 	failureTTL, err := parseTTL(failureTTLStr)
 	if err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing failure_ttl %q: %w", failureTTLStr, err)
+		return nil, fmt.Errorf("parsing failure_ttl %q: %w", failureTTLStr, err)
 	}
 	if failureTTL == 0 {
 		failureTTL = defaultFailureTTL
 	}
-	return ResolveResult{
-		Name:     name,
-		GetValue: newLazyValue(name, successTTL, failureTTL, logger, fetch),
-	}, nil
+	return newLazyValue(name, successTTL, failureTTL, logger, fetch), nil
 }
 
-// --- env resolver ---
+// --- env builder ---
 
-// envResolver reads secrets from environment variables.
-type envResolver struct {
+// envBuilder reads secrets from environment variables.
+type envBuilder struct {
 	getenv func(string) string
 	logger *slog.Logger
 }
@@ -95,19 +90,19 @@ type envConfig struct {
 	Var  string `yaml:"var"`
 }
 
-func newEnvResolver(logger *slog.Logger) *envResolver {
-	return &envResolver{getenv: os.Getenv, logger: logger}
+func newEnvBuilder(logger *slog.Logger) *envBuilder {
+	return &envBuilder{getenv: os.Getenv, logger: logger}
 }
 
-func (r *envResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *envBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg envConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing env source config: %w", err)
+		return nil, fmt.Errorf("parsing env source config: %w", err)
 	}
 	if cfg.Var == "" {
-		return ResolveResult{}, fmt.Errorf("env source requires \"var\" field")
+		return nil, fmt.Errorf("env source requires \"var\" field")
 	}
-	return buildLazyResult(cfg.Var, "", "", r.logger, func(context.Context) (string, error) {
+	return buildLazySource(cfg.Var, "", "", r.logger, func(context.Context) (string, error) {
 		v := r.getenv(cfg.Var)
 		if v == "" {
 			return "", fmt.Errorf("env var %q is not set or empty", cfg.Var)
@@ -145,15 +140,15 @@ func (c *awsClientCache[C]) get(ctx context.Context, region string) (C, error) {
 	return client, nil
 }
 
-// --- AWS Secrets Manager resolver ---
+// --- AWS Secrets Manager builder ---
 
-// smClient is the subset of the AWS Secrets Manager API used by awsSMResolver.
+// smClient is the subset of the AWS Secrets Manager API used by awsSMBuilder.
 type smClient interface {
 	GetSecretValue(ctx context.Context, input *secretsmanager.GetSecretValueInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 }
 
-// awsSMResolver reads secrets from AWS Secrets Manager.
-type awsSMResolver struct {
+// awsSMBuilder reads secrets from AWS Secrets Manager.
+type awsSMBuilder struct {
 	clientFor func(ctx context.Context, region string) (smClient, error)
 	logger    *slog.Logger
 }
@@ -167,28 +162,28 @@ type awsSMConfig struct {
 	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
-func newAWSSMResolver(logger *slog.Logger) *awsSMResolver {
+func newAWSSMBuilder(logger *slog.Logger) *awsSMBuilder {
 	cache := &awsClientCache[smClient]{
 		clients:   make(map[string]smClient),
 		newClient: func(cfg aws.Config) smClient { return secretsmanager.NewFromConfig(cfg) },
 	}
-	return &awsSMResolver{clientFor: cache.get, logger: logger}
+	return &awsSMBuilder{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSMResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg awsSMConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing aws_sm source config: %w", err)
+		return nil, fmt.Errorf("parsing aws_sm source config: %w", err)
 	}
 	if cfg.SecretID == "" {
-		return ResolveResult{}, fmt.Errorf("aws_sm source requires \"secret_id\" field")
+		return nil, fmt.Errorf("aws_sm source requires \"secret_id\" field")
 	}
-	return buildLazyResult(cfg.SecretID, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
+	return buildLazySource(cfg.SecretID, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
 	})
 }
 
-func (r *awsSMResolver) fetchSecret(ctx context.Context, cfg awsSMConfig) (string, error) {
+func (r *awsSMBuilder) fetchSecret(ctx context.Context, cfg awsSMConfig) (string, error) {
 	client, err := r.clientFor(ctx, cfg.Region)
 	if err != nil {
 		return "", fmt.Errorf("creating AWS SM client: %w", err)
@@ -212,15 +207,15 @@ func (r *awsSMResolver) fetchSecret(ctx context.Context, cfg awsSMConfig) (strin
 	return val, nil
 }
 
-// --- AWS Systems Manager Parameter Store resolver ---
+// --- AWS Systems Manager Parameter Store builder ---
 
-// ssmClient is the subset of the AWS SSM API used by awsSSMResolver.
+// ssmClient is the subset of the AWS SSM API used by awsSSMBuilder.
 type ssmClient interface {
 	GetParameter(ctx context.Context, input *ssm.GetParameterInput, opts ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }
 
-// awsSSMResolver reads secrets from AWS Systems Manager Parameter Store.
-type awsSSMResolver struct {
+// awsSSMBuilder reads secrets from AWS Systems Manager Parameter Store.
+type awsSSMBuilder struct {
 	clientFor func(ctx context.Context, region string) (ssmClient, error)
 	logger    *slog.Logger
 }
@@ -239,28 +234,28 @@ func (cfg awsSSMConfig) decryptValue() bool {
 	return cfg.WithDecryption == nil || *cfg.WithDecryption
 }
 
-func newAWSSSMResolver(logger *slog.Logger) *awsSSMResolver {
+func newAWSSSMBuilder(logger *slog.Logger) *awsSSMBuilder {
 	cache := &awsClientCache[ssmClient]{
 		clients:   make(map[string]ssmClient),
 		newClient: func(cfg aws.Config) ssmClient { return ssm.NewFromConfig(cfg) },
 	}
-	return &awsSSMResolver{clientFor: cache.get, logger: logger}
+	return &awsSSMBuilder{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSSMResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg awsSSMConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing aws_ssm source config: %w", err)
+		return nil, fmt.Errorf("parsing aws_ssm source config: %w", err)
 	}
 	if cfg.Name == "" {
-		return ResolveResult{}, fmt.Errorf("aws_ssm source requires \"name\" field")
+		return nil, fmt.Errorf("aws_ssm source requires \"name\" field")
 	}
-	return buildLazyResult(cfg.Name, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
+	return buildLazySource(cfg.Name, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchParameter(ctx, cfg)
 	})
 }
 
-func (r *awsSSMResolver) fetchParameter(ctx context.Context, cfg awsSSMConfig) (string, error) {
+func (r *awsSSMBuilder) fetchParameter(ctx context.Context, cfg awsSSMConfig) (string, error) {
 	client, err := r.clientFor(ctx, cfg.Region)
 	if err != nil {
 		return "", fmt.Errorf("creating AWS SSM client: %w", err)
@@ -310,7 +305,9 @@ type cachedValue struct {
 	expiresAt   time.Time
 }
 
-func (cv *cachedValue) get(ctx context.Context) (string, error) {
+func (cv *cachedValue) Name() string { return cv.name }
+
+func (cv *cachedValue) Get(ctx context.Context) (string, error) {
 	cv.mu.Lock()
 	defer cv.mu.Unlock()
 
