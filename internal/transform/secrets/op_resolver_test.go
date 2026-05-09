@@ -51,11 +51,11 @@ func TestOPResolver_HappyPath_DefaultTokenEnv(t *testing.T) {
 	result, err := r.Resolve(context.Background(), node)
 	require.NoError(t, err)
 	require.Equal(t, "op://Engineering/OpenAI/credential", result.Name)
-	require.Equal(t, "OP_SERVICE_ACCOUNT_TOKEN", gotEnv)
 
 	val, err := result.GetValue(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-secret", val)
+	require.Equal(t, "OP_SERVICE_ACCOUNT_TOKEN", gotEnv)
 }
 
 func TestOPResolver_HappyPath_CustomTokenEnv(t *testing.T) {
@@ -75,11 +75,11 @@ func TestOPResolver_HappyPath_CustomTokenEnv(t *testing.T) {
 	})
 	result, err := r.Resolve(context.Background(), node)
 	require.NoError(t, err)
-	require.Equal(t, "CUSTOM_OP_TOKEN", gotEnv)
 
 	val, err := result.GetValue(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "custom-token-secret", val)
+	require.Equal(t, "CUSTOM_OP_TOKEN", gotEnv)
 }
 
 func TestOPResolver_TTLReturnsCachedValue(t *testing.T) {
@@ -108,7 +108,9 @@ func TestOPResolver_PassesSecretRefToClient(t *testing.T) {
 		"type":       "1password",
 		"secret_ref": "op://vault/item/section/field",
 	})
-	_, err := r.Resolve(context.Background(), node)
+	result, err := r.Resolve(context.Background(), node)
+	require.NoError(t, err)
+	_, err = result.GetValue(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "op://vault/item/section/field", gotRef)
 }
@@ -119,43 +121,56 @@ func TestOPResolver_Errors(t *testing.T) {
 		client *mockOPClient
 		input  map[string]string
 		errMsg string
+		errAt  string
 	}{
 		{
 			name:   "missing secret_ref",
 			client: staticOPClient("", nil),
 			input:  map[string]string{"type": "1password"},
 			errMsg: "\"secret_ref\" field",
+			errAt:  "resolve",
 		},
 		{
 			name:   "secret_ref without op:// prefix",
 			client: staticOPClient("", nil),
 			input:  map[string]string{"type": "1password", "secret_ref": "vault/item/field"},
 			errMsg: "must start with \"op://\"",
-		},
-		{
-			name:   "sdk error",
-			client: staticOPClient("", fmt.Errorf("vault not found")),
-			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
-			errMsg: "vault not found",
-		},
-		{
-			name:   "empty secret value",
-			client: staticOPClient("", nil),
-			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
-			errMsg: "empty value",
+			errAt:  "resolve",
 		},
 		{
 			name:   "invalid ttl",
 			client: staticOPClient("v", nil),
 			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f", "ttl": "not-a-duration"},
 			errMsg: "parsing ttl",
+			errAt:  "resolve",
+		},
+		{
+			name:   "sdk error",
+			client: staticOPClient("", fmt.Errorf("vault not found")),
+			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
+			errMsg: "vault not found",
+			errAt:  "fetch",
+		},
+		{
+			name:   "empty secret value",
+			client: staticOPClient("", nil),
+			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
+			errMsg: "empty value",
+			errAt:  "fetch",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTestOPResolver(tt.client)
 			node := yamlNode(t, tt.input)
-			_, err := r.Resolve(context.Background(), node)
+			result, err := r.Resolve(context.Background(), node)
+			if tt.errAt == "resolve" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errMsg)
+				return
+			}
+			require.NoError(t, err)
+			_, err = result.GetValue(context.Background())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.errMsg)
 		})

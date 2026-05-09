@@ -19,9 +19,9 @@ import (
 // secretResolver resolves a real secret value from a source configuration.
 // Each implementation defines and decodes its own config from the raw YAML node.
 type secretResolver interface {
-	// Resolve validates the source config and fetches the initial secret value.
-	// The returned ResolveResult includes a GetValue function that may lazily
-	// refresh the value (e.g., for sources with a TTL).
+	// Resolve validates the source config and returns a deferred GetValue
+	// that performs the network fetch lazily on first call. Resolve itself
+	// performs no I/O — only static config validation.
 	Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error)
 }
 
@@ -39,11 +39,51 @@ type sourceTypeHint struct {
 // resolverRegistry maps source type names to their resolvers.
 type resolverRegistry map[string]secretResolver
 
+// defaultFailureTTL is the duration to cache an initial-fetch error when the
+// source has no TTL configured. Picked to balance recovery latency against
+// hammering a struggling backend.
+const defaultFailureTTL = 30 * time.Second
+
+// parseTTL parses a duration string. Empty string means "no TTL configured."
+func parseTTL(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(s)
+}
+
+// failureTTL returns the duration to cache an initial-fetch error. If the
+// source has a successTTL configured, reuse it; otherwise fall back to a
+// 30s default.
+func failureTTL(successTTL time.Duration) time.Duration {
+	if successTTL > 0 {
+		return successTTL
+	}
+	return defaultFailureTTL
+}
+
+// newLazyValue returns a GetValue closure backed by cachedValue. successTTL
+// of 0 means "cache forever once successfully fetched" (matches the static
+// behavior of sources like env). failureTTL controls how long an initial-
+// fetch error is cached before retrying.
+func newLazyValue(name string, successTTL, failureTTL time.Duration, logger *slog.Logger, fetch func(context.Context) (string, error)) func(context.Context) (string, error) {
+	cv := &cachedValue{
+		name:       name,
+		logger:     logger,
+		fetch:      fetch,
+		successTTL: successTTL,
+		failureTTL: failureTTL,
+		now:        time.Now,
+	}
+	return cv.get
+}
+
 // --- env resolver ---
 
 // envResolver reads secrets from environment variables.
 type envResolver struct {
 	getenv func(string) string
+	logger *slog.Logger
 }
 
 type envConfig struct {
@@ -51,8 +91,8 @@ type envConfig struct {
 	Var  string `yaml:"var"`
 }
 
-func newEnvResolver() *envResolver {
-	return &envResolver{getenv: os.Getenv}
+func newEnvResolver(logger *slog.Logger) *envResolver {
+	return &envResolver{getenv: os.Getenv, logger: logger}
 }
 
 func (r *envResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
@@ -63,19 +103,17 @@ func (r *envResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, 
 	if cfg.Var == "" {
 		return ResolveResult{}, fmt.Errorf("env source requires \"var\" field")
 	}
-	val := r.getenv(cfg.Var)
-	if val == "" {
-		return ResolveResult{}, fmt.Errorf("env var %q is not set or empty", cfg.Var)
+	fetch := func(context.Context) (string, error) {
+		v := r.getenv(cfg.Var)
+		if v == "" {
+			return "", fmt.Errorf("env var %q is not set or empty", cfg.Var)
+		}
+		return v, nil
 	}
 	return ResolveResult{
 		Name:     cfg.Var,
-		GetValue: staticValue(val),
+		GetValue: newLazyValue(cfg.Var, 0, defaultFailureTTL, r.logger, fetch),
 	}, nil
-}
-
-// staticValue returns a GetValue function that always returns the same value.
-func staticValue(val string) func(context.Context) (string, error) {
-	return func(context.Context) (string, error) { return val, nil }
 }
 
 // --- shared AWS client cache ---
@@ -107,35 +145,6 @@ func (c *awsClientCache[C]) get(ctx context.Context, region string) (C, error) {
 	return client, nil
 }
 
-// resolveWithTTL builds a ResolveResult with optional TTL-based caching.
-func resolveWithTTL(name, initialValue, ttlStr string, logger *slog.Logger, refresh func(context.Context) (string, error)) (ResolveResult, error) {
-	var ttl time.Duration
-	if ttlStr != "" {
-		var err error
-		ttl, err = time.ParseDuration(ttlStr)
-		if err != nil {
-			return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", ttlStr, err)
-		}
-	}
-
-	var getValue func(context.Context) (string, error)
-	if ttl > 0 {
-		cv := &cachedValue{
-			value:     initialValue,
-			expiresAt: time.Now().Add(ttl),
-			ttl:       ttl,
-			logger:    logger,
-			name:      name,
-			refresh:   refresh,
-		}
-		getValue = cv.get
-	} else {
-		getValue = staticValue(initialValue)
-	}
-
-	return ResolveResult{Name: name, GetValue: getValue}, nil
-}
-
 // --- AWS Secrets Manager resolver ---
 
 // smClient is the subset of the AWS Secrets Manager API used by awsSMResolver.
@@ -165,7 +174,7 @@ func newAWSSMResolver(logger *slog.Logger) *awsSMResolver {
 	return &awsSMResolver{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSMResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
 	var cfg awsSMConfig
 	if err := raw.Decode(&cfg); err != nil {
 		return ResolveResult{}, fmt.Errorf("parsing aws_sm source config: %w", err)
@@ -173,15 +182,17 @@ func (r *awsSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResu
 	if cfg.SecretID == "" {
 		return ResolveResult{}, fmt.Errorf("aws_sm source requires \"secret_id\" field")
 	}
-
-	val, err := r.fetchSecret(ctx, cfg)
+	successTTL, err := parseTTL(cfg.TTL)
 	if err != nil {
-		return ResolveResult{}, err
+		return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", cfg.TTL, err)
 	}
-
-	return resolveWithTTL(cfg.SecretID, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	fetch := func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
-	})
+	}
+	return ResolveResult{
+		Name:     cfg.SecretID,
+		GetValue: newLazyValue(cfg.SecretID, successTTL, failureTTL(successTTL), r.logger, fetch),
+	}, nil
 }
 
 func (r *awsSMResolver) fetchSecret(ctx context.Context, cfg awsSMConfig) (string, error) {
@@ -242,7 +253,7 @@ func newAWSSSMResolver(logger *slog.Logger) *awsSSMResolver {
 	return &awsSSMResolver{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSSMResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
 	var cfg awsSSMConfig
 	if err := raw.Decode(&cfg); err != nil {
 		return ResolveResult{}, fmt.Errorf("parsing aws_ssm source config: %w", err)
@@ -250,15 +261,17 @@ func (r *awsSSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveRes
 	if cfg.Name == "" {
 		return ResolveResult{}, fmt.Errorf("aws_ssm source requires \"name\" field")
 	}
-
-	val, err := r.fetchParameter(ctx, cfg)
+	successTTL, err := parseTTL(cfg.TTL)
 	if err != nil {
-		return ResolveResult{}, err
+		return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", cfg.TTL, err)
 	}
-
-	return resolveWithTTL(cfg.Name, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	fetch := func(ctx context.Context) (string, error) {
 		return r.fetchParameter(ctx, cfg)
-	})
+	}
+	return ResolveResult{
+		Name:     cfg.Name,
+		GetValue: newLazyValue(cfg.Name, successTTL, failureTTL(successTTL), r.logger, fetch),
+	}, nil
 }
 
 func (r *awsSSMResolver) fetchParameter(ctx context.Context, cfg awsSSMConfig) (string, error) {
@@ -289,42 +302,71 @@ func (r *awsSSMResolver) fetchParameter(ctx context.Context, cfg awsSSMConfig) (
 	return val, nil
 }
 
-// --- cached value (lazy TTL refresh) ---
+// --- cached value (lazy fetch + TTL refresh + initial-failure caching) ---
 
-// cachedValue wraps a secret value with lazy TTL-based refresh. When get() is
-// called and the value has expired, it re-fetches inline. On refresh failure,
-// the stale value is returned and the error is logged.
+// cachedValue wraps a fetch function with TTL-based caching for both success
+// and initial-failure outcomes. The first call to get() triggers the fetch.
+// On success, the value is cached for successTTL (or forever if successTTL
+// is 0). On failure before any successful fetch, the error is cached for
+// failureTTL so a struggling backend isn't hammered. After a successful fetch,
+// later refresh failures serve the stale value (existing behavior preserved).
 type cachedValue struct {
-	mu        sync.Mutex
-	value     string
-	expiresAt time.Time
-	ttl       time.Duration
-	logger    *slog.Logger
-	name      string
-	refresh   func(ctx context.Context) (string, error)
+	mu         sync.Mutex
+	name       string
+	logger     *slog.Logger
+	fetch      func(ctx context.Context) (string, error)
+	successTTL time.Duration
+	failureTTL time.Duration
+	now        func() time.Time
+
+	initialized bool
+	value       string
+	lastErr     error
+	expiresAt   time.Time
 }
 
 func (cv *cachedValue) get(ctx context.Context) (string, error) {
 	cv.mu.Lock()
 	defer cv.mu.Unlock()
 
-	if time.Now().Before(cv.expiresAt) {
-		return cv.value, nil
+	if cv.initialized {
+		if cv.successTTL == 0 || cv.now().Before(cv.expiresAt) {
+			return cv.value, nil
+		}
+		// successTTL > 0 and expired: fall through to refresh.
+	} else if cv.now().Before(cv.expiresAt) {
+		return "", cv.lastErr
 	}
 
-	val, err := cv.refresh(ctx)
+	val, err := cv.fetch(ctx)
 	if err != nil {
-		cv.logger.Warn("failed to refresh secret, serving stale value",
-			"secret", cv.name,
-			"error", err,
-		)
-		// Retry again after half the TTL to avoid hammering on every request.
-		cv.expiresAt = time.Now().Add(cv.ttl / 2)
-		return cv.value, nil
+		if cv.initialized {
+			cv.expiresAt = cv.now().Add(cv.successTTL / 2)
+			if cv.logger != nil {
+				cv.logger.Warn("failed to refresh secret, serving stale value",
+					"secret", cv.name,
+					"error", err,
+				)
+			}
+			return cv.value, nil
+		}
+		cv.lastErr = err
+		cv.expiresAt = cv.now().Add(cv.failureTTL)
+		if cv.logger != nil {
+			cv.logger.Warn("failed to fetch secret, caching error",
+				"secret", cv.name,
+				"error", err,
+				"retry_in", cv.failureTTL,
+			)
+		}
+		return "", err
 	}
-
 	cv.value = val
-	cv.expiresAt = time.Now().Add(cv.ttl)
+	cv.initialized = true
+	cv.lastErr = nil
+	if cv.successTTL > 0 {
+		cv.expiresAt = cv.now().Add(cv.successTTL)
+	}
 	return cv.value, nil
 }
 

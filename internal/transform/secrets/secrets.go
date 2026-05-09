@@ -57,6 +57,10 @@ type injectConfig struct {
 	Header     string `yaml:"header,omitempty"`
 	QueryParam string `yaml:"query_param,omitempty"`
 	Formatter  string `yaml:"formatter,omitempty"`
+	// Require, when true, rejects the request if the secret can't be
+	// resolved at the time the request matches. Default false skips the
+	// secret silently on resolve failure.
+	Require bool `yaml:"require,omitempty"`
 }
 
 // resolvedSecret is a secret ready for use after config parsing and source resolution.
@@ -129,7 +133,7 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 		return nil, fmt.Errorf("parsing secrets config: %w", err)
 	}
 	registry := resolverRegistry{
-		"env":       newEnvResolver(),
+		"env":       newEnvResolver(logger),
 		"aws_sm":    newAWSSMResolver(logger),
 		"aws_ssm":   newAWSSSMResolver(logger),
 		"1password": newOPResolver(logger),
@@ -180,6 +184,7 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 				mode:             "inject",
 				getValue:         result.GetValue,
 				rules:            rules,
+				require:          inject.Require,
 				injectHeader:     inject.Header,
 				injectQueryParam: inject.QueryParam,
 			}
@@ -292,6 +297,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		Locations []string `json:"locations"`
 	}
 	var swapped, injected []secretRecord
+	var unavailable []string
 
 	for _, sec := range s.secrets {
 		if !hostmatch.MatchAnyRule(sec.rules, req) {
@@ -300,7 +306,13 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 		realValue, err := sec.getValue(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("resolving secret %q: %w", sec.name, err)
+			if sec.require {
+				tctx.Annotate("rejected", sec.name)
+				tctx.Annotate("reject_reason", "secret_unavailable")
+				return &transform.TransformResult{Action: transform.ActionReject}, nil
+			}
+			unavailable = append(unavailable, sec.name)
+			continue
 		}
 
 		if sec.mode == "inject" {
@@ -343,6 +355,9 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 	if len(injected) > 0 {
 		tctx.Annotate("injected", injected)
+	}
+	if len(unavailable) > 0 {
+		tctx.Annotate("secret_unavailable", unavailable)
 	}
 
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil

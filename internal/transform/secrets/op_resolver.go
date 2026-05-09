@@ -54,7 +54,7 @@ func newOPResolver(logger *slog.Logger) *opResolver {
 	return &opResolver{clientFor: cache.get, logger: logger}
 }
 
-func (r *opResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *opResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
 	var cfg opConfig
 	if err := raw.Decode(&cfg); err != nil {
 		return ResolveResult{}, fmt.Errorf("parsing 1password source config: %w", err)
@@ -68,15 +68,17 @@ func (r *opResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult,
 	if cfg.TokenEnv == "" {
 		cfg.TokenEnv = defaultOPTokenEnv
 	}
-
-	val, err := r.fetchSecret(ctx, cfg)
+	successTTL, err := parseTTL(cfg.TTL)
 	if err != nil {
-		return ResolveResult{}, err
+		return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", cfg.TTL, err)
 	}
-
-	return resolveWithTTL(cfg.SecretRef, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	fetch := func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
-	})
+	}
+	return ResolveResult{
+		Name:     cfg.SecretRef,
+		GetValue: newLazyValue(cfg.SecretRef, successTTL, failureTTL(successTTL), r.logger, fetch),
+	}, nil
 }
 
 func (r *opResolver) fetchSecret(ctx context.Context, cfg opConfig) (string, error) {

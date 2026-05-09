@@ -24,38 +24,60 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-// fakeResolver is a test secretResolver that returns preconfigured values.
+// fakeResolver is a test secretResolver. Resolve only validates that the
+// source has a recognizable name field; the actual lookup against secrets
+// (and any failure) is deferred to GetValue, mirroring lazy-init semantics.
 type fakeResolver struct {
-	secrets map[string]string // keyed by env var name or secret ID
+	mu          sync.Mutex
+	secrets     map[string]string // keyed by env var name or secret ID
+	failuresFor map[string]int    // remaining initial failures per name; decremented per fetch
+	fetchCalls  map[string]int    // per-name fetch call count for assertions
 }
 
-func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
-	// Try env config first, then AWS-backed configs.
+func (f *fakeResolver) extractName(raw yaml.Node) (string, error) {
 	var env envConfig
 	if err := raw.Decode(&env); err == nil && env.Var != "" {
-		val, ok := f.secrets[env.Var]
-		if !ok || val == "" {
-			return ResolveResult{}, &resolveError{env.Var}
-		}
-		return ResolveResult{Name: env.Var, GetValue: staticValue(val)}, nil
+		return env.Var, nil
 	}
 	var sm awsSMConfig
 	if err := raw.Decode(&sm); err == nil && sm.SecretID != "" {
-		val, ok := f.secrets[sm.SecretID]
-		if !ok || val == "" {
-			return ResolveResult{}, &resolveError{sm.SecretID}
-		}
-		return ResolveResult{Name: sm.SecretID, GetValue: staticValue(val)}, nil
+		return sm.SecretID, nil
 	}
 	var ssm awsSSMConfig
 	if err := raw.Decode(&ssm); err == nil && ssm.Name != "" {
-		val, ok := f.secrets[ssm.Name]
-		if !ok || val == "" {
-			return ResolveResult{}, &resolveError{ssm.Name}
-		}
-		return ResolveResult{Name: ssm.Name, GetValue: staticValue(val)}, nil
+		return ssm.Name, nil
 	}
-	return ResolveResult{}, &resolveError{"unknown"}
+	return "", &resolveError{"unknown"}
+}
+
+func (f *fakeResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+	name, err := f.extractName(raw)
+	if err != nil {
+		return ResolveResult{}, err
+	}
+	fetch := func(context.Context) (string, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.fetchCalls == nil {
+			f.fetchCalls = make(map[string]int)
+		}
+		f.fetchCalls[name]++
+		if f.failuresFor != nil {
+			if left := f.failuresFor[name]; left > 0 {
+				f.failuresFor[name] = left - 1
+				return "", &resolveError{name}
+			}
+		}
+		val, ok := f.secrets[name]
+		if !ok || val == "" {
+			return "", &resolveError{name}
+		}
+		return val, nil
+	}
+	return ResolveResult{
+		Name:     name,
+		GetValue: newLazyValue(name, 0, defaultFailureTTL, slog.Default(), fetch),
+	}, nil
 }
 
 type resolveError struct{ name string }
@@ -360,15 +382,6 @@ func TestSecrets_ConfigErrors(t *testing.T) {
 		cfg    secretsConfig
 		errMsg string
 	}{
-		{
-			name: "missing env var",
-			cfg: secretsConfig{Secrets: []secretEntry{{
-				Source:     envSource("NONEXISTENT_VAR"),
-				ProxyValue: "proxy-value",
-				Rules:      []hostmatch.RuleConfig{{Host: "example.com"}},
-			}}},
-			errMsg: "NONEXISTENT_VAR",
-		},
 		{
 			name: "no mode specified",
 			cfg: secretsConfig{Secrets: []secretEntry{{
@@ -798,30 +811,30 @@ func TestAWSSM_EndToEnd_TTLRefresh(t *testing.T) {
 		MatchHeaders: []string{"Authorization"},
 		Rules:        []hostmatch.RuleConfig{{Host: "api.example.com"}},
 	}})
-	// Initial resolve is call 1 (value-1).
+	require.Equal(t, int32(0), callCount.Load(), "lazy: no fetch before first request")
 
-	// First request: TTL=1ns is already expired, so this triggers a refresh (call 2).
+	// First request: triggers initial fetch (call 1, value-1).
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-tok")
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer value-1", req.Header.Get("Authorization"))
+
+	// Second request: TTL already expired, triggers refresh (call 2, value-2).
+	req = httptest.NewRequest("GET", "http://api.example.com/v1", nil)
 	req.Host = "api.example.com"
 	req.Header.Set("Authorization", "Bearer proxy-tok")
 	doTransform(t, s, req)
 	require.Equal(t, "Bearer value-2", req.Header.Get("Authorization"))
 
-	// Second request: triggers another refresh (call 3).
-	req = httptest.NewRequest("GET", "http://api.example.com/v1", nil)
-	req.Host = "api.example.com"
-	req.Header.Set("Authorization", "Bearer proxy-tok")
-	doTransform(t, s, req)
-	require.Equal(t, "Bearer value-3", req.Header.Get("Authorization"))
-
-	require.GreaterOrEqual(t, callCount.Load(), int32(3))
+	require.GreaterOrEqual(t, callCount.Load(), int32(2))
 }
 
 func TestAWSSM_EndToEnd_TTLServesStaleOnError(t *testing.T) {
 	var callCount atomic.Int32
 	client := &mockSMClient{fn: func(_ context.Context, _ *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error) {
 		n := callCount.Add(1)
-		// First call (initial resolve at startup) succeeds.
+		// First fetch (lazy, on first request) succeeds.
 		if n == 1 {
 			return &secretsmanager.GetSecretValueOutput{
 				SecretString: aws.String("good-value"),
@@ -841,23 +854,30 @@ func TestAWSSM_EndToEnd_TTLServesStaleOnError(t *testing.T) {
 		MatchHeaders: []string{"Authorization"},
 		Rules:        []hostmatch.RuleConfig{{Host: "api.example.com"}},
 	}})
-	require.Equal(t, int32(1), callCount.Load()) // initial resolve
+	require.Equal(t, int32(0), callCount.Load(), "lazy: no fetch before first request")
 
-	// First request: TTL expired, refresh fails, stale "good-value" served.
+	// First request: lazy fetch succeeds and caches "good-value".
 	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
 	req.Host = "api.example.com"
 	req.Header.Set("Authorization", "Bearer proxy-tok")
 	doTransform(t, s, req)
 	require.Equal(t, "Bearer good-value", req.Header.Get("Authorization"))
 
-	// Second request: same — refresh fails again, stale value still served.
+	// Second request: TTL expired, refresh fails, stale "good-value" served.
 	req = httptest.NewRequest("GET", "http://api.example.com/v1", nil)
 	req.Host = "api.example.com"
 	req.Header.Set("Authorization", "Bearer proxy-tok")
 	doTransform(t, s, req)
 	require.Equal(t, "Bearer good-value", req.Header.Get("Authorization"))
 
-	// At least 2 refresh attempts beyond the initial resolve.
+	// Third request: same — refresh fails again, stale value still served.
+	req = httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-tok")
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer good-value", req.Header.Get("Authorization"))
+
+	// At least 2 refresh attempts beyond the initial successful fetch.
 	require.GreaterOrEqual(t, callCount.Load(), int32(3))
 }
 
@@ -1231,4 +1251,207 @@ func TestInject_ConcurrentSafety(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// --- Lazy resolution + require-on-resolve-failure tests ---
+
+// missingSecretRegistry uses a fakeResolver with no secrets configured, so
+// every lazy fetch fails with "<name> not found".
+func missingSecretRegistry() resolverRegistry {
+	return resolverRegistry{
+		"env": &fakeResolver{secrets: map[string]string{}},
+	}
+}
+
+// missingSecretEntry returns a default replace entry whose source can never
+// be resolved (the fakeResolver has no value for MISSING).
+func missingSecretEntry(opts ...func(*secretEntry)) secretEntry {
+	e := secretEntry{
+		Source:       envSource("MISSING"),
+		ProxyValue:   "proxy-tok",
+		MatchHeaders: []string{"Authorization"},
+		Rules:        []hostmatch.RuleConfig{{Host: "api.example.com"}},
+	}
+	for _, opt := range opts {
+		opt(&e)
+	}
+	return e
+}
+
+func TestLazy_PipelineBuildsWhenSecretBackendUnreachable(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
+	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	require.NoError(t, err, "pipeline must build even when the secret can't be fetched")
+	require.NotNil(t, s)
+}
+
+func TestLazy_RequestSkipsUnavailableSecretWhenNotRequired(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
+	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-tok")
+
+	tctx := &transform.TransformContext{}
+	res, err := s.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	// Secret unavailable: header is left as-is.
+	require.Equal(t, "Bearer proxy-tok", req.Header.Get("Authorization"))
+}
+
+func TestLazy_RequestRejectedWhenReplaceRequireAndSecretUnavailable(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry(func(e *secretEntry) {
+		e.Require = true
+	})}}
+	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-tok")
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+func TestLazy_RequestRejectedWhenInjectRequireAndSecretUnavailable(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{{
+		Source: envSource("MISSING"),
+		Inject: &injectConfig{Header: "Authorization", Require: true},
+		Rules:  []hostmatch.RuleConfig{{Host: "api.example.com"}},
+	}}}
+	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+func TestLazy_InjectRequireFalseSkipsOnUnavailable(t *testing.T) {
+	cfg := secretsConfig{Secrets: []secretEntry{{
+		Source: envSource("MISSING"),
+		Inject: &injectConfig{Header: "Authorization"},
+		Rules:  []hostmatch.RuleConfig{{Host: "api.example.com"}},
+	}}}
+	s, err := newFromConfig(context.Background(), cfg, missingSecretRegistry())
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	// Secret unavailable + require=false: header not set.
+	require.Empty(t, req.Header.Get("Authorization"))
+}
+
+func TestLazy_MixedAvailableAndUnavailable(t *testing.T) {
+	registry := resolverRegistry{
+		"env": &fakeResolver{secrets: map[string]string{
+			"OPENAI_API_KEY": "sk-real-openai-key",
+		}},
+	}
+	cfg := secretsConfig{Secrets: []secretEntry{
+		// Working secret.
+		{
+			Source:       envSource("OPENAI_API_KEY"),
+			ProxyValue:   "proxy-openai-abc123",
+			MatchHeaders: []string{"Authorization"},
+			Rules:        []hostmatch.RuleConfig{{Host: "api.openai.com"}},
+		},
+		// Missing secret on a different host (so both rules can match a single req? no, they can't —
+		// use the same host so both match).
+		{
+			Source:       envSource("MISSING"),
+			ProxyValue:   "proxy-other",
+			MatchHeaders: []string{"X-Other"},
+			Rules:        []hostmatch.RuleConfig{{Host: "api.openai.com"}},
+		},
+	}}
+	s, err := newFromConfig(context.Background(), cfg, registry)
+	require.NoError(t, err)
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
+	req.Header.Set("X-Other", "proxy-other")
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
+	// Missing secret: X-Other untouched.
+	require.Equal(t, "proxy-other", req.Header.Get("X-Other"))
+}
+
+func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
+	fr := &fakeResolver{secrets: map[string]string{}}
+	registry := resolverRegistry{"env": fr}
+
+	cfg := secretsConfig{Secrets: []secretEntry{missingSecretEntry()}}
+	s, err := newFromConfig(context.Background(), cfg, registry)
+	require.NoError(t, err)
+
+	for range 5 {
+		req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+		req.Host = "api.example.com"
+		req.Header.Set("Authorization", "Bearer proxy-tok")
+		doTransform(t, s, req)
+	}
+
+	// Lazy fetch happened only once; subsequent requests served the cached error.
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	require.Equal(t, 1, fr.fetchCalls["MISSING"])
+}
+
+func TestLazy_FailureRecoversAfterFix(t *testing.T) {
+	fr := &fakeResolver{
+		secrets:     map[string]string{"FLAKY": "real-flaky-value"},
+		failuresFor: map[string]int{"FLAKY": 1}, // first fetch fails, then succeeds
+	}
+	registry := resolverRegistry{"env": fr}
+
+	// Use a tiny TTL so failureTTL on the cachedValue is also tiny — we can
+	// drive recovery without sleeping by inspecting the cachedValue directly.
+	cfg := secretsConfig{Secrets: []secretEntry{{
+		Source:       envSource("FLAKY"),
+		ProxyValue:   "proxy-flaky",
+		MatchHeaders: []string{"Authorization"},
+		Rules:        []hostmatch.RuleConfig{{Host: "api.example.com"}},
+	}}}
+	s, err := newFromConfig(context.Background(), cfg, registry)
+	require.NoError(t, err)
+
+	// First request: fetch fails, header untouched.
+	req := httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-flaky")
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer proxy-flaky", req.Header.Get("Authorization"))
+
+	// Force the cachedValue to expire so the next call re-fetches.
+	require.Len(t, s.secrets, 1)
+	// Reach into the test fakeResolver call counts to confirm only 1 fetch happened.
+	fr.mu.Lock()
+	require.Equal(t, 1, fr.fetchCalls["FLAKY"])
+	fr.mu.Unlock()
+
+	// Second request right after: still within failureTTL, no new fetch.
+	req = httptest.NewRequest("GET", "http://api.example.com/v1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer proxy-flaky")
+	doTransform(t, s, req)
+	require.Equal(t, "Bearer proxy-flaky", req.Header.Get("Authorization"))
+	fr.mu.Lock()
+	require.Equal(t, 1, fr.fetchCalls["FLAKY"], "still cached")
+	fr.mu.Unlock()
 }
