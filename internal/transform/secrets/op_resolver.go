@@ -18,25 +18,26 @@ import (
 // service account tokens, matching the SDK's own examples.
 const defaultOPTokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
 
-// opClient is the subset of the 1Password SDK used by opResolver, narrowed for testability.
+// opClient is the subset of the 1Password SDK used by opBuilder, narrowed for testability.
 type opClient interface {
 	Resolve(ctx context.Context, ref string) (string, error)
 }
 
-// opResolver reads secrets from 1Password using a service account token.
-type opResolver struct {
+// opBuilder reads secrets from 1Password using a service account token.
+type opBuilder struct {
 	clientFor func(ctx context.Context, tokenEnv string) (opClient, error)
 	logger    *slog.Logger
 }
 
 type opConfig struct {
-	Type      string `yaml:"type"`
-	SecretRef string `yaml:"secret_ref"`
-	TokenEnv  string `yaml:"token_env,omitempty"`
-	TTL       string `yaml:"ttl,omitempty"`
+	Type       string `yaml:"type"`
+	SecretRef  string `yaml:"secret_ref"`
+	TokenEnv   string `yaml:"token_env,omitempty"`
+	TTL        string `yaml:"ttl,omitempty"`
+	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
-func newOPResolver(logger *slog.Logger) *opResolver {
+func newOPBuilder(logger *slog.Logger) *opBuilder {
 	cache := &opClientCache{
 		clients: make(map[string]opClient),
 		getenv:  os.Getenv,
@@ -51,35 +52,29 @@ func newOPResolver(logger *slog.Logger) *opResolver {
 			return opSDKClient{c: c}, nil
 		},
 	}
-	return &opResolver{clientFor: cache.get, logger: logger}
+	return &opBuilder{clientFor: cache.get, logger: logger}
 }
 
-func (r *opResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *opBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg opConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing 1password source config: %w", err)
+		return nil, fmt.Errorf("parsing 1password source config: %w", err)
 	}
 	if cfg.SecretRef == "" {
-		return ResolveResult{}, fmt.Errorf("1password source requires \"secret_ref\" field")
+		return nil, fmt.Errorf("1password source requires \"secret_ref\" field")
 	}
 	if !strings.HasPrefix(cfg.SecretRef, "op://") {
-		return ResolveResult{}, fmt.Errorf("1password secret_ref %q must start with \"op://\"", cfg.SecretRef)
+		return nil, fmt.Errorf("1password secret_ref %q must start with \"op://\"", cfg.SecretRef)
 	}
 	if cfg.TokenEnv == "" {
 		cfg.TokenEnv = defaultOPTokenEnv
 	}
-
-	val, err := r.fetchSecret(ctx, cfg)
-	if err != nil {
-		return ResolveResult{}, err
-	}
-
-	return resolveWithTTL(cfg.SecretRef, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	return buildLazySource(cfg.SecretRef, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
 	})
 }
 
-func (r *opResolver) fetchSecret(ctx context.Context, cfg opConfig) (string, error) {
+func (r *opBuilder) fetchSecret(ctx context.Context, cfg opConfig) (string, error) {
 	client, err := r.clientFor(ctx, cfg.TokenEnv)
 	if err != nil {
 		return "", fmt.Errorf("creating 1password client: %w", err)
