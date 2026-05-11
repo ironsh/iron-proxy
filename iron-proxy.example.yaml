@@ -316,6 +316,58 @@ transforms:
 #             # `matches: "^safe-"` is also supported (regex on string values)
 #         # Anything not listed is denied (default-deny).
 
+# PostgreSQL MITM proxy. Listens for client connections, authenticates them
+# against proxy-managed credentials, opens its own authenticated connection to
+# the upstream database (handling MD5 / SCRAM-SHA-256 termination), then issues
+# `SET ROLE "<role>"` on the upstream session and verifies the role persists
+# across separate autocommit queries. Once the role is set, the relay is
+# essentially transparent: clients use Postgres normally and every query they
+# issue runs as the configured role for identity-aware access (e.g. RLS).
+# When this block is omitted, no postgres listener runs.
+#
+# Deployment requirements:
+#  - PgBouncer (if used) must be in `pool_mode = session`. The proxy probes
+#    for this at connect time and refuses to enter the relay loop if the role
+#    doesn't stick between autocommit queries.
+#  - Clients must use simple-protocol or extended-protocol Postgres normally.
+#    Drivers do not need configuration changes.
+#
+# What the proxy rejects from the client (with a synthetic ErrorResponse, so
+# the connection stays usable). All checks parse SQL with libpg_query and walk
+# the AST, so they catch the role-mutating construct anywhere in the tree —
+# inside CTEs, subqueries, function arguments, etc.:
+#  - SET ROLE / RESET ROLE / SET SESSION AUTHORIZATION / RESET SESSION
+#    AUTHORIZATION — direct GUC mutation.
+#  - SELECT set_config('role', ...), SELECT pg_catalog.set_config(...) and
+#    the same for 'session_authorization' — function-call bypasses.
+#  - DO $$ ... $$ blocks — the plpgsql body is opaque to the SQL parser, so
+#    we reject rather than risk an embedded role change.
+#  - Multi-statement Simple Queries — kept as a single-statement guard.
+#
+# Cannot be caught at the wire (defend at the database with role/grant config):
+#  - User-defined SECURITY DEFINER functions that elevate internally.
+#  - Dynamic SQL via plpgsql EXECUTE with a non-literal argument.
+#  - Functions that wrap set_config under a different name.
+#
+# Limitations: client→proxy TLS is not supported (SSLRequest is refused);
+# CancelRequest is not forwarded; one shared client credential (no per-user).
+# postgres:
+#   listen: ":5432"
+#   upstream:
+#     host: "db.internal"
+#     port: 5432
+#     sslmode: "require"     # disable | require
+#     user_env: "PG_UPSTREAM_USER"
+#     password_env: "PG_UPSTREAM_PASSWORD"
+#     database: "appdb"
+#   client:
+#     # The single user clients must authenticate as when reaching the proxy.
+#     user: "app_user"
+#     password_env: "PG_PROXY_PASSWORD"
+#   # The Postgres role the proxy SETs at session start. Every query the client
+#   # issues runs as this role on the upstream database.
+#   role: "tenant_role"
+
 # Optional management API. When `listen` is empty (default), the management
 # server is disabled. When set, the proxy serves an authenticated
 # POST /v1/reload endpoint that re-reads this YAML file and atomically swaps in

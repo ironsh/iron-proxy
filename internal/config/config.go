@@ -51,6 +51,7 @@ type Config struct {
 	TLS        TLS         `yaml:"tls"`
 	Transforms []Transform `yaml:"transforms"`
 	MCP        yaml.Node   `yaml:"mcp"`
+	Postgres   yaml.Node   `yaml:"postgres"`
 	Metrics    Metrics     `yaml:"metrics"`
 	Management Management  `yaml:"management"`
 	Log        Log         `yaml:"log"`

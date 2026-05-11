@@ -1,0 +1,32 @@
+dns:
+  proxy_ip: "127.0.0.1"
+  listen: "127.0.0.1:0"
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  upstream_deny_cidrs: []
+
+tls:
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
+
+postgres:
+  listen: "127.0.0.1:0"
+  upstream:
+    host: "{{ .UpstreamHost }}"
+    port: {{ .UpstreamPort }}
+    sslmode: disable
+    user_env: PG_UPSTREAM_USER
+    password_env: PG_UPSTREAM_PASSWORD
+    database: appdb
+  client:
+    user: app_user
+    password_env: PG_PROXY_PASSWORD
+  role: tenant_role
+
+metrics:
+  listen: "127.0.0.1:0"
+
+log:
+  level: info
