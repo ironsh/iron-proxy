@@ -28,9 +28,37 @@ type Message struct {
 	Tool      string `json:"tool,omitempty"`
 	Decision  string `json:"decision"`
 	Reason    string `json:"reason,omitempty"`
+	// Arguments is the raw JSON of a tools/call arguments payload, truncated
+	// to AuditArgumentsMaxLen bytes. Empty for non-tools/call messages or
+	// when the call carried no arguments.
+	Arguments string `json:"arguments,omitempty"`
 	// Filtered counts items removed from a tools/list response when this
 	// message represents a response-side filter event.
 	Filtered int `json:"filtered,omitempty"`
+}
+
+// AuditArgumentsMaxLen caps the recorded tools/call arguments at 64 bytes so
+// large payloads (file contents, long SQL, etc.) don't bloat audit records.
+// When the raw arguments exceed this length, the recorded value is the
+// truncated prefix with a "..." marker appended.
+const AuditArgumentsMaxLen = 64
+
+// truncateArguments returns raw, possibly with a "..." marker appended, so
+// that the returned string is no longer than AuditArgumentsMaxLen bytes.
+// Truncation is rune-aware: it never splits a multi-byte UTF-8 sequence.
+func truncateArguments(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if len(raw) <= AuditArgumentsMaxLen {
+		return string(raw)
+	}
+	const marker = "..."
+	cut := AuditArgumentsMaxLen - len(marker)
+	for cut > 0 && raw[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return string(raw[:cut]) + marker
 }
 
 // Append records a message on the trace.
@@ -146,6 +174,9 @@ func (t *Trace) MCPMessages() []map[string]any {
 		}
 		if m.Reason != "" {
 			entry["reason"] = m.Reason
+		}
+		if m.Arguments != "" {
+			entry["arguments"] = m.Arguments
 		}
 		if m.Filtered > 0 {
 			entry["filtered"] = m.Filtered
