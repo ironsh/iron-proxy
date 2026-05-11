@@ -28,13 +28,17 @@ type Message struct {
 	Tool      string `json:"tool,omitempty"`
 	Decision  string `json:"decision"`
 	Reason    string `json:"reason,omitempty"`
-	// Arguments is the tools/call arguments payload. When the raw JSON is
-	// short and decodes cleanly it is the decoded value (e.g. map[string]any)
-	// so it nests naturally in audit output rather than appearing as an
-	// escaped string. When the raw JSON exceeds AuditArgumentsMaxLen bytes or
-	// cannot be decoded, this is a truncated raw-JSON string with a "..."
-	// suffix. nil for non-tools/call messages or calls without arguments.
+	// Arguments is the decoded tools/call arguments payload (e.g.
+	// map[string]any) so the value nests naturally in structured log output.
+	// Set only when the raw JSON fits under AuditArgumentsMaxLen and decodes
+	// cleanly; otherwise RawArguments carries the truncated raw string. nil
+	// for non-tools/call messages or calls without arguments.
 	Arguments any `json:"arguments,omitempty"`
+	// RawArguments is the truncated raw JSON of a tools/call arguments
+	// payload with a "..." suffix when truncation occurred. Set instead of
+	// Arguments when the payload is too large to record in full or does not
+	// decode as JSON.
+	RawArguments string `json:"raw_arguments,omitempty"`
 	// Filtered counts items removed from a tools/list response when this
 	// message represents a response-side filter event.
 	Filtered int `json:"filtered,omitempty"`
@@ -46,30 +50,31 @@ type Message struct {
 // truncated prefix with a "..." marker appended.
 const AuditArgumentsMaxLen = 64
 
-// encodeArguments produces the audit representation of a tools/call arguments
+// encodeArguments returns the audit fields for a tools/call arguments
 // payload. When raw fits under AuditArgumentsMaxLen and decodes as JSON, the
-// decoded value is returned so structured loggers nest it inline. Otherwise a
-// truncated raw-JSON string with a "..." suffix is returned. Returns nil when
-// raw is empty.
-func encodeArguments(raw []byte) any {
+// decoded value is returned as decoded so structured loggers nest it inline.
+// Otherwise rawStr carries a truncated raw-JSON string with a "..." suffix.
+// Exactly one of (decoded, rawStr) is set for a non-empty raw; both are zero
+// when raw is empty.
+func encodeArguments(raw []byte) (decoded any, rawStr string) {
 	if len(raw) == 0 {
-		return nil
+		return nil, ""
 	}
 	if len(raw) <= AuditArgumentsMaxLen {
 		var v any
 		if err := json.Unmarshal(raw, &v); err == nil {
-			return v
+			return v, ""
 		}
 	}
 	const marker = "..."
+	if len(raw) <= AuditArgumentsMaxLen {
+		return nil, string(raw)
+	}
 	cut := AuditArgumentsMaxLen - len(marker)
 	for cut > 0 && raw[cut]&0xC0 == 0x80 {
 		cut--
 	}
-	if cut >= len(raw) {
-		return string(raw)
-	}
-	return string(raw[:cut]) + marker
+	return nil, string(raw[:cut]) + marker
 }
 
 // Append records a message on the trace.
@@ -188,6 +193,9 @@ func (t *Trace) MCPMessages() []map[string]any {
 		}
 		if m.Arguments != nil {
 			entry["arguments"] = m.Arguments
+		}
+		if m.RawArguments != "" {
+			entry["raw_arguments"] = m.RawArguments
 		}
 		if m.Filtered > 0 {
 			entry["filtered"] = m.Filtered

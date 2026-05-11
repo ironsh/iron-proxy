@@ -61,6 +61,7 @@ func TestEvaluateRequestAllow(t *testing.T) {
 	require.Equal(t, DecisionAllow, tr.Messages[0].Decision)
 	require.Equal(t, "search_repositories", tr.Messages[0].Tool)
 	require.Equal(t, map[string]any{"q": "foo"}, tr.Messages[0].Arguments)
+	require.Empty(t, tr.Messages[0].RawArguments)
 }
 
 func TestEvaluateRequestArgumentsTruncated(t *testing.T) {
@@ -74,10 +75,9 @@ func TestEvaluateRequestArgumentsTruncated(t *testing.T) {
 	_, err := p.EvaluateRequest(s, req, tr)
 	require.NoError(t, err)
 	require.Len(t, tr.Messages, 1)
-	got, ok := tr.Messages[0].Arguments.(string)
-	require.True(t, ok, "oversize arguments must fall back to a truncated string")
-	require.Len(t, got, AuditArgumentsMaxLen)
-	require.True(t, strings.HasSuffix(got, "..."))
+	require.Nil(t, tr.Messages[0].Arguments)
+	require.Len(t, tr.Messages[0].RawArguments, AuditArgumentsMaxLen)
+	require.True(t, strings.HasSuffix(tr.Messages[0].RawArguments, "..."))
 }
 
 func TestEvaluateRequestDenyToolNotAllowed(t *testing.T) {
