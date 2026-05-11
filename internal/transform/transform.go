@@ -119,9 +119,8 @@ type PipelineResult struct {
 
 	Err error
 
-	// ClientCanceled is set when the request ended because the client closed
-	// its connection (request context cancelled). Distinguishes "client went
-	// away" from real upstream/transform errors so dashboards stay clean.
+	// ClientCanceled distinguishes client-initiated disconnect from a real
+	// failure so audit dashboards don't see phantom upstream errors.
 	ClientCanceled bool
 }
 
