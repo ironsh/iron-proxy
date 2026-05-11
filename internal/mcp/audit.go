@@ -28,9 +28,53 @@ type Message struct {
 	Tool      string `json:"tool,omitempty"`
 	Decision  string `json:"decision"`
 	Reason    string `json:"reason,omitempty"`
+	// Arguments is the decoded tools/call arguments payload (e.g.
+	// map[string]any) so the value nests naturally in structured log output.
+	// Set only when the raw JSON fits under AuditArgumentsMaxLen and decodes
+	// cleanly; otherwise RawArguments carries the truncated raw string. nil
+	// for non-tools/call messages or calls without arguments.
+	Arguments any `json:"arguments,omitempty"`
+	// RawArguments is the truncated raw JSON of a tools/call arguments
+	// payload with a "..." suffix when truncation occurred. Set instead of
+	// Arguments when the payload is too large to record in full or does not
+	// decode as JSON.
+	RawArguments string `json:"raw_arguments,omitempty"`
 	// Filtered counts items removed from a tools/list response when this
 	// message represents a response-side filter event.
 	Filtered int `json:"filtered,omitempty"`
+}
+
+// AuditArgumentsMaxLen caps the recorded tools/call arguments at 64 bytes so
+// large payloads (file contents, long SQL, etc.) don't bloat audit records.
+// When the raw arguments exceed this length, the recorded value is the
+// truncated prefix with a "..." marker appended.
+const AuditArgumentsMaxLen = 64
+
+// encodeArguments returns the audit fields for a tools/call arguments
+// payload. When raw fits under AuditArgumentsMaxLen and decodes as JSON, the
+// decoded value is returned as decoded so structured loggers nest it inline.
+// Otherwise rawStr carries a truncated raw-JSON string with a "..." suffix.
+// Exactly one of (decoded, rawStr) is set for a non-empty raw; both are zero
+// when raw is empty.
+func encodeArguments(raw []byte) (decoded any, rawStr string) {
+	if len(raw) == 0 {
+		return nil, ""
+	}
+	if len(raw) <= AuditArgumentsMaxLen {
+		var v any
+		if err := json.Unmarshal(raw, &v); err == nil {
+			return v, ""
+		}
+	}
+	const marker = "..."
+	if len(raw) <= AuditArgumentsMaxLen {
+		return nil, string(raw)
+	}
+	cut := AuditArgumentsMaxLen - len(marker)
+	for cut > 0 && raw[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return nil, string(raw[:cut]) + marker
 }
 
 // Append records a message on the trace.
@@ -146,6 +190,12 @@ func (t *Trace) MCPMessages() []map[string]any {
 		}
 		if m.Reason != "" {
 			entry["reason"] = m.Reason
+		}
+		if m.Arguments != nil {
+			entry["arguments"] = m.Arguments
+		}
+		if m.RawArguments != "" {
+			entry["raw_arguments"] = m.RawArguments
 		}
 		if m.Filtered > 0 {
 			entry["filtered"] = m.Filtered

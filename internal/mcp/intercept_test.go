@@ -60,6 +60,24 @@ func TestEvaluateRequestAllow(t *testing.T) {
 	require.Len(t, tr.Messages, 1)
 	require.Equal(t, DecisionAllow, tr.Messages[0].Decision)
 	require.Equal(t, "search_repositories", tr.Messages[0].Tool)
+	require.Equal(t, map[string]any{"q": "foo"}, tr.Messages[0].Arguments)
+	require.Empty(t, tr.Messages[0].RawArguments)
+}
+
+func TestEvaluateRequestArgumentsTruncated(t *testing.T) {
+	p := newTestPolicy(t)
+	s := p.MatchServer(newJSONRequest(t, "{}"))
+
+	huge := strings.Repeat("x", 1000)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_repositories","arguments":{"q":"` + huge + `"}}}`
+	req := newJSONRequest(t, body)
+	tr := &Trace{Server: s.Name}
+	_, err := p.EvaluateRequest(s, req, tr)
+	require.NoError(t, err)
+	require.Len(t, tr.Messages, 1)
+	require.Nil(t, tr.Messages[0].Arguments)
+	require.Len(t, tr.Messages[0].RawArguments, AuditArgumentsMaxLen)
+	require.True(t, strings.HasSuffix(tr.Messages[0].RawArguments, "..."))
 }
 
 func TestEvaluateRequestDenyToolNotAllowed(t *testing.T) {

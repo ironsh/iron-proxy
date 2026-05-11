@@ -40,17 +40,18 @@ func TestDecodeJSONRPCMalformed(t *testing.T) {
 
 func TestExtractToolCallName(t *testing.T) {
 	params := json.RawMessage(`{"name":"create_issue","arguments":{"owner":"ironsh"}}`)
-	name, args, ok := extractToolCallName(params)
+	name, args, rawArgs, ok := extractToolCallName(params)
 	require.True(t, ok)
 	require.Equal(t, "create_issue", name)
 	m, ok := args.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "ironsh", m["owner"])
+	require.Equal(t, `{"owner":"ironsh"}`, string(rawArgs))
 
-	_, _, ok = extractToolCallName(json.RawMessage(`{}`))
+	_, _, _, ok = extractToolCallName(json.RawMessage(`{}`))
 	require.False(t, ok)
 
-	_, _, ok = extractToolCallName(nil)
+	_, _, _, ok = extractToolCallName(nil)
 	require.False(t, ok)
 }
 

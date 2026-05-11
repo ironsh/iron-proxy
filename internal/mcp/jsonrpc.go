@@ -98,31 +98,33 @@ func batchErrorResponseBody(ids []json.RawMessage, code int, message string) ([]
 	return json.Marshal(resps)
 }
 
-// extractToolCallName pulls the tool name and decoded arguments from a
-// tools/call params payload. Returns ("", nil, false) when the params do not
-// carry a recognizable tool name (caller treats this as malformed).
-func extractToolCallName(params json.RawMessage) (string, any, bool) {
+// extractToolCallName pulls the tool name, decoded arguments, and the raw
+// arguments JSON from a tools/call params payload. Returns ("", nil, nil,
+// false) when the params do not carry a recognizable tool name (caller treats
+// this as malformed). rawArgs may be non-nil even when args is nil (e.g. the
+// arguments field is present but not a JSON object the policy can evaluate).
+func extractToolCallName(params json.RawMessage) (string, any, json.RawMessage, bool) {
 	if len(params) == 0 {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if p.Name == "" {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if len(p.Arguments) == 0 {
-		return p.Name, nil, true
+		return p.Name, nil, nil, true
 	}
 	var args any
 	if err := json.Unmarshal(p.Arguments, &args); err != nil {
-		return p.Name, nil, true
+		return p.Name, nil, p.Arguments, true
 	}
-	return p.Name, args, true
+	return p.Name, args, p.Arguments, true
 }
 
 // filterToolsListResult takes a tools/list result payload and returns a new
