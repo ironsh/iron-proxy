@@ -101,7 +101,7 @@ func (p *Policy) EvaluateRequest(server *Server, req *http.Request, trace *Trace
 		case MethodToolsCall:
 			name, args, rawArgs, ok := extractToolCallName(m.Params)
 			entry.Tool = name
-			entry.Arguments = truncateArguments(rawArgs)
+			entry.Arguments = encodeArguments(rawArgs)
 			if !ok {
 				entry.Decision = DecisionDeny
 				entry.Reason = ReasonMalformedJSONRPC
