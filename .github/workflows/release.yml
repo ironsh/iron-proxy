@@ -38,6 +38,16 @@ jobs:
         with:
           go-version: "1.26"
 
+      - name: Install musl toolchain
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Docker
+        if: matrix.goos == 'darwin'
+        run: |
+          brew install --quiet docker colima
+          colima start
+
       - name: Run GoReleaser (split)
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
@@ -51,6 +61,7 @@ jobs:
         env:
           GGOOS: ${{ matrix.goos }}
           GGOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.goos == 'linux' && 'musl-gcc' || '' }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
