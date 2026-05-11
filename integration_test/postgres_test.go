@@ -423,7 +423,7 @@ func TestPostgresMultipleServers(t *testing.T) {
 		defer cancel()
 		conn, err := pgconn.Connect(ctx, connStrTo(addr))
 		require.NoError(t, err)
-		defer conn.Close(context.Background())
+		defer func() { _ = conn.Close(context.Background()) }()
 		results, err := conn.Exec(ctx, "SELECT current_role").ReadAll()
 		require.NoError(t, err)
 		require.Len(t, results, 1)

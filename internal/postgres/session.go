@@ -393,7 +393,7 @@ func (r *relay) serverToClient() {
 			}
 			return
 		}
-		r.writeClient(msg.(pgproto3.BackendMessage))
+		r.writeClient(msg)
 	}
 }
 
