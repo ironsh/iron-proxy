@@ -43,7 +43,7 @@ type Proxy struct {
 	transport      *http.Transport
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
-	mcpPolicy      *mcp.Policy
+	mcpPolicy      *mcp.PolicyHolder
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -67,7 +67,7 @@ type Options struct {
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
 	Guard      *dnsguard.Guard // nil is treated as an empty (no-op) guard
-	MCPPolicy  *mcp.Policy     // optional MCP-aware policy interceptor
+	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -319,14 +319,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 
 	// MCP policy: evaluate the request against any matching MCP server. Runs
 	// after the transform pipeline so allowlist/secrets have already applied.
+	// Snapshot once per request so a hot-swap mid-request stays consistent.
+	mcpPolicy := p.mcpPolicy.Load()
 	var mcpServer *mcp.Server
 	var mcpTrace *mcp.Trace
-	if p.mcpPolicy != nil {
-		if s := p.mcpPolicy.MatchServer(r); s != nil {
+	if mcpPolicy != nil {
+		if s := mcpPolicy.MatchServer(r); s != nil {
 			mcpServer = s
 			mcpTrace = &mcp.Trace{Server: s.Name}
 			result.MCP = mcpTrace
-			rejectResp, err := p.mcpPolicy.EvaluateRequest(s, r, mcpTrace)
+			rejectResp, err := mcpPolicy.EvaluateRequest(s, r, mcpTrace)
 			if err != nil {
 				result.Action = transform.ActionContinue
 				result.StatusCode = http.StatusBadGateway
@@ -410,9 +412,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	// messages on streams from a matched MCP server. WrapResponseBody
 	// returns a *transform.BufferedBody (or the original body untouched)
 	// so the proxy's streamSSE/writeResponse paths can consume it directly.
-	if mcpServer != nil && p.mcpPolicy != nil {
+	if mcpServer != nil && mcpPolicy != nil {
 		ct := finalResp.Header.Get("Content-Type")
-		wrapped, err := p.mcpPolicy.WrapResponseBody(mcpServer, ct, finalResp.Body, mcpTrace)
+		wrapped, err := mcpPolicy.WrapResponseBody(mcpServer, ct, finalResp.Body, mcpTrace)
 		if err != nil {
 			p.logger.Warn("mcp response wrap error", slog.String("error", err.Error()))
 		} else if wrapped != nil {

@@ -16,34 +16,76 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// secretResolver resolves a real secret value from a source configuration.
-// Each implementation defines and decodes its own config from the raw YAML node.
-type secretResolver interface {
-	// Resolve validates the source config and fetches the initial secret value.
-	// The returned ResolveResult includes a GetValue function that may lazily
-	// refresh the value (e.g., for sources with a TTL).
-	Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error)
+// secretSource is a prepared secret. Get fetches the current value, possibly
+// from a cache; Name returns a stable display name for logging.
+type secretSource interface {
+	Name() string
+	Get(ctx context.Context) (string, error)
 }
 
-// ResolveResult holds the resolved secret and a function to get its current value.
-type ResolveResult struct {
-	Name     string                                    // display name for logging
-	GetValue func(ctx context.Context) (string, error) // returns the current secret value
+// secretSourceBuilder validates source config and returns a secretSource that
+// fetches lazily on first Get. Build must not perform I/O — only static
+// config validation.
+type secretSourceBuilder interface {
+	Build(raw yaml.Node) (secretSource, error)
 }
 
-// sourceTypeHint is used to peek at the type field before dispatching to a resolver.
+// sourceTypeHint is used to peek at the type field before dispatching to a builder.
 type sourceTypeHint struct {
 	Type string `yaml:"type"`
 }
 
-// resolverRegistry maps source type names to their resolvers.
-type resolverRegistry map[string]secretResolver
+// sourceBuilderRegistry maps source type names to their builders.
+type sourceBuilderRegistry map[string]secretSourceBuilder
 
-// --- env resolver ---
+const (
+	defaultFailureTTL = time.Minute
+	fetchTimeout      = 30 * time.Second
+)
 
-// envResolver reads secrets from environment variables.
-type envResolver struct {
+func parseTTL(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(s)
+}
+
+func newLazyValue(name string, successTTL, failureTTL time.Duration, logger *slog.Logger, fetch func(context.Context) (string, error)) *cachedValue {
+	return &cachedValue{
+		name:       name,
+		logger:     logger,
+		fetch:      fetch,
+		successTTL: successTTL,
+		failureTTL: failureTTL,
+		now:        time.Now,
+	}
+}
+
+// buildLazySource parses the TTL strings and returns a secretSource that
+// lazily invokes fetch. successTTL of 0 (empty ttlStr) caches the value
+// forever after first success. An empty failureTTLStr defaults to
+// defaultFailureTTL.
+func buildLazySource(name, ttlStr, failureTTLStr string, logger *slog.Logger, fetch func(context.Context) (string, error)) (secretSource, error) {
+	successTTL, err := parseTTL(ttlStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing ttl %q: %w", ttlStr, err)
+	}
+	failureTTL, err := parseTTL(failureTTLStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing failure_ttl %q: %w", failureTTLStr, err)
+	}
+	if failureTTL == 0 {
+		failureTTL = defaultFailureTTL
+	}
+	return newLazyValue(name, successTTL, failureTTL, logger, fetch), nil
+}
+
+// --- env builder ---
+
+// envBuilder reads secrets from environment variables.
+type envBuilder struct {
 	getenv func(string) string
+	logger *slog.Logger
 }
 
 type envConfig struct {
@@ -51,31 +93,25 @@ type envConfig struct {
 	Var  string `yaml:"var"`
 }
 
-func newEnvResolver() *envResolver {
-	return &envResolver{getenv: os.Getenv}
+func newEnvBuilder(logger *slog.Logger) *envBuilder {
+	return &envBuilder{getenv: os.Getenv, logger: logger}
 }
 
-func (r *envResolver) Resolve(_ context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *envBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg envConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing env source config: %w", err)
+		return nil, fmt.Errorf("parsing env source config: %w", err)
 	}
 	if cfg.Var == "" {
-		return ResolveResult{}, fmt.Errorf("env source requires \"var\" field")
+		return nil, fmt.Errorf("env source requires \"var\" field")
 	}
-	val := r.getenv(cfg.Var)
-	if val == "" {
-		return ResolveResult{}, fmt.Errorf("env var %q is not set or empty", cfg.Var)
-	}
-	return ResolveResult{
-		Name:     cfg.Var,
-		GetValue: staticValue(val),
-	}, nil
-}
-
-// staticValue returns a GetValue function that always returns the same value.
-func staticValue(val string) func(context.Context) (string, error) {
-	return func(context.Context) (string, error) { return val, nil }
+	return buildLazySource(cfg.Var, "", "", r.logger, func(context.Context) (string, error) {
+		v := r.getenv(cfg.Var)
+		if v == "" {
+			return "", fmt.Errorf("env var %q is not set or empty", cfg.Var)
+		}
+		return v, nil
+	})
 }
 
 // --- shared AWS client cache ---
@@ -107,84 +143,50 @@ func (c *awsClientCache[C]) get(ctx context.Context, region string) (C, error) {
 	return client, nil
 }
 
-// resolveWithTTL builds a ResolveResult with optional TTL-based caching.
-func resolveWithTTL(name, initialValue, ttlStr string, logger *slog.Logger, refresh func(context.Context) (string, error)) (ResolveResult, error) {
-	var ttl time.Duration
-	if ttlStr != "" {
-		var err error
-		ttl, err = time.ParseDuration(ttlStr)
-		if err != nil {
-			return ResolveResult{}, fmt.Errorf("parsing ttl %q: %w", ttlStr, err)
-		}
-	}
+// --- AWS Secrets Manager builder ---
 
-	var getValue func(context.Context) (string, error)
-	if ttl > 0 {
-		cv := &cachedValue{
-			value:     initialValue,
-			expiresAt: time.Now().Add(ttl),
-			ttl:       ttl,
-			logger:    logger,
-			name:      name,
-			refresh:   refresh,
-		}
-		getValue = cv.get
-	} else {
-		getValue = staticValue(initialValue)
-	}
-
-	return ResolveResult{Name: name, GetValue: getValue}, nil
-}
-
-// --- AWS Secrets Manager resolver ---
-
-// smClient is the subset of the AWS Secrets Manager API used by awsSMResolver.
+// smClient is the subset of the AWS Secrets Manager API used by awsSMBuilder.
 type smClient interface {
 	GetSecretValue(ctx context.Context, input *secretsmanager.GetSecretValueInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 }
 
-// awsSMResolver reads secrets from AWS Secrets Manager.
-type awsSMResolver struct {
+// awsSMBuilder reads secrets from AWS Secrets Manager.
+type awsSMBuilder struct {
 	clientFor func(ctx context.Context, region string) (smClient, error)
 	logger    *slog.Logger
 }
 
 type awsSMConfig struct {
-	Type     string `yaml:"type"`
-	SecretID string `yaml:"secret_id"`
-	Region   string `yaml:"region,omitempty"`
-	JSONKey  string `yaml:"json_key,omitempty"`
-	TTL      string `yaml:"ttl,omitempty"`
+	Type       string `yaml:"type"`
+	SecretID   string `yaml:"secret_id"`
+	Region     string `yaml:"region,omitempty"`
+	JSONKey    string `yaml:"json_key,omitempty"`
+	TTL        string `yaml:"ttl,omitempty"`
+	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
-func newAWSSMResolver(logger *slog.Logger) *awsSMResolver {
+func newAWSSMBuilder(logger *slog.Logger) *awsSMBuilder {
 	cache := &awsClientCache[smClient]{
 		clients:   make(map[string]smClient),
 		newClient: func(cfg aws.Config) smClient { return secretsmanager.NewFromConfig(cfg) },
 	}
-	return &awsSMResolver{clientFor: cache.get, logger: logger}
+	return &awsSMBuilder{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg awsSMConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing aws_sm source config: %w", err)
+		return nil, fmt.Errorf("parsing aws_sm source config: %w", err)
 	}
 	if cfg.SecretID == "" {
-		return ResolveResult{}, fmt.Errorf("aws_sm source requires \"secret_id\" field")
+		return nil, fmt.Errorf("aws_sm source requires \"secret_id\" field")
 	}
-
-	val, err := r.fetchSecret(ctx, cfg)
-	if err != nil {
-		return ResolveResult{}, err
-	}
-
-	return resolveWithTTL(cfg.SecretID, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	return buildLazySource(cfg.SecretID, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
 	})
 }
 
-func (r *awsSMResolver) fetchSecret(ctx context.Context, cfg awsSMConfig) (string, error) {
+func (r *awsSMBuilder) fetchSecret(ctx context.Context, cfg awsSMConfig) (string, error) {
 	client, err := r.clientFor(ctx, cfg.Region)
 	if err != nil {
 		return "", fmt.Errorf("creating AWS SM client: %w", err)
@@ -208,15 +210,15 @@ func (r *awsSMResolver) fetchSecret(ctx context.Context, cfg awsSMConfig) (strin
 	return val, nil
 }
 
-// --- AWS Systems Manager Parameter Store resolver ---
+// --- AWS Systems Manager Parameter Store builder ---
 
-// ssmClient is the subset of the AWS SSM API used by awsSSMResolver.
+// ssmClient is the subset of the AWS SSM API used by awsSSMBuilder.
 type ssmClient interface {
 	GetParameter(ctx context.Context, input *ssm.GetParameterInput, opts ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }
 
-// awsSSMResolver reads secrets from AWS Systems Manager Parameter Store.
-type awsSSMResolver struct {
+// awsSSMBuilder reads secrets from AWS Systems Manager Parameter Store.
+type awsSSMBuilder struct {
 	clientFor func(ctx context.Context, region string) (ssmClient, error)
 	logger    *slog.Logger
 }
@@ -228,40 +230,35 @@ type awsSSMConfig struct {
 	WithDecryption *bool  `yaml:"with_decryption,omitempty"`
 	JSONKey        string `yaml:"json_key,omitempty"`
 	TTL            string `yaml:"ttl,omitempty"`
+	FailureTTL     string `yaml:"failure_ttl,omitempty"`
 }
 
 func (cfg awsSSMConfig) decryptValue() bool {
 	return cfg.WithDecryption == nil || *cfg.WithDecryption
 }
 
-func newAWSSSMResolver(logger *slog.Logger) *awsSSMResolver {
+func newAWSSSMBuilder(logger *slog.Logger) *awsSSMBuilder {
 	cache := &awsClientCache[ssmClient]{
 		clients:   make(map[string]ssmClient),
 		newClient: func(cfg aws.Config) ssmClient { return ssm.NewFromConfig(cfg) },
 	}
-	return &awsSSMResolver{clientFor: cache.get, logger: logger}
+	return &awsSSMBuilder{clientFor: cache.get, logger: logger}
 }
 
-func (r *awsSSMResolver) Resolve(ctx context.Context, raw yaml.Node) (ResolveResult, error) {
+func (r *awsSSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	var cfg awsSSMConfig
 	if err := raw.Decode(&cfg); err != nil {
-		return ResolveResult{}, fmt.Errorf("parsing aws_ssm source config: %w", err)
+		return nil, fmt.Errorf("parsing aws_ssm source config: %w", err)
 	}
 	if cfg.Name == "" {
-		return ResolveResult{}, fmt.Errorf("aws_ssm source requires \"name\" field")
+		return nil, fmt.Errorf("aws_ssm source requires \"name\" field")
 	}
-
-	val, err := r.fetchParameter(ctx, cfg)
-	if err != nil {
-		return ResolveResult{}, err
-	}
-
-	return resolveWithTTL(cfg.Name, val, cfg.TTL, r.logger, func(ctx context.Context) (string, error) {
+	return buildLazySource(cfg.Name, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchParameter(ctx, cfg)
 	})
 }
 
-func (r *awsSSMResolver) fetchParameter(ctx context.Context, cfg awsSSMConfig) (string, error) {
+func (r *awsSSMBuilder) fetchParameter(ctx context.Context, cfg awsSSMConfig) (string, error) {
 	client, err := r.clientFor(ctx, cfg.Region)
 	if err != nil {
 		return "", fmt.Errorf("creating AWS SSM client: %w", err)
@@ -289,42 +286,75 @@ func (r *awsSSMResolver) fetchParameter(ctx context.Context, cfg awsSSMConfig) (
 	return val, nil
 }
 
-// --- cached value (lazy TTL refresh) ---
+// --- cached value (lazy fetch + TTL refresh + initial-failure caching) ---
 
-// cachedValue wraps a secret value with lazy TTL-based refresh. When get() is
-// called and the value has expired, it re-fetches inline. On refresh failure,
-// the stale value is returned and the error is logged.
+// cachedValue wraps a fetch function with TTL-based caching. The first get()
+// triggers the fetch. On success, the value is cached for successTTL (forever
+// if successTTL is 0). On failure before any successful fetch, the error is
+// cached for failureTTL so a struggling backend isn't hammered. After a
+// successful fetch, later refresh failures serve the stale value.
 type cachedValue struct {
-	mu        sync.Mutex
-	value     string
-	expiresAt time.Time
-	ttl       time.Duration
-	logger    *slog.Logger
-	name      string
-	refresh   func(ctx context.Context) (string, error)
+	mu         sync.Mutex
+	name       string
+	logger     *slog.Logger
+	fetch      func(ctx context.Context) (string, error)
+	successTTL time.Duration
+	failureTTL time.Duration
+	now        func() time.Time
+
+	initialized bool
+	value       string
+	lastErr     error
+	expiresAt   time.Time
 }
 
-func (cv *cachedValue) get(ctx context.Context) (string, error) {
+func (cv *cachedValue) Name() string { return cv.name }
+
+func (cv *cachedValue) Get(ctx context.Context) (string, error) {
 	cv.mu.Lock()
 	defer cv.mu.Unlock()
 
-	if time.Now().Before(cv.expiresAt) {
-		return cv.value, nil
+	if cv.initialized {
+		if cv.successTTL == 0 || cv.now().Before(cv.expiresAt) {
+			return cv.value, nil
+		}
+	} else if cv.now().Before(cv.expiresAt) {
+		return "", cv.lastErr
 	}
 
-	val, err := cv.refresh(ctx)
+	// Detach from the caller's context so a single client cancellation can't
+	// poison the failure cache for unrelated requests.
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+	defer cancel()
+	val, err := cv.fetch(fetchCtx)
 	if err != nil {
-		cv.logger.Warn("failed to refresh secret, serving stale value",
-			"secret", cv.name,
-			"error", err,
-		)
-		// Retry again after half the TTL to avoid hammering on every request.
-		cv.expiresAt = time.Now().Add(cv.ttl / 2)
-		return cv.value, nil
+		if cv.initialized {
+			cv.expiresAt = cv.now().Add(cv.successTTL / 2)
+			if cv.logger != nil {
+				cv.logger.Warn("failed to refresh secret, serving stale value",
+					"secret", cv.name,
+					"error", err,
+				)
+			}
+			return cv.value, nil
+		}
+		cv.lastErr = err
+		cv.expiresAt = cv.now().Add(cv.failureTTL)
+		if cv.logger != nil {
+			cv.logger.Warn("failed to fetch secret, caching error",
+				"secret", cv.name,
+				"error", err,
+				"retry_in", cv.failureTTL,
+			)
+		}
+		return "", err
 	}
-
 	cv.value = val
-	cv.expiresAt = time.Now().Add(cv.ttl)
+	cv.initialized = true
+	cv.lastErr = nil
+	if cv.successTTL > 0 {
+		cv.expiresAt = cv.now().Add(cv.successTTL)
+	}
 	return cv.value, nil
 }
 

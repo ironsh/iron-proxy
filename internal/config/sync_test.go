@@ -125,3 +125,61 @@ func TestTransformsFromSync_EmptySecrets(t *testing.T) {
 	require.Len(t, transforms, 1)
 	require.Equal(t, "secrets", transforms[0].Name)
 }
+
+func TestMCPFromSync_Nil(t *testing.T) {
+	node, present, err := MCPFromSync(nil)
+	require.NoError(t, err)
+	require.False(t, present)
+	require.Equal(t, 0, int(node.Kind))
+}
+
+func TestMCPFromSync_NullJSON(t *testing.T) {
+	node, present, err := MCPFromSync(json.RawMessage("null"))
+	require.NoError(t, err)
+	require.False(t, present)
+	require.Equal(t, 0, int(node.Kind))
+}
+
+func TestMCPFromSync_EmptyObject(t *testing.T) {
+	node, present, err := MCPFromSync(json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.True(t, present)
+	require.NotEqual(t, 0, int(node.Kind))
+}
+
+func TestMCPFromSync_RoundTrip(t *testing.T) {
+	raw := json.RawMessage(`{"error":{"code":-32099,"message":"nope"},"servers":[{"name":"github","rules":[{"host":"api.github.com"}],"tools":[{"name":"list_repos"}]}]}`)
+	node, present, err := MCPFromSync(raw)
+	require.NoError(t, err)
+	require.True(t, present)
+
+	var decoded struct {
+		Error struct {
+			Code    *int    `yaml:"code"`
+			Message *string `yaml:"message"`
+		} `yaml:"error"`
+		Servers []struct {
+			Name  string `yaml:"name"`
+			Rules []struct {
+				Host string `yaml:"host"`
+			} `yaml:"rules"`
+			Tools []struct {
+				Name string `yaml:"name"`
+			} `yaml:"tools"`
+		} `yaml:"servers"`
+	}
+	require.NoError(t, node.Decode(&decoded))
+	require.NotNil(t, decoded.Error.Code)
+	require.Equal(t, -32099, *decoded.Error.Code)
+	require.NotNil(t, decoded.Error.Message)
+	require.Equal(t, "nope", *decoded.Error.Message)
+	require.Len(t, decoded.Servers, 1)
+	require.Equal(t, "github", decoded.Servers[0].Name)
+	require.Equal(t, "api.github.com", decoded.Servers[0].Rules[0].Host)
+	require.Equal(t, "list_repos", decoded.Servers[0].Tools[0].Name)
+}
+
+func TestMCPFromSync_InvalidJSON(t *testing.T) {
+	_, _, err := MCPFromSync(json.RawMessage(`{bad json`))
+	require.ErrorContains(t, err, "parsing mcp")
+}

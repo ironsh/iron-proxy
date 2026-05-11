@@ -30,9 +30,9 @@ func TestPollerInitialSync(t *testing.T) {
 	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
 
 	var updateCalled atomic.Int32
-	poller := NewPoller(client, "", func(rules json.RawMessage, secrets json.RawMessage) error {
+	poller := NewPoller(client, "", func(u SyncUpdate) error {
 		updateCalled.Add(1)
-		require.NotNil(t, rules)
+		require.NotNil(t, u.Rules)
 		return nil
 	}, testLogger())
 
@@ -46,6 +46,38 @@ func TestPollerInitialSync(t *testing.T) {
 	require.GreaterOrEqual(t, updateCalled.Load(), int32(1))
 }
 
+func TestPollerInitialSyncDeliversMCP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SyncResponse{
+			ConfigHash: "sha256:mcp",
+			MCP:        json.RawMessage(`{"servers":[]}`),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, testLogger())
+	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+
+	var got SyncUpdate
+	var called atomic.Int32
+	poller := NewPoller(client, "", func(u SyncUpdate) error {
+		called.Add(1)
+		got = u
+		return nil
+	}, testLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := poller.Run(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, called.Load(), int32(1))
+	require.JSONEq(t, `{"servers":[]}`, string(got.MCP))
+	require.False(t, isNonNullJSON(got.Rules))
+	require.False(t, isNonNullJSON(got.Secrets))
+}
+
 func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -57,7 +89,7 @@ func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
 
 	var updateCalled atomic.Int32
-	poller := NewPoller(client, "sha256:same", func(rules json.RawMessage, secrets json.RawMessage) error {
+	poller := NewPoller(client, "sha256:same", func(u SyncUpdate) error {
 		updateCalled.Add(1)
 		return nil
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))

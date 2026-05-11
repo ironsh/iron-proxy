@@ -380,15 +380,20 @@ Secret sources:
 
 - **`env`:** reads `var` from the proxy process environment.
 - **`aws_sm`:** reads `secret_id` from AWS Secrets Manager. Optional `region`,
-  `json_key`, and `ttl` are supported.
+  `json_key`, `ttl`, and `failure_ttl` are supported.
 - **`aws_ssm`:** reads `name` from AWS Systems Manager Parameter Store. Optional
-  `region`, `with_decryption`, `json_key`, and `ttl` are supported.
+  `region`, `with_decryption`, `json_key`, `ttl`, and `failure_ttl` are supported.
   `with_decryption` defaults to `true`, which is the expected setting for
   `SecureString` parameters.
 - **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
   reference) using a 1Password service account token. The token is read from
   `OP_SERVICE_ACCOUNT_TOKEN` by default; override with `token_env`. Optional
-  `ttl` is supported.
+  `ttl` and `failure_ttl` are supported.
+
+`ttl` controls how long a successfully fetched value is cached before refresh
+(empty caches forever). `failure_ttl` controls how long a fetch error is
+cached before retrying; it defaults to 1m and is independent of `ttl`, so a
+long success TTL does not delay recovery from a transient backend outage.
 
   > **Note:** a bug in `onepassword-sdk-go` breaks builds with `CGO_ENABLED=0`,
   > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)

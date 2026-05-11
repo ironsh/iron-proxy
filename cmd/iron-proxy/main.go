@@ -116,11 +116,12 @@ func main() {
 	// and (in managed mode) the config poller.
 	errc := make(chan error, 5)
 	var holder *transform.PipelineHolder
+	var mcpHolder *mcp.PolicyHolder
 	var otelCfg iotel.ExportConfig
 
 	if managed {
 		var ingestToken string
-		holder, ingestToken = initManaged(ctx, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
+		holder, mcpHolder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -128,7 +129,7 @@ func main() {
 			}
 		}
 	} else {
-		holder = initStandalone(cfg, bodyLimits, logger)
+		holder, mcpHolder = initStandalone(cfg, bodyLimits, logger)
 	}
 
 	// 5. Validate the fully-assembled config.
@@ -199,15 +200,6 @@ func main() {
 		)
 	}
 
-	mcpPolicy, err := mcp.LoadFromNode(cfg.MCP)
-	if err != nil {
-		logger.Error("loading mcp policy", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-	if mcpPolicy != nil {
-		logger.Info("mcp policy enabled")
-	}
-
 	pgPolicy, err := postgres.LoadFromNode(cfg.Postgres)
 	if err != nil {
 		logger.Error("loading postgres config", slog.String("error", err.Error()))
@@ -228,7 +220,7 @@ func main() {
 		Pipeline:                      holder,
 		Resolver:                      resolver,
 		Guard:                         guard,
-		MCPPolicy:                     mcpPolicy,
+		MCPPolicy:                     mcpHolder,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 	})
@@ -242,7 +234,7 @@ func main() {
 		mgmtServer = management.New(management.Options{
 			Addr:   cfg.Management.Listen,
 			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
-			Reload: newReloadFunc(*configPath, holder, bodyLimits, logger),
+			Reload: newReloadFunc(*configPath, holder, mcpHolder, bodyLimits, logger),
 			Logger: logger,
 		})
 	}
@@ -318,10 +310,14 @@ func main() {
 }
 
 // initManaged registers with the control plane, performs an initial sync, builds
-// the initial pipeline, and starts the config poller. The poller runs until ctx
-// is canceled and sends fatal errors on errc. Returns the pipeline holder and
-// the ingest token from the initial sync (empty if the sync failed).
-func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, string) {
+// the initial pipeline and MCP policy, and starts the config poller. The poller
+// runs until ctx is canceled and sends fatal errors on errc. Returns the
+// pipeline holder, the MCP policy holder, and the ingest token from the initial
+// sync (empty if the sync failed).
+//
+// Initial MCP policy preference: control-plane-supplied mcp block first, then
+// fall back to cfg.MCP from the YAML if the sync did not include one.
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
@@ -368,13 +364,14 @@ func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan
 
 	configHash := ""
 	ingestToken := ""
-	var initialRules, initialSecrets json.RawMessage
+	var initialRules, initialSecrets, initialMCP json.RawMessage
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
 		initialRules = syncResp.Rules
 		initialSecrets = syncResp.Secrets
+		initialMCP = syncResp.MCP
 		ingestToken = syncResp.IngestToken
-		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 {
+		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 || len(syncResp.MCP) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
 			)
@@ -395,9 +392,23 @@ func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan
 	}
 	holder := transform.NewPipelineHolder(pipeline)
 
+	// Build initial MCP policy: prefer the control-plane-supplied block; fall
+	// back to cfg.MCP from the YAML so an operator can ship a default that
+	// applies until the first sync arrives.
+	mcpHolder, err := buildInitialMCPHolder(cfg, initialMCP, logger)
+	if err != nil {
+		logger.Error("building initial mcp policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	// Start config poller.
-	poller := controlplane.NewPoller(client, configHash, func(rules json.RawMessage, secrets json.RawMessage) error {
-		applyPipelineSync(holder, bodyLimits, logger, rules, secrets)
+	poller := controlplane.NewPoller(client, configHash, func(u controlplane.SyncUpdate) error {
+		if u.Rules != nil || u.Secrets != nil {
+			applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets)
+		}
+		if u.MCP != nil {
+			applyMCPSync(mcpHolder, logger, u.MCP)
+		}
 		return nil
 	}, logger)
 
@@ -405,17 +416,46 @@ func initManaged(ctx context.Context, bodyLimits transform.BodyLimits, errc chan
 		errc <- poller.Run(ctx)
 	}()
 
-	return holder, ingestToken
+	return holder, mcpHolder, ingestToken
 }
 
-// initStandalone builds the pipeline from the YAML config's transforms.
-func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger *slog.Logger) *transform.PipelineHolder {
+// buildInitialMCPHolder picks the initial MCP policy source: a control-plane
+// MCP block when present, otherwise the YAML cfg.MCP fallback. A nil holder
+// means "no policy configured"; the proxy treats it as MCP disabled.
+func buildInitialMCPHolder(cfg *config.Config, initialMCP json.RawMessage, logger *slog.Logger) (*mcp.PolicyHolder, error) {
+	node, present, err := config.MCPFromSync(initialMCP)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		node = cfg.MCP
+	}
+	policy, err := mcp.LoadFromNode(node)
+	if err != nil {
+		return nil, err
+	}
+	if policy != nil {
+		logger.Info("mcp policy enabled")
+	}
+	return mcp.NewPolicyHolder(policy), nil
+}
+
+// initStandalone builds the pipeline and MCP policy from the YAML config.
+func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder) {
 	pipeline, err := buildPipeline(cfg.Transforms, bodyLimits, logger)
 	if err != nil {
 		logger.Error("building transform pipeline", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
-	return transform.NewPipelineHolder(pipeline)
+	mcpPolicy, err := mcp.LoadFromNode(cfg.MCP)
+	if err != nil {
+		logger.Error("loading mcp policy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if mcpPolicy != nil {
+		logger.Info("mcp policy enabled")
+	}
+	return transform.NewPipelineHolder(pipeline), mcp.NewPolicyHolder(mcpPolicy)
 }
 
 // stateStorePath returns the state store path without creating any directories.
@@ -459,11 +499,40 @@ func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.Bo
 	logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
 }
 
+// applyMCPSync compiles a new MCP policy from a sync payload and atomically
+// swaps it in. Parse or compile errors are logged and the prior policy is
+// preserved: an invalid push from the control plane must not take down a
+// running proxy. An empty/null mcp block is interpreted by the caller as
+// "no update" and is not delivered here.
+func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMessage) {
+	node, present, err := config.MCPFromSync(raw)
+	if err != nil {
+		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
+		return
+	}
+	if !present {
+		// Should not happen — caller filters absent/null — but treat as no-op.
+		return
+	}
+	policy, err := mcp.LoadFromNode(node)
+	if err != nil {
+		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
+		return
+	}
+	holder.Store(policy)
+	if policy == nil {
+		logger.Info("mcp policy cleared by control plane")
+	} else {
+		logger.Info("mcp policy reloaded")
+	}
+}
+
 // newReloadFunc returns a management.ReloadFunc that re-reads the YAML config
-// from configPath, rebuilds the pipeline, and atomically swaps it in. Parse,
-// validation, and pipeline-build errors are wrapped in *management.ValidationError
-// so the management server returns 422; the existing pipeline is preserved.
-func newReloadFunc(configPath string, holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+// from configPath, rebuilds the pipeline and MCP policy, and atomically swaps
+// them in. Parse, validation, and build errors are wrapped in
+// *management.ValidationError so the management server returns 422; the
+// existing pipeline and policy are preserved.
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
 	return func() error {
 		newCfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -476,8 +545,13 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, bodyLimi
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
+		newPolicy, err := mcp.LoadFromNode(newCfg.MCP)
+		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 		holder.Store(newPipeline)
+		mcpHolder.Store(newPolicy)
 		logger.Info("pipeline reloaded via management API", slog.String("transforms", newPipeline.Names()))
 		return nil
 	}

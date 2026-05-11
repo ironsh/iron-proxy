@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -57,14 +56,16 @@ type injectConfig struct {
 	Header     string `yaml:"header,omitempty"`
 	QueryParam string `yaml:"query_param,omitempty"`
 	Formatter  string `yaml:"formatter,omitempty"`
+	// Require rejects the request when the secret is unavailable. When
+	// false (default), an unavailable secret is skipped silently.
+	Require bool `yaml:"require,omitempty"`
 }
 
 // resolvedSecret is a secret ready for use after config parsing and source resolution.
 type resolvedSecret struct {
-	name     string // source name, for logging/metrics
-	mode     string // "replace" or "inject"
-	getValue func(ctx context.Context) (string, error)
-	rules    []hostmatch.Rule
+	source secretSource
+	mode   string // "replace" or "inject"
+	rules  []hostmatch.Rule
 
 	// replace mode fields
 	proxyValue   string
@@ -128,19 +129,17 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing secrets config: %w", err)
 	}
-	registry := resolverRegistry{
-		"env":       newEnvResolver(),
-		"aws_sm":    newAWSSMResolver(logger),
-		"aws_ssm":   newAWSSSMResolver(logger),
-		"1password": newOPResolver(logger),
+	registry := sourceBuilderRegistry{
+		"env":       newEnvBuilder(logger),
+		"aws_sm":    newAWSSMBuilder(logger),
+		"aws_ssm":   newAWSSSMBuilder(logger),
+		"1password": newOPBuilder(logger),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return newFromConfig(ctx, c, registry)
+	return newFromConfig(c, registry)
 }
 
 // newFromConfig creates a Secrets transform from a parsed config.
-func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegistry) (*Secrets, error) {
+func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets, error) {
 	resolved := make([]resolvedSecret, 0, len(cfg.Secrets))
 
 	for i, entry := range cfg.Secrets {
@@ -150,7 +149,7 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 			return nil, err
 		}
 
-		// Peek at source type to dispatch to the right resolver.
+		// Peek at source type to dispatch to the right builder.
 		var hint sourceTypeHint
 		if err := entry.Source.Decode(&hint); err != nil {
 			return nil, fmt.Errorf("secrets[%d]: parsing source type: %w", i, err)
@@ -159,12 +158,12 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 			return nil, fmt.Errorf("secrets[%d]: source.type is required", i)
 		}
 
-		resolver, ok := registry[hint.Type]
+		builder, ok := registry[hint.Type]
 		if !ok {
 			return nil, fmt.Errorf("secrets[%d]: unsupported source type %q", i, hint.Type)
 		}
 
-		result, err := resolver.Resolve(ctx, entry.Source)
+		source, err := builder.Build(entry.Source)
 		if err != nil {
 			return nil, fmt.Errorf("secrets[%d]: %w", i, err)
 		}
@@ -176,10 +175,10 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 
 		if inject != nil {
 			sec := resolvedSecret{
-				name:             result.Name,
+				source:           source,
 				mode:             "inject",
-				getValue:         result.GetValue,
 				rules:            rules,
+				require:          inject.Require,
 				injectHeader:     inject.Header,
 				injectQueryParam: inject.QueryParam,
 			}
@@ -197,10 +196,9 @@ func newFromConfig(ctx context.Context, cfg secretsConfig, registry resolverRegi
 				return nil, err
 			}
 			resolved = append(resolved, resolvedSecret{
-				name:         result.Name,
+				source:       source,
 				mode:         "replace",
 				proxyValue:   replace.ProxyValue,
-				getValue:     result.GetValue,
 				matchHeaders: matchers,
 				matchBody:    replace.MatchBody,
 				matchPath:    replace.MatchPath,
@@ -292,24 +290,32 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		Locations []string `json:"locations"`
 	}
 	var swapped, injected []secretRecord
+	var unavailable []string
 
 	for _, sec := range s.secrets {
 		if !hostmatch.MatchAnyRule(sec.rules, req) {
 			continue
 		}
 
-		realValue, err := sec.getValue(ctx)
+		name := sec.source.Name()
+		realValue, err := sec.source.Get(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("resolving secret %q: %w", sec.name, err)
+			if sec.require {
+				tctx.Annotate("rejected", name)
+				tctx.Annotate("reject_reason", "secret_unavailable")
+				return &transform.TransformResult{Action: transform.ActionReject}, nil
+			}
+			unavailable = append(unavailable, name)
+			continue
 		}
 
 		if sec.mode == "inject" {
 			locations, err := s.injectSecret(req, &sec, realValue)
 			if err != nil {
-				return nil, fmt.Errorf("injecting secret %q: %w", sec.name, err)
+				return nil, fmt.Errorf("injecting secret %q: %w", name, err)
 			}
 			if len(locations) > 0 {
-				injected = append(injected, secretRecord{Secret: sec.name, Locations: locations})
+				injected = append(injected, secretRecord{Secret: name, Locations: locations})
 			}
 			continue
 		}
@@ -331,9 +337,9 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		}
 
 		if len(locations) > 0 {
-			swapped = append(swapped, secretRecord{Secret: sec.name, Locations: locations})
+			swapped = append(swapped, secretRecord{Secret: name, Locations: locations})
 		} else if sec.require {
-			tctx.Annotate("rejected", sec.name)
+			tctx.Annotate("rejected", name)
 			return &transform.TransformResult{Action: transform.ActionReject}, nil
 		}
 	}
@@ -343,6 +349,9 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 	if len(injected) > 0 {
 		tctx.Annotate("injected", injected)
+	}
+	if len(unavailable) > 0 {
+		tctx.Annotate("secret_unavailable", unavailable)
 	}
 
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil

@@ -12,16 +12,25 @@ import (
 // PollInterval is the base interval between sync calls.
 const PollInterval = 5 * time.Second
 
+// SyncUpdate is the slice of a SyncResponse passed to the poller's update
+// callback. Fields are nil or JSON null when the control plane did not include
+// them in this sync.
+type SyncUpdate struct {
+	Rules   json.RawMessage
+	Secrets json.RawMessage
+	MCP     json.RawMessage
+}
+
 // Poller periodically calls Sync and applies config updates.
 type Poller struct {
 	client     *Client
 	configHash string
-	onUpdate   func(rules json.RawMessage, secrets json.RawMessage) error
+	onUpdate   func(SyncUpdate) error
 	logger     *slog.Logger
 }
 
 // NewPoller creates a new sync poller.
-func NewPoller(client *Client, initialConfigHash string, onUpdate func(json.RawMessage, json.RawMessage) error, logger *slog.Logger) *Poller {
+func NewPoller(client *Client, initialConfigHash string, onUpdate func(SyncUpdate) error, logger *slog.Logger) *Poller {
 	return &Poller{
 		client:     client,
 		configHash: initialConfigHash,
@@ -70,15 +79,21 @@ func (p *Poller) sync(ctx context.Context) error {
 
 	hasRules := isNonNullJSON(resp.Rules)
 	hasSecrets := isNonNullJSON(resp.Secrets)
+	hasMCP := isNonNullJSON(resp.MCP)
 
-	if hasRules || hasSecrets {
+	if hasRules || hasSecrets || hasMCP {
 		p.logger.Info("config update received from control plane",
 			slog.String("config_hash", resp.ConfigHash),
 			slog.Bool("has_rules", hasRules),
 			slog.Bool("has_secrets", hasSecrets),
+			slog.Bool("has_mcp", hasMCP),
 		)
 		if p.onUpdate != nil {
-			if err := p.onUpdate(resp.Rules, resp.Secrets); err != nil {
+			if err := p.onUpdate(SyncUpdate{
+				Rules:   resp.Rules,
+				Secrets: resp.Secrets,
+				MCP:     resp.MCP,
+			}); err != nil {
 				p.logger.Error("applying config update", slog.String("error", err.Error()))
 			}
 		}

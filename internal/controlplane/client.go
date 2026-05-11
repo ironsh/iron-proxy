@@ -23,6 +23,7 @@ type SyncResponse struct {
 	ConfigHash  string          `json:"config_hash"`
 	Rules       json.RawMessage `json:"rules"`
 	Secrets     json.RawMessage `json:"secrets"`
+	MCP         json.RawMessage `json:"mcp"`
 	IngestToken string          `json:"ingest_token"`
 }
 

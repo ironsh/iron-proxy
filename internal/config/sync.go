@@ -41,6 +41,37 @@ func TransformsFromSync(rules, secrets json.RawMessage) ([]Transform, error) {
 	return transforms, nil
 }
 
+// MCPFromSync converts a JSON document for the top-level mcp: block into a
+// yaml.Node so internal/mcp.LoadFromNode can decode it the same way as the
+// YAML config path.
+//
+// present is true when raw is non-nil and not JSON null. Callers use it to
+// distinguish "the control plane sent an mcp block" (apply, even if empty)
+// from "the control plane omitted mcp" (preserve current state).
+func MCPFromSync(raw json.RawMessage) (node yaml.Node, present bool, err error) {
+	if !isNonNullJSON(raw) {
+		return yaml.Node{}, false, nil
+	}
+	node, err = yamlNodeFromRawJSON(raw)
+	if err != nil {
+		return yaml.Node{}, false, fmt.Errorf("parsing mcp: %w", err)
+	}
+	return node, true, nil
+}
+
+// yamlNodeFromRawJSON parses raw JSON bytes as a yaml.Node. JSON is valid YAML,
+// and gopkg.in/yaml.v3 handles it natively.
+func yamlNodeFromRawJSON(raw []byte) (yaml.Node, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return yaml.Node{}, fmt.Errorf("unmarshaling JSON as YAML: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return yaml.Node{}, fmt.Errorf("unexpected YAML structure")
+	}
+	return *doc.Content[0], nil
+}
+
 // yamlNodeFromJSON marshals v to JSON, then parses as a yaml.Node. This works
 // because JSON is valid YAML, and gopkg.in/yaml.v3 handles it natively.
 func yamlNodeFromJSON(v any) (yaml.Node, error) {
