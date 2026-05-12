@@ -1,9 +1,10 @@
 services:
   connect-api:
     image: 1password/connect-api:latest
-    network_mode: host
-    environment:
-      OP_HTTP_PORT: "8080"
+    dns:
+      - 8.8.8.8
+    ports:
+      - "8080:8080"
     volumes:
       - "./1password-credentials.json:/home/opuser/.op/1password-credentials.json:ro"
       - "data:/home/opuser/.op/data"
@@ -11,9 +12,10 @@ services:
 
   connect-sync:
     image: 1password/connect-sync:latest
-    network_mode: host
-    environment:
-      OP_HTTP_PORT: "8081"
+    dns:
+      - 8.8.8.8
+    ports:
+      - "8081:8080"
     volumes:
       - "./1password-credentials.json:/home/opuser/.op/1password-credentials.json:ro"
       - "data:/home/opuser/.op/data"
