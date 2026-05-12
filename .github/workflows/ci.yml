@@ -50,17 +50,26 @@ jobs:
         working-directory: integration_test/op_connect
         env:
           OP_CONNECT_CREDENTIALS_JSON: ${{ secrets.OP_CONNECT_CREDENTIALS_JSON }}
+          OP_CONNECT_TOKEN: ${{ secrets.OP_CONNECT_TOKEN }}
         run: |
           printf '%s' "$OP_CONNECT_CREDENTIALS_JSON" > 1password-credentials.json
           docker compose up -d
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8080/heartbeat >/dev/null 2>&1; then
-              echo "Connect server is up"
+          # Wait for connect-sync to populate the shared data volume so the
+          # API can actually serve vault contents. /heartbeat returns 200 as
+          # soon as the API process is listening, so we probe /v1/vaults
+          # (auth required) instead.
+          for i in $(seq 1 120); do
+            code=$(curl -s -o /tmp/vaults.out -w '%{http_code}' \
+              -H "Authorization: Bearer $OP_CONNECT_TOKEN" \
+              http://localhost:8080/v1/vaults || true)
+            if [ "$code" = "200" ]; then
+              echo "Connect server is ready (vault sync complete)"
               exit 0
             fi
             sleep 1
           done
-          echo "Connect server failed to become ready" >&2
+          echo "Connect server failed to become ready (last status: $code)" >&2
+          cat /tmp/vaults.out >&2 || true
           docker compose logs
           exit 1
 
@@ -75,6 +84,11 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           OP_CONNECT_HOST: http://localhost:8080
           OP_CONNECT_TOKEN: ${{ secrets.OP_CONNECT_TOKEN }}
+
+      - name: Dump 1Password Connect logs
+        if: failure()
+        working-directory: integration_test/op_connect
+        run: docker compose logs || true
 
       - name: Stop 1Password Connect server
         if: always()
