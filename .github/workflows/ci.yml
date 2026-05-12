@@ -58,10 +58,11 @@ jobs:
           # API can actually serve vault contents. /heartbeat returns 200 as
           # soon as the API process is listening, so we probe /v1/vaults
           # (auth required) instead.
-          for i in $(seq 1 120); do
-            code=$(curl -s -o /tmp/vaults.out -w '%{http_code}' \
+          for i in $(seq 1 30); do
+            code=$(curl -s --max-time 2 -o /tmp/vaults.out -w '%{http_code}' \
               -H "Authorization: Bearer $OP_CONNECT_TOKEN" \
               http://localhost:8080/v1/vaults || true)
+            echo "attempt $i: /v1/vaults -> $code"
             if [ "$code" = "200" ]; then
               echo "Connect server is ready (vault sync complete)"
               exit 0
