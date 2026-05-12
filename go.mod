@@ -3,6 +3,7 @@ module github.com/ironsh/iron-proxy
 go 1.26.1
 
 require (
+	github.com/1Password/connect-sdk-go v1.5.3
 	github.com/1password/onepassword-sdk-go v0.4.0
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
@@ -31,7 +32,6 @@ require (
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
-	github.com/1Password/connect-sdk-go v1.5.3 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10 // indirect
