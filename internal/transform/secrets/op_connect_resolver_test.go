@@ -405,40 +405,6 @@ func TestParseOPRef(t *testing.T) {
 	}
 }
 
-func TestOPRefEncoded(t *testing.T) {
-	tests := []struct {
-		name string
-		in   opRef
-		want string
-	}{
-		{
-			name: "alphanumeric segments unchanged",
-			in:   opRef{vault: "Engineering", item: "OpenAI", field: "credential"},
-			want: "op://Engineering/OpenAI/credential",
-		},
-		{
-			name: "spaces and ampersand escaped",
-			in:   opRef{vault: "AI Keys & Passwords", item: "OpenAI", field: "credential"},
-			want: "op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-		},
-		{
-			name: "slash in segment is escaped",
-			in:   opRef{vault: "AI/Keys", item: "item", field: "field"},
-			want: "op://AI%2FKeys/item/field",
-		},
-		{
-			name: "section included",
-			in:   opRef{vault: "v", item: "i", section: "my section", field: "key"},
-			want: "op://v/i/my%20section/key",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, tt.in.encoded())
-		})
-	}
-}
-
 func TestSelectField(t *testing.T) {
 	item := sampleItem()
 

@@ -143,41 +143,6 @@ func parseOPRef(ref string) (opRef, error) {
 	return out, nil
 }
 
-// encoded returns the canonical "op://..." form of r with each segment
-// percent-encoded so the result is safe to pass to URL parsers and to the
-// 1Password SDK's reference resolver. Escaping is stricter than
-// url.PathEscape: every byte outside the RFC 3986 "unreserved" set is encoded,
-// including sub-delims like "&" that the 1Password parser is sensitive to.
-func (r opRef) encoded() string {
-	if r.section != "" {
-		return "op://" + opSegmentEscape(r.vault) +
-			"/" + opSegmentEscape(r.item) +
-			"/" + opSegmentEscape(r.section) +
-			"/" + opSegmentEscape(r.field)
-	}
-	return "op://" + opSegmentEscape(r.vault) +
-		"/" + opSegmentEscape(r.item) +
-		"/" + opSegmentEscape(r.field)
-}
-
-func opSegmentEscape(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z',
-			c >= 'A' && c <= 'Z',
-			c >= '0' && c <= '9',
-			c == '-', c == '.', c == '_', c == '~':
-			b.WriteByte(c)
-		default:
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
-}
-
 // selectField returns the value of the field identified by ref on item.
 // Field is matched by ID or Label. When a section is specified in ref, the
 // field's Section must also match by ID or Label.

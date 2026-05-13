@@ -6,23 +6,78 @@ import (
 	"log/slog"
 	"testing"
 
+	onepassword "github.com/1password/onepassword-sdk-go"
 	"github.com/stretchr/testify/require"
 )
 
 // mockOPClient is a configurable mock for the 1Password SDK client.
 type mockOPClient struct {
-	fn func(ctx context.Context, ref string) (string, error)
+	listVaults func(ctx context.Context) ([]onepassword.VaultOverview, error)
+	listItems  func(ctx context.Context, vaultID string) ([]onepassword.ItemOverview, error)
+	getItem    func(ctx context.Context, vaultID, itemID string) (onepassword.Item, error)
 }
 
-func (m *mockOPClient) Resolve(ctx context.Context, ref string) (string, error) {
-	return m.fn(ctx, ref)
+func (m *mockOPClient) ListVaults(ctx context.Context) ([]onepassword.VaultOverview, error) {
+	return m.listVaults(ctx)
 }
 
-// staticOPClient returns an opClient that always returns the given value/error.
-func staticOPClient(value string, err error) *mockOPClient {
-	return &mockOPClient{fn: func(_ context.Context, _ string) (string, error) {
-		return value, err
-	}}
+func (m *mockOPClient) ListItems(ctx context.Context, vaultID string) ([]onepassword.ItemOverview, error) {
+	return m.listItems(ctx, vaultID)
+}
+
+func (m *mockOPClient) GetItem(ctx context.Context, vaultID, itemID string) (onepassword.Item, error) {
+	return m.getItem(ctx, vaultID, itemID)
+}
+
+func sampleSDKVaults() []onepassword.VaultOverview {
+	return []onepassword.VaultOverview{
+		{ID: "vault-uuid", Title: "Engineering"},
+	}
+}
+
+func sampleSDKItems() []onepassword.ItemOverview {
+	return []onepassword.ItemOverview{
+		{ID: "item-uuid", Title: "OpenAI", VaultID: "vault-uuid"},
+	}
+}
+
+func sampleSDKItem() onepassword.Item {
+	sectionID := "section-uuid"
+	return onepassword.Item{
+		ID:      "item-uuid",
+		Title:   "OpenAI",
+		VaultID: "vault-uuid",
+		Sections: []onepassword.ItemSection{
+			{ID: "section-uuid", Title: "api"},
+		},
+		Fields: []onepassword.ItemField{
+			{ID: "field-uuid", Title: "credential", Value: "real-secret"},
+			{ID: "other", Title: "username", Value: "alice"},
+			{
+				ID:        "section-field-uuid",
+				Title:     "api_key",
+				Value:     "section-secret",
+				SectionID: &sectionID,
+			},
+		},
+	}
+}
+
+// staticOPClient returns an opClient that always serves the same vault, item,
+// and item details — sufficient for tests that only care about the proxy
+// glue, not the lookup logic.
+func staticOPClient() *mockOPClient {
+	return &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) {
+			return sampleSDKVaults(), nil
+		},
+		listItems: func(context.Context, string) ([]onepassword.ItemOverview, error) {
+			return sampleSDKItems(), nil
+		},
+		getItem: func(context.Context, string, string) (onepassword.Item, error) {
+			return sampleSDKItem(), nil
+		},
+	}
 }
 
 func newTestOPBuilder(client opClient) *opBuilder {
@@ -39,7 +94,7 @@ func TestOPBuilder_HappyPath_DefaultTokenEnv(t *testing.T) {
 	r := &opBuilder{
 		clientFor: func(_ context.Context, tokenEnv string) (opClient, error) {
 			gotEnv = tokenEnv
-			return staticOPClient("real-secret", nil), nil
+			return staticOPClient(), nil
 		},
 		logger: slog.Default(),
 	}
@@ -63,7 +118,7 @@ func TestOPBuilder_HappyPath_CustomTokenEnv(t *testing.T) {
 	r := &opBuilder{
 		clientFor: func(_ context.Context, tokenEnv string) (opClient, error) {
 			gotEnv = tokenEnv
-			return staticOPClient("custom-token-secret", nil), nil
+			return staticOPClient(), nil
 		},
 		logger: slog.Default(),
 	}
@@ -78,12 +133,12 @@ func TestOPBuilder_HappyPath_CustomTokenEnv(t *testing.T) {
 
 	val, err := result.Get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "custom-token-secret", val)
+	require.Equal(t, "real-secret", val)
 	require.Equal(t, "CUSTOM_OP_TOKEN", gotEnv)
 }
 
 func TestOPBuilder_TTLReturnsCachedValue(t *testing.T) {
-	r := newTestOPBuilder(staticOPClient("value", nil))
+	r := newTestOPBuilder(staticOPClient())
 	node := yamlNode(t, map[string]string{
 		"type":       "1password",
 		"secret_ref": "op://Engineering/OpenAI/credential",
@@ -94,75 +149,121 @@ func TestOPBuilder_TTLReturnsCachedValue(t *testing.T) {
 
 	val, err := result.Get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "value", val)
+	require.Equal(t, "real-secret", val)
 }
 
-func TestOPBuilder_PassesSecretRefToClient(t *testing.T) {
-	var gotRef string
-	client := &mockOPClient{fn: func(_ context.Context, ref string) (string, error) {
-		gotRef = ref
-		return "v", nil
-	}}
+func TestOPBuilder_LooksUpByTitle(t *testing.T) {
+	var gotVaultID, gotItemVaultID, gotItemID string
+	client := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) {
+			return sampleSDKVaults(), nil
+		},
+		listItems: func(_ context.Context, vaultID string) ([]onepassword.ItemOverview, error) {
+			gotVaultID = vaultID
+			return sampleSDKItems(), nil
+		},
+		getItem: func(_ context.Context, vaultID, itemID string) (onepassword.Item, error) {
+			gotItemVaultID = vaultID
+			gotItemID = itemID
+			return sampleSDKItem(), nil
+		},
+	}
 	r := newTestOPBuilder(client)
 	node := yamlNode(t, map[string]string{
 		"type":       "1password",
-		"secret_ref": "op://vault/item/section/field",
+		"secret_ref": "op://Engineering/OpenAI/credential",
 	})
 	result, err := r.Build(node)
 	require.NoError(t, err)
-	_, err = result.Get(context.Background())
+	val, err := result.Get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "op://vault/item/section/field", gotRef)
+	require.Equal(t, "real-secret", val)
+	require.Equal(t, "vault-uuid", gotVaultID)
+	require.Equal(t, "vault-uuid", gotItemVaultID)
+	require.Equal(t, "item-uuid", gotItemID)
 }
 
-// TestOPBuilder_EncodesSpecialCharsForSDK verifies that vault, item, section,
-// and field names containing characters that would confuse the 1Password
-// reference parser (spaces, "&", etc.) are percent-encoded before being
-// passed to the SDK, regardless of whether the user wrote them literally or
-// already encoded.
-func TestOPBuilder_EncodesSpecialCharsForSDK(t *testing.T) {
-	tests := []struct {
-		name      string
-		secretRef string
-		wantRef   string
-		wantName  string
-	}{
-		{
-			name:      "literal special chars are encoded",
-			secretRef: "op://AI Keys & Passwords/OpenAI/credential",
-			wantRef:   "op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-			wantName:  "op://AI Keys & Passwords/OpenAI/credential",
-		},
-		{
-			name:      "already-encoded ref is normalized",
-			secretRef: "op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-			wantRef:   "op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-			wantName:  "op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-		},
+// TestOPBuilder_SpecialCharsInVaultName verifies that vault/item/field names
+// containing characters the SDK's reference parser rejects (spaces, "&", etc.)
+// resolve via the title-based lookup. References may be written literally or
+// percent-encoded.
+func TestOPBuilder_SpecialCharsInVaultName(t *testing.T) {
+	vaults := []onepassword.VaultOverview{
+		{ID: "vault-uuid", Title: "AI Keys & Passwords"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var gotRef string
-			client := &mockOPClient{fn: func(_ context.Context, ref string) (string, error) {
-				gotRef = ref
-				return "v", nil
-			}}
+	items := []onepassword.ItemOverview{
+		{ID: "item-uuid", Title: "OpenAI", VaultID: "vault-uuid"},
+	}
+	item := sampleSDKItem()
+	client := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) { return vaults, nil },
+		listItems:  func(context.Context, string) ([]onepassword.ItemOverview, error) { return items, nil },
+		getItem:    func(context.Context, string, string) (onepassword.Item, error) { return item, nil },
+	}
+
+	for _, ref := range []string{
+		"op://AI Keys & Passwords/OpenAI/credential",
+		"op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
+	} {
+		t.Run(ref, func(t *testing.T) {
 			r := newTestOPBuilder(client)
 			node := yamlNode(t, map[string]string{
 				"type":       "1password",
-				"secret_ref": tt.secretRef,
+				"secret_ref": ref,
 			})
 			result, err := r.Build(node)
 			require.NoError(t, err)
-			require.Equal(t, tt.wantName, result.Name())
-			_, err = result.Get(context.Background())
+			val, err := result.Get(context.Background())
 			require.NoError(t, err)
-			require.Equal(t, tt.wantRef, gotRef)
+			require.Equal(t, "real-secret", val)
 		})
 	}
 }
 
+func TestOPBuilder_SectionRef(t *testing.T) {
+	r := newTestOPBuilder(staticOPClient())
+	node := yamlNode(t, map[string]string{
+		"type":       "1password",
+		"secret_ref": "op://Engineering/OpenAI/api/api_key",
+	})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+	val, err := result.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "section-secret", val)
+}
+
 func TestOPBuilder_Errors(t *testing.T) {
+	emptyVaults := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) { return nil, nil },
+	}
+	emptyItems := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) { return sampleSDKVaults(), nil },
+		listItems:  func(context.Context, string) ([]onepassword.ItemOverview, error) { return nil, nil },
+	}
+	listVaultsErr := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) {
+			return nil, fmt.Errorf("network down")
+		},
+	}
+	emptyItem := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) { return sampleSDKVaults(), nil },
+		listItems:  func(context.Context, string) ([]onepassword.ItemOverview, error) { return sampleSDKItems(), nil },
+		getItem: func(context.Context, string, string) (onepassword.Item, error) {
+			return onepassword.Item{ID: "item-uuid"}, nil
+		},
+	}
+	emptyValue := &mockOPClient{
+		listVaults: func(context.Context) ([]onepassword.VaultOverview, error) { return sampleSDKVaults(), nil },
+		listItems:  func(context.Context, string) ([]onepassword.ItemOverview, error) { return sampleSDKItems(), nil },
+		getItem: func(context.Context, string, string) (onepassword.Item, error) {
+			return onepassword.Item{
+				ID:     "item-uuid",
+				Fields: []onepassword.ItemField{{Title: "credential", Value: ""}},
+			}, nil
+		},
+	}
+
 	tests := []struct {
 		name   string
 		client *mockOPClient
@@ -172,36 +273,57 @@ func TestOPBuilder_Errors(t *testing.T) {
 	}{
 		{
 			name:   "missing secret_ref",
-			client: staticOPClient("", nil),
+			client: staticOPClient(),
 			input:  map[string]string{"type": "1password"},
 			errMsg: "\"secret_ref\" field",
 			errAt:  "build",
 		},
 		{
 			name:   "secret_ref without op:// prefix",
-			client: staticOPClient("", nil),
+			client: staticOPClient(),
 			input:  map[string]string{"type": "1password", "secret_ref": "vault/item/field"},
 			errMsg: "must start with \"op://\"",
 			errAt:  "build",
 		},
 		{
 			name:   "invalid ttl",
-			client: staticOPClient("v", nil),
-			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f", "ttl": "not-a-duration"},
+			client: staticOPClient(),
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential", "ttl": "not-a-duration"},
 			errMsg: "parsing ttl",
 			errAt:  "build",
 		},
 		{
-			name:   "sdk error",
-			client: staticOPClient("", fmt.Errorf("vault not found")),
-			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
-			errMsg: "vault not found",
+			name:   "list vaults error",
+			client: listVaultsErr,
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential"},
+			errMsg: "network down",
+			errAt:  "fetch",
+		},
+		{
+			name:   "vault not found",
+			client: emptyVaults,
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential"},
+			errMsg: "vault \"Engineering\" not found",
+			errAt:  "fetch",
+		},
+		{
+			name:   "item not found",
+			client: emptyItems,
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential"},
+			errMsg: "item \"OpenAI\" not found in vault \"Engineering\"",
+			errAt:  "fetch",
+		},
+		{
+			name:   "field not found",
+			client: emptyItem,
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential"},
+			errMsg: "field \"credential\" not found",
 			errAt:  "fetch",
 		},
 		{
 			name:   "empty secret value",
-			client: staticOPClient("", nil),
-			input:  map[string]string{"type": "1password", "secret_ref": "op://v/i/f"},
+			client: emptyValue,
+			input:  map[string]string{"type": "1password", "secret_ref": "op://Engineering/OpenAI/credential"},
 			errMsg: "empty value",
 			errAt:  "fetch",
 		},
@@ -224,6 +346,65 @@ func TestOPBuilder_Errors(t *testing.T) {
 	}
 }
 
+func TestSelectSDKField(t *testing.T) {
+	item := sampleSDKItem()
+
+	tests := []struct {
+		name    string
+		ref     opRef
+		want    string
+		wantErr string
+	}{
+		{
+			name: "match by title",
+			ref:  opRef{field: "credential"},
+			want: "real-secret",
+		},
+		{
+			name: "match by id",
+			ref:  opRef{field: "field-uuid"},
+			want: "real-secret",
+		},
+		{
+			name: "match with section title",
+			ref:  opRef{section: "api", field: "api_key"},
+			want: "section-secret",
+		},
+		{
+			name: "match with section id",
+			ref:  opRef{section: "section-uuid", field: "api_key"},
+			want: "section-secret",
+		},
+		{
+			name:    "section not found",
+			ref:     opRef{section: "missing", field: "api_key"},
+			wantErr: "section \"missing\" not found",
+		},
+		{
+			name:    "field in section not found",
+			ref:     opRef{section: "api", field: "credential"},
+			wantErr: "field \"credential\" in section \"api\" not found",
+		},
+		{
+			name:    "missing field",
+			ref:     opRef{field: "nope"},
+			wantErr: "field \"nope\" not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectSDKField(item, tt.ref)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // --- opClientCache tests ---
 
 func TestOPClientCache_ReadsTokenFromEnv(t *testing.T) {
@@ -238,7 +419,7 @@ func TestOPClientCache_ReadsTokenFromEnv(t *testing.T) {
 		},
 		newClient: func(_ context.Context, token string) (opClient, error) {
 			gotToken = token
-			return staticOPClient("v", nil), nil
+			return staticOPClient(), nil
 		},
 	}
 
@@ -266,7 +447,7 @@ func TestOPClientCache_ReusesClientPerTokenEnv(t *testing.T) {
 		getenv:  func(string) string { return "tok" },
 		newClient: func(_ context.Context, _ string) (opClient, error) {
 			calls++
-			return staticOPClient("v", nil), nil
+			return staticOPClient(), nil
 		},
 	}
 
