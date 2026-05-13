@@ -232,8 +232,7 @@ transforms:
   # are cached and refreshed automatically before expiry. Scopes are baked
   # into the minted token; widen them if one configured transform serves
   # multiple GCP APIs. Requires MITM mode (sni-only mode cannot rewrite
-  # headers). On token-minting failure the request is rejected (403); set
-  # fallback: skip to pass through unauthenticated instead.
+  # headers). On token-minting failure the request is rejected (403).
   #
   # The keyfile JSON can come from disk via keyfile_path, or from any other
   # configured secret source (env, aws_sm, aws_ssm, 1password,

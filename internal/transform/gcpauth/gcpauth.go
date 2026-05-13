@@ -33,28 +33,19 @@ func init() {
 	transform.Register("gcp_auth", factory)
 }
 
-type fallbackMode int
-
-const (
-	fallbackDeny fallbackMode = iota
-	fallbackSkip
-)
-
 type config struct {
 	KeyfilePath string                 `yaml:"keyfile_path,omitempty"`
 	Keyfile     yaml.Node              `yaml:"keyfile,omitempty"`
 	Scopes      []string               `yaml:"scopes"`
 	Rules       []hostmatch.RuleConfig `yaml:"rules"`
-	Fallback    string                 `yaml:"fallback,omitempty"`
 }
 
 // GCPAuth is the transform.
 type GCPAuth struct {
-	scopes   []string
-	rules    []hostmatch.Rule // empty = apply to all requests
-	loadKey  func(ctx context.Context) ([]byte, error)
-	fallback fallbackMode
-	logger   *slog.Logger
+	scopes  []string
+	rules   []hostmatch.Rule // empty = apply to all requests
+	loadKey func(ctx context.Context) ([]byte, error)
+	logger  *slog.Logger
 
 	mu    sync.Mutex
 	creds *google.Credentials
@@ -81,10 +72,6 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 	}
 	if len(c.Scopes) == 0 {
 		return nil, fmt.Errorf("gcp_auth: at least one entry in \"scopes\" is required")
-	}
-	fb, err := parseFallback(c.Fallback)
-	if err != nil {
-		return nil, fmt.Errorf("gcp_auth: %w", err)
 	}
 	rules, err := hostmatch.CompileRules(c.Rules, "gcp_auth")
 	if err != nil {
@@ -116,22 +103,11 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 	}
 
 	return &GCPAuth{
-		scopes:   c.Scopes,
-		rules:    rules,
-		loadKey:  load,
-		fallback: fb,
-		logger:   logger,
+		scopes:  c.Scopes,
+		rules:   rules,
+		loadKey: load,
+		logger:  logger,
 	}, nil
-}
-
-func parseFallback(s string) (fallbackMode, error) {
-	switch s {
-	case "", "deny":
-		return fallbackDeny, nil
-	case "skip":
-		return fallbackSkip, nil
-	}
-	return 0, fmt.Errorf("invalid fallback %q: must be \"deny\" or \"skip\"", s)
 }
 
 func (g *GCPAuth) Name() string { return "gcp_auth" }
@@ -144,10 +120,6 @@ func (g *GCPAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	tok, err := g.mintToken(ctx)
 	if err != nil {
 		tctx.Annotate("error", err.Error())
-		if g.fallback == fallbackSkip {
-			tctx.Annotate("fallback", "skip")
-			return &transform.TransformResult{Action: transform.ActionContinue}, nil
-		}
 		tctx.Annotate("rejected", "token_unavailable")
 		return &transform.TransformResult{Action: transform.ActionReject}, nil
 	}

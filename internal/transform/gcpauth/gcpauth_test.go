@@ -141,17 +141,6 @@ rules:
 `,
 			wantError: "scopes",
 		},
-		{
-			name: "invalid fallback",
-			yaml: `
-keyfile_path: /tmp/k.json
-scopes: [a]
-fallback: panic
-rules:
-  - host: "*.googleapis.com"
-`,
-			wantError: "invalid fallback",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -262,7 +251,7 @@ func TestGCPAuth_CachesTokenAcrossRequests(t *testing.T) {
 	require.Equal(t, int64(1), calls.Load())
 }
 
-func TestGCPAuth_KeyfileMissing_DefaultDenies(t *testing.T) {
+func TestGCPAuth_KeyfileMissing_Rejects(t *testing.T) {
 	cfg := config{
 		KeyfilePath: "/does/not/exist.json",
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
@@ -274,22 +263,6 @@ func TestGCPAuth_KeyfileMissing_DefaultDenies(t *testing.T) {
 	res, err := g.TransformRequest(context.Background(), newContext(), req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionReject, res.Action)
-	require.Empty(t, req.Header.Get("Authorization"))
-}
-
-func TestGCPAuth_KeyfileMissing_FallbackSkip(t *testing.T) {
-	cfg := config{
-		KeyfilePath: "/does/not/exist.json",
-		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
-		Fallback:    "skip",
-	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
-	require.NoError(t, err)
-
-	req := newRequest(t, "storage.googleapis.com")
-	res, err := g.TransformRequest(context.Background(), newContext(), req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionContinue, res.Action)
 	require.Empty(t, req.Header.Get("Authorization"))
 }
 
