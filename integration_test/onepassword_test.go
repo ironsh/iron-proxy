@@ -5,26 +5,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// runOPSDKTestEnv is an opt-in gate for the 1Password SDK integration test.
-// The SDK resolver hits the live 1Password service via a Wasm-based client,
-// and the shared service account gets rate-limited when CI runs it on every
-// push. The Connect-based test (TestOnePasswordConnect) covers the same
-// resolver code paths against a self-hosted server with no rate limit, so the
-// SDK test is only useful when explicitly exercising the upstream SDK.
-const runOPSDKTestEnv = "RUN_OP_SDK_INTEGRATION"
-
 // TestOnePassword boots the proxy with a real 1Password secret and verifies
 // that proxy tokens in request headers are swapped for the resolved value.
 func TestOnePassword(t *testing.T) {
-	if os.Getenv(runOPSDKTestEnv) == "" {
-		t.Skipf("%s not set; skipping 1Password SDK integration test (rate-limited; set to 1 to run)", runOPSDKTestEnv)
-	}
 	tmpDir := t.TempDir()
 	binary := proxyBinary(t)
 

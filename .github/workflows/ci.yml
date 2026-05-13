@@ -82,10 +82,7 @@ jobs:
           AWS_REGION: us-west-1
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # OP_SERVICE_ACCOUNT_TOKEN is intentionally omitted: the 1Password SDK
-          # integration test (TestOnePassword) is gated behind RUN_OP_SDK_INTEGRATION
-          # because the shared service account is rate-limited. The Connect
-          # integration test below covers the same resolver code paths.
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           OP_CONNECT_HOST: http://localhost:8080
           OP_CONNECT_TOKEN: ${{ secrets.OP_CONNECT_TOKEN }}
 
