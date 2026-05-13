@@ -185,8 +185,7 @@ func TestOPBuilder_LooksUpByTitle(t *testing.T) {
 
 // TestOPBuilder_SpecialCharsInVaultName verifies that vault/item/field names
 // containing characters the SDK's reference parser rejects (spaces, "&", etc.)
-// resolve via the title-based lookup. References may be written literally or
-// percent-encoded.
+// resolve via the title-based lookup.
 func TestOPBuilder_SpecialCharsInVaultName(t *testing.T) {
 	vaults := []onepassword.VaultOverview{
 		{ID: "vault-uuid", Title: "AI Keys & Passwords"},
@@ -201,23 +200,16 @@ func TestOPBuilder_SpecialCharsInVaultName(t *testing.T) {
 		getItem:    func(context.Context, string, string) (onepassword.Item, error) { return item, nil },
 	}
 
-	for _, ref := range []string{
-		"op://AI Keys & Passwords/OpenAI/credential",
-		"op://AI%20Keys%20%26%20Passwords/OpenAI/credential",
-	} {
-		t.Run(ref, func(t *testing.T) {
-			r := newTestOPBuilder(client)
-			node := yamlNode(t, map[string]string{
-				"type":       "1password",
-				"secret_ref": ref,
-			})
-			result, err := r.Build(node)
-			require.NoError(t, err)
-			val, err := result.Get(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, "real-secret", val)
-		})
-	}
+	r := newTestOPBuilder(client)
+	node := yamlNode(t, map[string]string{
+		"type":       "1password",
+		"secret_ref": "op://AI Keys & Passwords/OpenAI/credential",
+	})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+	val, err := result.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "real-secret", val)
 }
 
 func TestOPBuilder_SectionRef(t *testing.T) {

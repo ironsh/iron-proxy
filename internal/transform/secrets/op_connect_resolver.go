@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -108,11 +107,9 @@ type opRef struct {
 	field   string
 }
 
-// parseOPRef parses an "op://vault/item/[section/]field" reference. vault,
-// item, section, and field may be UUIDs or human titles. Each segment may be
-// written literally or percent-encoded; segments are percent-decoded so the
-// returned opRef holds the literal names. Empty segments and lengths outside
-// [3, 4] are rejected.
+// parseOPRef parses an "op://vault/item/[section/]field" reference.
+// vault, item, section, and field may be UUIDs or human titles. Empty
+// segments and lengths outside [3, 4] are rejected.
 func parseOPRef(ref string) (opRef, error) {
 	rest, ok := strings.CutPrefix(ref, "op://")
 	if !ok {
@@ -122,23 +119,17 @@ func parseOPRef(ref string) (opRef, error) {
 	if len(parts) < 3 || len(parts) > 4 {
 		return opRef{}, fmt.Errorf("secret_ref %q must have 3 or 4 path segments (op://vault/item/[section/]field)", ref)
 	}
-	decoded := make([]string, len(parts))
-	for i, p := range parts {
+	for _, p := range parts {
 		if p == "" {
 			return opRef{}, fmt.Errorf("secret_ref %q has an empty path segment", ref)
 		}
-		d, err := url.PathUnescape(p)
-		if err != nil {
-			return opRef{}, fmt.Errorf("secret_ref %q segment %q has invalid percent-encoding: %w", ref, p, err)
-		}
-		decoded[i] = d
 	}
-	out := opRef{vault: decoded[0], item: decoded[1]}
-	if len(decoded) == 3 {
-		out.field = decoded[2]
+	out := opRef{vault: parts[0], item: parts[1]}
+	if len(parts) == 3 {
+		out.field = parts[2]
 	} else {
-		out.section = decoded[2]
-		out.field = decoded[3]
+		out.section = parts[2]
+		out.field = parts[3]
 	}
 	return out, nil
 }
