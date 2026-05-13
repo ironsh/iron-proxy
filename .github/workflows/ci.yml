@@ -74,6 +74,26 @@ jobs:
           docker compose logs
           exit 1
 
+      # The BigQuery service account key is stored base64-encoded in
+      # secrets so GitHub Actions' substring-based secret redaction doesn't
+      # mangle unrelated job output that happens to share fragments with the
+      # JSON keyfile (project id, common phrases, etc.). Decode it here and
+      # expose the JSON to the test step as a normal env var.
+      - name: Decode BigQuery service account key
+        env:
+          GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64: ${{ secrets.GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64 }}
+        run: |
+          if [ -z "$GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64" ]; then
+            echo "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64 not set; BigQuery test will skip"
+            exit 0
+          fi
+          {
+            echo "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY<<__IRON_EOF__"
+            printf '%s' "$GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64" | base64 -d
+            echo
+            echo "__IRON_EOF__"
+          } >> "$GITHUB_ENV"
+
       - name: Run integration tests
         run: go test -v -race -count=1 ./integration_test/ -integration
         env:
@@ -85,7 +105,6 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           OP_CONNECT_HOST: http://localhost:8080
           OP_CONNECT_TOKEN: ${{ secrets.OP_CONNECT_TOKEN }}
-          GCP_BIGQUERY_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_BIGQUERY_SERVICE_ACCOUNT_KEY }}
 
       - name: Dump 1Password Connect logs
         if: failure()
