@@ -81,15 +81,15 @@ jobs:
       # expose the JSON to the test step as a normal env var.
       - name: Decode BigQuery service account key
         env:
-          GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64: ${{ secrets.GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64 }}
+          BQ_SA_KEY_ENCODED: ${{ secrets.GCP_BIGQUERY_SERVICE_ACCOUNT_KEY }}
         run: |
-          if [ -z "$GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64" ]; then
-            echo "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64 not set; BigQuery test will skip"
+          if [ -z "$BQ_SA_KEY_ENCODED" ]; then
+            echo "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY not set; BigQuery test will skip"
             exit 0
           fi
           {
             echo "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY<<__IRON_EOF__"
-            printf '%s' "$GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64" | base64 -d
+            printf '%s' "$BQ_SA_KEY_ENCODED" | base64 -d
             echo
             echo "__IRON_EOF__"
           } >> "$GITHUB_ENV"
