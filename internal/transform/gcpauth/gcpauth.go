@@ -21,6 +21,7 @@ import (
 	"os"
 	"sync"
 
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"gopkg.in/yaml.v3"
 
@@ -47,9 +48,9 @@ type GCPAuth struct {
 	loadKey func(ctx context.Context) ([]byte, error)
 	logger  *slog.Logger
 
-	mu    sync.Mutex
-	creds *google.Credentials
-	email string
+	mu          sync.Mutex
+	tokenSource oauth2.TokenSource
+	email       string
 }
 
 // sourceBuilder is the signature of secrets.BuildSource. Pulled out so tests
@@ -137,11 +138,11 @@ func (g *GCPAuth) TransformResponse(context.Context, *transform.TransformContext
 }
 
 func (g *GCPAuth) mintToken(ctx context.Context) (string, error) {
-	creds, err := g.loadCreds(ctx)
+	ts, err := g.loadTokenSource(ctx)
 	if err != nil {
 		return "", err
 	}
-	tok, err := creds.TokenSource.Token()
+	tok, err := ts.Token()
 	if err != nil {
 		return "", fmt.Errorf("minting GCP access token: %w", err)
 	}
@@ -151,17 +152,22 @@ func (g *GCPAuth) mintToken(ctx context.Context) (string, error) {
 	return tok.AccessToken, nil
 }
 
-func (g *GCPAuth) loadCreds(ctx context.Context) (*google.Credentials, error) {
+func (g *GCPAuth) loadTokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.creds != nil {
-		return g.creds, nil
+	if g.tokenSource != nil {
+		return g.tokenSource, nil
 	}
 	keyJSON, err := g.loadKey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	creds, err := google.CredentialsFromJSON(ctx, keyJSON, g.scopes...)
+	// JWTConfigFromJSON is the narrowed, non-deprecated form of credential
+	// loading. It only accepts service-account JSON keyfiles, which is what
+	// gcp_auth is designed for; we don't want to silently accept the broader
+	// set of credential configurations (workload identity federation,
+	// external_account, etc.) that CredentialsFromJSON allows.
+	cfg, err := google.JWTConfigFromJSON(keyJSON, g.scopes...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing GCP service account keyfile: %w", err)
 	}
@@ -171,6 +177,6 @@ func (g *GCPAuth) loadCreds(ctx context.Context) (*google.Credentials, error) {
 	if err := json.Unmarshal(keyJSON, &meta); err == nil {
 		g.email = meta.ClientEmail
 	}
-	g.creds = creds
-	return g.creds, nil
+	g.tokenSource = cfg.TokenSource(ctx)
+	return g.tokenSource, nil
 }
