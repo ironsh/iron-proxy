@@ -12,10 +12,14 @@ import (
 	"strings"
 )
 
-// ReloadFunc rebuilds the running pipeline from the on-disk config. Returning
-// a *ValidationError signals that the supplied config could not be parsed or
-// built into a pipeline; the server maps that to HTTP 422.
-type ReloadFunc func() error
+// ReloadFunc rebuilds the running pipeline from the on-disk config. ctx is
+// the server's process-scoped context (configured via Options.Ctx) so a
+// reload survives an HTTP client disconnect: a partially-applied swap of
+// pipeline, MCP, and postgres listeners would leave the proxy in a
+// half-reloaded state. Returning a *ValidationError signals that the
+// supplied config could not be parsed or built; the server maps that to
+// HTTP 422.
+type ReloadFunc func(context.Context) error
 
 // ValidationError marks an error as the result of bad on-disk configuration
 // rather than an internal failure. Reload handlers translate this to a 422.
@@ -43,6 +47,12 @@ type Options struct {
 	APIKey string
 	Reload ReloadFunc
 	Logger *slog.Logger
+
+	// Ctx is the process-scoped context passed to Reload. It must outlive
+	// individual HTTP requests so a client disconnect cannot abort a reload
+	// after pipeline/MCP have been swapped but before postgres listeners
+	// have been recycled. If nil, context.Background() is used.
+	Ctx context.Context
 }
 
 // Server serves the management API.
@@ -51,16 +61,22 @@ type Server struct {
 	apiKey string
 	reload ReloadFunc
 	logger *slog.Logger
+	ctx    context.Context
 }
 
 // New creates a Server bound to opts.Addr. The caller starts it with
 // ListenAndServe and stops it with Shutdown.
 func New(opts Options) *Server {
 	mux := http.NewServeMux()
+	ctx := opts.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s := &Server{
 		apiKey: opts.APIKey,
 		reload: opts.Reload,
 		logger: opts.Logger,
+		ctx:    ctx,
 	}
 	mux.HandleFunc("/v1/reload", s.handleReload)
 	s.server = &http.Server{
@@ -96,7 +112,9 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.reload()
+	// Use the server-scoped context, not r.Context(): reload mutates
+	// process-wide state and must not be cut short by a client disconnect.
+	err := s.reload(s.ctx)
 	if err == nil {
 		s.logger.Info("management reload succeeded")
 		writeJSON(w, http.StatusOK, statusResponse{Status: "ok"})

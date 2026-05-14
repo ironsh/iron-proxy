@@ -206,10 +206,7 @@ func main() {
 		logger.Error("loading postgres config", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
-	pgServers := make([]*postgres.Server, 0, len(pgPolicies))
-	for _, p := range pgPolicies {
-		pgServers = append(pgServers, postgres.NewServer(p, logger))
-	}
+	pgManager := postgres.NewManager(logger)
 
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
@@ -235,8 +232,9 @@ func main() {
 		mgmtServer = management.New(management.Options{
 			Addr:   cfg.Management.Listen,
 			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
-			Reload: newReloadFunc(*configPath, holder, mcpHolder, bodyLimits, logger),
+			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger),
 			Logger: logger,
+			Ctx:    ctx,
 		})
 	}
 
@@ -247,10 +245,7 @@ func main() {
 	if mgmtServer != nil {
 		go func() { errc <- fmt.Errorf("management: %w", mgmtServer.ListenAndServe()) }()
 	}
-	for _, pg := range pgServers {
-		pg := pg
-		go func() { errc <- fmt.Errorf("postgres[%s]: %w", pg.Name(), pg.ListenAndServe()) }()
-	}
+	pgManager.Start(pgPolicies, errc)
 
 	startAttrs := []any{
 		slog.String("dns_listen", cfg.DNS.Listen),
@@ -302,13 +297,8 @@ func main() {
 			logger.Error("management server shutdown error", slog.String("error", err.Error()))
 		}
 	}
-	for _, pg := range pgServers {
-		if err := pg.Shutdown(shutdownCtx); err != nil {
-			logger.Error("postgres server shutdown error",
-				slog.String("name", pg.Name()),
-				slog.String("error", err.Error()),
-			)
-		}
+	if err := pgManager.Shutdown(shutdownCtx); err != nil {
+		logger.Error("postgres server shutdown error", slog.String("error", err.Error()))
 	}
 
 	logger.Info("iron-proxy stopped")
@@ -533,12 +523,13 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 }
 
 // newReloadFunc returns a management.ReloadFunc that re-reads the YAML config
-// from configPath, rebuilds the pipeline and MCP policy, and atomically swaps
-// them in. Parse, validation, and build errors are wrapped in
-// *management.ValidationError so the management server returns 422; the
-// existing pipeline and policy are preserved.
-func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
-	return func() error {
+// from configPath, rebuilds the pipeline, MCP policy, and postgres listeners,
+// and atomically swaps them in. Parse, validation, and build errors are
+// wrapped in *management.ValidationError so the management server returns
+// 422 and the existing state is left untouched. Validation runs for every
+// component before any state is mutated.
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+	return func(ctx context.Context) error {
 		newCfg, err := config.LoadConfig(configPath)
 		if err != nil {
 			return &management.ValidationError{Err: err}
@@ -554,10 +545,18 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
+		newPgPolicies, err := postgres.LoadFromNode(newCfg.Postgres, logger)
+		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 		holder.Store(newPipeline)
 		mcpHolder.Store(newPolicy)
-		logger.Info("pipeline reloaded via management API", slog.String("transforms", newPipeline.Names()))
+		pgManager.Reload(ctx, newPgPolicies)
+		logger.Info("pipeline reloaded via management API",
+			slog.String("transforms", newPipeline.Names()),
+			slog.Int("postgres_servers", len(newPgPolicies)),
+		)
 		return nil
 	}
 }

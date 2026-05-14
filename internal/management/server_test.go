@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -42,26 +43,26 @@ func decodeError(t *testing.T, body io.Reader) string {
 }
 
 func TestReload_MissingAuth(t *testing.T) {
-	s := newTestServer(t, "secret", func() error { return nil })
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
 	rec := do(t, s, http.MethodPost, "/v1/reload", "")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.Equal(t, "unauthorized", decodeError(t, rec.Body))
 }
 
 func TestReload_WrongAuth(t *testing.T) {
-	s := newTestServer(t, "secret", func() error { return nil })
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
 	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer nope")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestReload_NonBearerAuth(t *testing.T) {
-	s := newTestServer(t, "secret", func() error { return nil })
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
 	rec := do(t, s, http.MethodPost, "/v1/reload", "Basic c2VjcmV0")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestReload_WrongMethod(t *testing.T) {
-	s := newTestServer(t, "secret", func() error {
+	s := newTestServer(t, "secret", func(context.Context) error {
 		t.Fatal("reload should not run on GET")
 		return nil
 	})
@@ -72,7 +73,7 @@ func TestReload_WrongMethod(t *testing.T) {
 
 func TestReload_Success(t *testing.T) {
 	called := 0
-	s := newTestServer(t, "secret", func() error {
+	s := newTestServer(t, "secret", func(context.Context) error {
 		called++
 		return nil
 	})
@@ -86,7 +87,7 @@ func TestReload_Success(t *testing.T) {
 }
 
 func TestReload_ValidationError(t *testing.T) {
-	s := newTestServer(t, "secret", func() error {
+	s := newTestServer(t, "secret", func(context.Context) error {
 		return &ValidationError{Err: errors.New("bad transform: missing field")}
 	})
 	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
@@ -97,7 +98,7 @@ func TestReload_ValidationError(t *testing.T) {
 
 func TestReload_WrappedValidationError(t *testing.T) {
 	// A ValidationError wrapped further down the chain still maps to 422.
-	s := newTestServer(t, "secret", func() error {
+	s := newTestServer(t, "secret", func(context.Context) error {
 		inner := &ValidationError{Err: errors.New("parse failure")}
 		return errors.Join(errors.New("wrapper"), inner)
 	})
@@ -106,7 +107,7 @@ func TestReload_WrappedValidationError(t *testing.T) {
 }
 
 func TestReload_InternalError(t *testing.T) {
-	s := newTestServer(t, "secret", func() error {
+	s := newTestServer(t, "secret", func(context.Context) error {
 		return errors.New("disk on fire")
 	})
 	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
@@ -116,7 +117,7 @@ func TestReload_InternalError(t *testing.T) {
 }
 
 func TestUnknownPath(t *testing.T) {
-	s := newTestServer(t, "secret", func() error { return nil })
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
 	rec := do(t, s, http.MethodPost, "/anything-else", "Bearer secret")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
