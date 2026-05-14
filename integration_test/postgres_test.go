@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -62,14 +61,12 @@ func TestPostgresPolicy(t *testing.T) {
 	upstreamPort, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
 
-	cfgPath := renderConfig(t, t.TempDir(), "postgres_pipeline.yaml", map[string]string{
-		"UpstreamHost": upstreamHost,
-		"UpstreamPort": strconv.Itoa(int(upstreamPort.Num())),
-	})
+	cfgPath := renderConfig(t, t.TempDir(), "postgres_pipeline.yaml", nil)
 
+	upstreamDSN := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort.Num(), pgUpstreamDB)
 	env := []string{
-		"PG_UPSTREAM_USER=" + pgUpstreamUser,
-		"PG_UPSTREAM_PASSWORD=" + pgUpstreamPass,
+		"PG_UPSTREAM_DSN=" + upstreamDSN,
 		"PG_PROXY_PASSWORD=" + pgClientPassword,
 	}
 	proxy := startProxy(t, proxyBinary(t), cfgPath, env)
@@ -395,14 +392,12 @@ func TestPostgresMultipleServers(t *testing.T) {
 	upstreamPort, err := container.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
 
-	cfgPath := renderConfig(t, t.TempDir(), "postgres_multi_pipeline.yaml", map[string]string{
-		"UpstreamHost": upstreamHost,
-		"UpstreamPort": strconv.Itoa(int(upstreamPort.Num())),
-	})
+	cfgPath := renderConfig(t, t.TempDir(), "postgres_multi_pipeline.yaml", nil)
 
+	upstreamDSN := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort.Num(), pgUpstreamDB)
 	env := []string{
-		"PG_UPSTREAM_USER=" + pgUpstreamUser,
-		"PG_UPSTREAM_PASSWORD=" + pgUpstreamPass,
+		"PG_UPSTREAM_DSN=" + upstreamDSN,
 		"PG_PROXY_PASSWORD=" + pgClientPassword,
 	}
 	proxy := startProxy(t, proxyBinary(t), cfgPath, env)

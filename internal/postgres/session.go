@@ -50,14 +50,16 @@ func runSession(ctx context.Context, clientConn net.Conn, policy *Policy, logger
 		return
 	}
 
-	if err := setUpstreamRole(ctx, upstream, policy); err != nil {
-		writeFatal(backend, "08006", err.Error())
-		logger.Error("postgres: set role failed",
-			slog.String("error", err.Error()),
-			slog.String("remote", clientConn.RemoteAddr().String()),
-		)
-		_ = upstream.Close(ctx)
-		return
+	if policy.Role() != "" {
+		if err := setUpstreamRole(ctx, upstream, policy); err != nil {
+			writeFatal(backend, "08006", err.Error())
+			logger.Error("postgres: set role failed",
+				slog.String("error", err.Error()),
+				slog.String("remote", clientConn.RemoteAddr().String()),
+			)
+			_ = upstream.Close(ctx)
+			return
+		}
 	}
 
 	hijacked, err := upstream.Hijack()
@@ -114,19 +116,15 @@ func receiveStartup(rawConn net.Conn, backend *pgproto3.Backend) (*pgproto3.Star
 }
 
 // dialUpstream opens an authenticated PgConn to the upstream database using
-// the credentials in policy.
+// the DSN resolved from the policy's configured secret source.
 func dialUpstream(ctx context.Context, policy *Policy) (*pgconn.PgConn, error) {
-	connString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		policy.UpstreamHost(),
-		policy.UpstreamPort(),
-		policy.UpstreamUser(),
-		policy.UpstreamPassword(),
-		policy.UpstreamDatabase(),
-		policy.UpstreamSSLMode(),
-	)
-	cfg, err := pgconn.ParseConfig(connString)
+	dsn, err := policy.UpstreamDSN(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("parsing upstream config: %w", err)
+		return nil, fmt.Errorf("loading upstream DSN: %w", err)
+	}
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parsing upstream DSN: %w", err)
 	}
 	conn, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {

@@ -4,7 +4,7 @@
 //
 // The listener accepts client connections, authenticates them against
 // proxy-managed credentials, opens its own authenticated connection upstream
-// (handling SCRAM/MD5 termination via pgconn), issues a single
+// (handling SCRAM/MD5 termination via pgconn), optionally issues a single
 // `SET ROLE "<role>"` on the upstream session, then relays the PostgreSQL
 // wire protocol bidirectionally.
 //
@@ -23,21 +23,23 @@
 //
 // Multiple servers are supported: the top-level postgres: key is a list, so
 // one proxy process can front several databases (each with its own listen
-// address, upstream, client credentials, and injected role).
+// address, upstream, client credentials, and optional injected role).
 package postgres
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
-// Upstream SSL modes accepted by the proxy→database connection.
-const (
-	UpstreamSSLDisable = "disable"
-	UpstreamSSLRequire = "require"
-)
+// SourceBuilder is the signature of secrets.BuildSource. Pulled out so tests
+// can inject a stub instead of constructing real source backends.
+type SourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 
 // ServerConfig is one entry in the top-level postgres: list — a single
 // listener fronting a single upstream database.
@@ -58,19 +60,21 @@ type ServerConfig struct {
 	// per-user credentials are not supported.
 	Client ClientConfig `yaml:"client"`
 
-	// Role is the Postgres role the proxy SETs at session start. Every query
-	// the client subsequently issues runs as this role on the upstream database.
-	Role string `yaml:"role"`
+	// Role is the Postgres role the proxy SETs at session start. When set,
+	// every query the client subsequently issues runs as this role on the
+	// upstream database. Optional: when empty, the proxy issues no SET ROLE
+	// and the upstream session runs as the connecting user.
+	Role string `yaml:"role,omitempty"`
 }
 
-// UpstreamConfig describes the database the proxy forwards to.
+// UpstreamConfig describes the database the proxy forwards to. The DSN is
+// loaded from any registered secret source (env, aws_sm, aws_ssm, 1password,
+// 1password_connect) and is passed verbatim to pgconn.ParseConfig — both
+// URL-style (postgres://user:pw@host:port/db?sslmode=...) and keyword/value
+// strings (host=... port=... user=... password=... dbname=... sslmode=...)
+// are accepted.
 type UpstreamConfig struct {
-	Host        string `yaml:"host"`
-	Port        int    `yaml:"port"`
-	SSLMode     string `yaml:"sslmode"`
-	UserEnv     string `yaml:"user_env"`
-	PasswordEnv string `yaml:"password_env"`
-	Database    string `yaml:"database"`
+	DSN yaml.Node `yaml:"dsn"`
 }
 
 // ClientConfig describes the credentials the proxy demands from clients.
@@ -85,12 +89,7 @@ type Policy struct {
 	listen string
 	role   string
 
-	upstreamHost     string
-	upstreamPort     int
-	upstreamSSLMode  string
-	upstreamUser     string
-	upstreamPassword string
-	upstreamDB       string
+	upstreamDSN secrets.Source
 
 	clientUser     string
 	clientPassword string
@@ -102,27 +101,16 @@ func (p *Policy) Name() string { return p.name }
 // Listen returns the bind address.
 func (p *Policy) Listen() string { return p.listen }
 
-// Role returns the role the proxy SETs upstream at session start.
+// Role returns the role the proxy SETs upstream at session start. Empty
+// means no role is set (the upstream session runs as the connecting user).
 func (p *Policy) Role() string { return p.role }
 
-// UpstreamHost returns the upstream database host.
-func (p *Policy) UpstreamHost() string { return p.upstreamHost }
-
-// UpstreamPort returns the upstream database port.
-func (p *Policy) UpstreamPort() int { return p.upstreamPort }
-
-// UpstreamSSLMode returns the upstream sslmode (disable|require).
-func (p *Policy) UpstreamSSLMode() string { return p.upstreamSSLMode }
-
-// UpstreamUser returns the username the proxy uses to authenticate upstream.
-func (p *Policy) UpstreamUser() string { return p.upstreamUser }
-
-// UpstreamPassword returns the password the proxy uses to authenticate
-// upstream. It is loaded from the env var named in UpstreamConfig.PasswordEnv.
-func (p *Policy) UpstreamPassword() string { return p.upstreamPassword }
-
-// UpstreamDatabase returns the dbname the proxy connects to upstream.
-func (p *Policy) UpstreamDatabase() string { return p.upstreamDB }
+// UpstreamDSN returns the upstream connection string, fetched from the
+// configured secret source. The result is cached by the source; repeated
+// calls do not necessarily round-trip to the backend.
+func (p *Policy) UpstreamDSN(ctx context.Context) (string, error) {
+	return p.upstreamDSN.Get(ctx)
+}
 
 // VerifyClient returns whether the given (user, password) pair matches the
 // configured client credentials.
@@ -138,7 +126,7 @@ func (p *Policy) ClientUser() string { return p.clientUser }
 // the source document) returns (nil, nil) so callers can treat "no postgres
 // listeners" as a normal case. An empty list (`postgres: []`) returns the
 // same.
-func LoadFromNode(node yaml.Node) ([]*Policy, error) {
+func LoadFromNode(node yaml.Node, logger *slog.Logger) ([]*Policy, error) {
 	if node.Kind == 0 {
 		return nil, nil
 	}
@@ -146,13 +134,13 @@ func LoadFromNode(node yaml.Node) ([]*Policy, error) {
 	if err := node.Decode(&servers); err != nil {
 		return nil, fmt.Errorf("decoding postgres config: %w", err)
 	}
-	return Compile(servers)
+	return Compile(servers, logger, secrets.BuildSource)
 }
 
 // Compile validates and compiles ServerConfigs into Policies. Returns
 // (nil, nil) when the input list is empty so callers can treat "not
 // configured" as a no-op without a sentinel error.
-func Compile(servers []ServerConfig) ([]*Policy, error) {
+func Compile(servers []ServerConfig, logger *slog.Logger, buildSource SourceBuilder) ([]*Policy, error) {
 	if len(servers) == 0 {
 		return nil, nil
 	}
@@ -161,7 +149,7 @@ func Compile(servers []ServerConfig) ([]*Policy, error) {
 	policies := make([]*Policy, 0, len(servers))
 
 	for i, s := range servers {
-		p, err := compileOne(s, i)
+		p, err := compileOne(s, i, logger, buildSource)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +168,7 @@ func Compile(servers []ServerConfig) ([]*Policy, error) {
 	return policies, nil
 }
 
-func compileOne(c ServerConfig, idx int) (*Policy, error) {
+func compileOne(c ServerConfig, idx int, logger *slog.Logger, buildSource SourceBuilder) (*Policy, error) {
 	ctx := fmt.Sprintf("postgres[%d]", idx)
 	if c.Name != "" {
 		ctx = fmt.Sprintf("postgres[%q]", c.Name)
@@ -192,31 +180,8 @@ func compileOne(c ServerConfig, idx int) (*Policy, error) {
 	if c.Listen == "" {
 		return nil, fmt.Errorf("%s: listen is required", ctx)
 	}
-	if c.Role == "" {
-		return nil, fmt.Errorf("%s: role is required", ctx)
-	}
-	if c.Upstream.Host == "" {
-		return nil, fmt.Errorf("%s: upstream.host is required", ctx)
-	}
-	if c.Upstream.Port == 0 {
-		c.Upstream.Port = 5432
-	}
-	if c.Upstream.Database == "" {
-		return nil, fmt.Errorf("%s: upstream.database is required", ctx)
-	}
-	if c.Upstream.UserEnv == "" {
-		return nil, fmt.Errorf("%s: upstream.user_env is required", ctx)
-	}
-	if c.Upstream.PasswordEnv == "" {
-		return nil, fmt.Errorf("%s: upstream.password_env is required", ctx)
-	}
-	if c.Upstream.SSLMode == "" {
-		c.Upstream.SSLMode = UpstreamSSLDisable
-	}
-	switch c.Upstream.SSLMode {
-	case UpstreamSSLDisable, UpstreamSSLRequire:
-	default:
-		return nil, fmt.Errorf("%s: upstream.sslmode must be %q or %q; got %q", ctx, UpstreamSSLDisable, UpstreamSSLRequire, c.Upstream.SSLMode)
+	if c.Upstream.DSN.Kind == 0 {
+		return nil, fmt.Errorf("%s: upstream.dsn is required", ctx)
 	}
 	if c.Client.User == "" {
 		return nil, fmt.Errorf("%s: client.user is required", ctx)
@@ -225,31 +190,23 @@ func compileOne(c ServerConfig, idx int) (*Policy, error) {
 		return nil, fmt.Errorf("%s: client.password_env is required", ctx)
 	}
 
-	upstreamUser := os.Getenv(c.Upstream.UserEnv)
-	if upstreamUser == "" {
-		return nil, fmt.Errorf("%s: upstream.user_env %q is not set in the environment", ctx, c.Upstream.UserEnv)
+	dsnSource, err := buildSource(c.Upstream.DSN, logger)
+	if err != nil {
+		return nil, fmt.Errorf("%s: building upstream.dsn source: %w", ctx, err)
 	}
-	upstreamPassword := os.Getenv(c.Upstream.PasswordEnv)
-	if upstreamPassword == "" {
-		return nil, fmt.Errorf("%s: upstream.password_env %q is not set in the environment", ctx, c.Upstream.PasswordEnv)
-	}
+
 	clientPassword := os.Getenv(c.Client.PasswordEnv)
 	if clientPassword == "" {
 		return nil, fmt.Errorf("%s: client.password_env %q is not set in the environment", ctx, c.Client.PasswordEnv)
 	}
 
 	return &Policy{
-		name:             c.Name,
-		listen:           c.Listen,
-		role:             c.Role,
-		upstreamHost:     c.Upstream.Host,
-		upstreamPort:     c.Upstream.Port,
-		upstreamSSLMode:  c.Upstream.SSLMode,
-		upstreamUser:     upstreamUser,
-		upstreamPassword: upstreamPassword,
-		upstreamDB:       c.Upstream.Database,
-		clientUser:       c.Client.User,
-		clientPassword:   clientPassword,
+		name:           c.Name,
+		listen:         c.Listen,
+		role:           c.Role,
+		upstreamDSN:    dsnSource,
+		clientUser:     c.Client.User,
+		clientPassword: clientPassword,
 	}, nil
 }
 

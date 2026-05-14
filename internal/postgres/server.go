@@ -58,11 +58,14 @@ func (s *Server) ListenAndServe() error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	s.logger.Info("postgres proxy starting",
+	startAttrs := []any{
 		slog.String("name", s.policy.Name()),
 		slog.String("addr", ln.Addr().String()),
-		slog.String("role", s.policy.Role()),
-	)
+	}
+	if role := s.policy.Role(); role != "" {
+		startAttrs = append(startAttrs, slog.String("role", role))
+	}
+	s.logger.Info("postgres proxy starting", startAttrs...)
 
 	for {
 		conn, err := ln.Accept()

@@ -201,7 +201,7 @@ func main() {
 		)
 	}
 
-	pgPolicies, err := postgres.LoadFromNode(cfg.Postgres)
+	pgPolicies, err := postgres.LoadFromNode(cfg.Postgres, logger)
 	if err != nil {
 		logger.Error("loading postgres config", slog.String("error", err.Error()))
 		os.Exit(1)

@@ -15,12 +15,9 @@ postgres:
   - name: primary
     listen: "127.0.0.1:0"
     upstream:
-      host: "{{ .UpstreamHost }}"
-      port: {{ .UpstreamPort }}
-      sslmode: disable
-      user_env: PG_UPSTREAM_USER
-      password_env: PG_UPSTREAM_PASSWORD
-      database: appdb
+      dsn:
+        type: env
+        var: PG_UPSTREAM_DSN
     client:
       user: app_user
       password_env: PG_PROXY_PASSWORD
