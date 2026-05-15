@@ -14,8 +14,8 @@ type traceEntry struct {
 }
 
 // NewAuditLogger returns an AuditFunc that writes structured JSON log lines
-// for every request. Log level is INFO for allowed, WARN for rejected,
-// ERROR for errored requests.
+// for every request. Log level is INFO for allowed and stubbed, WARN for
+// rejected, ERROR for errored requests.
 func NewAuditLogger(logger *slog.Logger) AuditFunc {
 	return func(result *PipelineResult) {
 		action := actionString(result.Action)
@@ -49,11 +49,19 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 			attrs = append(attrs, slog.Group("tunnel", tunnelAttrs...))
 		}
 
-		// Add rejected_by for reject actions
+		// Add rejected_by / stubbed_by for short-circuit actions
 		if result.Action == ActionReject {
 			for _, tr := range result.RequestTransforms {
 				if tr.Action == ActionReject {
 					attrs = append(attrs, slog.String("rejected_by", tr.Name))
+					break
+				}
+			}
+		}
+		if result.Action == ActionStub {
+			for _, tr := range result.RequestTransforms {
+				if tr.Action == ActionStub {
+					attrs = append(attrs, slog.String("stubbed_by", tr.Name))
 					break
 				}
 			}
@@ -114,6 +122,8 @@ func actionString(a TransformAction) string {
 		return "allow"
 	case ActionReject:
 		return "reject"
+	case ActionStub:
+		return "stub"
 	default:
 		return "unknown"
 	}

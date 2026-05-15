@@ -298,9 +298,9 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 		return false, nil, nil
 	}
 	if rejectResp != nil {
-		result.Action = transform.ActionReject
+		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
-		p.logger.Info("tunnel rejected by transform",
+		p.logger.Info("tunnel short-circuited by transform",
 			slog.String("target", target),
 			slog.Int("status", rejectResp.StatusCode),
 		)

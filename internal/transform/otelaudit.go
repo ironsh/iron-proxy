@@ -61,6 +61,14 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 				}
 			}
 		}
+		if result.Action == ActionStub {
+			for _, tr := range result.RequestTransforms {
+				if tr.Action == ActionStub {
+					attrs = append(attrs, log.String("stubbed_by", tr.Name))
+					break
+				}
+			}
+		}
 
 		if result.Err != nil {
 			attrs = append(attrs, log.String("error", result.Err.Error()))

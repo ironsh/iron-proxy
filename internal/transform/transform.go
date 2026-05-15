@@ -19,8 +19,33 @@ const (
 
 	// ActionReject stops the pipeline and returns TransformResult.Response to the client.
 	// If Response is nil, the proxy returns a default 403 Forbidden.
+	// Use this when the proxy is denying the request on the client's behalf.
 	ActionReject
+
+	// ActionStub stops the pipeline and returns TransformResult.Response to
+	// the client, the same way ActionReject does. Unlike ActionReject, it
+	// signals that the proxy is intentionally serving a synthetic response
+	// (e.g. a stubbed OAuth2 token endpoint) rather than denying the request.
+	// Audit logs render this as "stub" and log at INFO so operators can find
+	// proxy-served responses without conflating them with rejections.
+	// If Response is nil, the proxy falls back to a default 403 Forbidden,
+	// the same as ActionReject.
+	ActionStub
 )
+
+// ShortCircuitAction returns the action of the trace that short-circuited the
+// pipeline (ActionReject or ActionStub), or ActionContinue if none did. The
+// short-circuiting transform is always the last appended trace because the
+// pipeline returns immediately after appending it.
+func ShortCircuitAction(traces []TransformTrace) TransformAction {
+	if n := len(traces); n > 0 {
+		switch traces[n-1].Action {
+		case ActionReject, ActionStub:
+			return traces[n-1].Action
+		}
+	}
+	return ActionContinue
+}
 
 // Mode identifies how the proxy obtained the request being transformed.
 type Mode int
@@ -159,11 +184,11 @@ type Transformer interface {
 
 	// TransformRequest is called before the request is sent upstream.
 	// The transform may modify the request in place.
-	// Returning ActionReject stops the pipeline.
+	// Returning ActionReject or ActionStub stops the pipeline.
 	TransformRequest(ctx context.Context, tctx *TransformContext, req *http.Request) (*TransformResult, error)
 
 	// TransformResponse is called after the response is received from upstream.
 	// The transform may modify the response in place.
-	// Returning ActionReject replaces the upstream response with TransformResult.Response.
+	// Returning ActionReject or ActionStub replaces the upstream response with TransformResult.Response.
 	TransformResponse(ctx context.Context, tctx *TransformContext, req *http.Request, resp *http.Response) (*TransformResult, error)
 }

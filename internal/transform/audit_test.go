@@ -85,6 +85,34 @@ func TestAudit_RejectedRequest(t *testing.T) {
 	require.Equal(t, float64(403), audit["status_code"])
 }
 
+func TestAudit_StubbedRequest(t *testing.T) {
+	result := &PipelineResult{
+		Host:       "oauth2.googleapis.com",
+		Method:     "POST",
+		Path:       "/token",
+		RemoteAddr: "10.16.0.5:43216",
+		SNI:        "oauth2.googleapis.com",
+		StartedAt:  time.Now(),
+		Duration:   80 * time.Microsecond,
+		Action:     ActionStub,
+		StatusCode: 200,
+		RequestTransforms: []TransformTrace{
+			{Name: "gcp_auth", Action: ActionStub, Duration: 80 * time.Microsecond,
+				Annotations: map[string]any{"stubbed": "oauth2_token_endpoint"}},
+		},
+	}
+
+	parsed, _ := captureAuditLog(result)
+
+	require.Equal(t, "INFO", parsed["level"])
+	require.Equal(t, "request", parsed["msg"])
+	require.Equal(t, "gcp_auth", parsed["stubbed_by"])
+
+	audit := parsed["audit"].(map[string]any)
+	require.Equal(t, "stub", audit["action"])
+	require.Equal(t, float64(200), audit["status_code"])
+}
+
 func TestAudit_TunnelInfo(t *testing.T) {
 	result := &PipelineResult{
 		Host:       "example.com",

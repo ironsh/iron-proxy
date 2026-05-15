@@ -42,7 +42,8 @@ func (p *Pipeline) SetAuditFunc(f AuditFunc) {
 }
 
 // ProcessRequest runs all request transforms in order. Returns a non-nil
-// *http.Response if the pipeline rejects the request (short-circuit).
+// *http.Response if the pipeline short-circuits the request (ActionReject or
+// ActionStub). Callers can use ShortCircuitAction(traces) to tell which.
 // Returns an error if any transform fails, which the caller should treat as 502.
 // The traces slice is appended to with each transform's result.
 func (p *Pipeline) ProcessRequest(ctx context.Context, tctx *TransformContext, req *http.Request, traces *[]TransformTrace) (*http.Response, error) {
@@ -69,7 +70,7 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, tctx *TransformContext, r
 		trace.Action = result.Action
 		*traces = append(*traces, trace)
 
-		if result.Action == ActionReject {
+		if result.Action == ActionReject || result.Action == ActionStub {
 			if result.Response != nil {
 				return result.Response, nil
 			}
@@ -80,8 +81,8 @@ func (p *Pipeline) ProcessRequest(ctx context.Context, tctx *TransformContext, r
 }
 
 // ProcessResponse runs all response transforms in order (same order as request).
-// Returns a replacement *http.Response if any transform rejects.
-// Returns an error if any transform fails.
+// Returns a replacement *http.Response if any transform short-circuits
+// (ActionReject or ActionStub). Returns an error if any transform fails.
 func (p *Pipeline) ProcessResponse(ctx context.Context, tctx *TransformContext, req *http.Request, resp *http.Response, traces *[]TransformTrace) (*http.Response, error) {
 	for _, t := range p.transforms {
 		start := time.Now()
@@ -107,7 +108,7 @@ func (p *Pipeline) ProcessResponse(ctx context.Context, tctx *TransformContext, 
 		trace.Action = result.Action
 		*traces = append(*traces, trace)
 
-		if result.Action == ActionReject {
+		if result.Action == ActionReject || result.Action == ActionStub {
 			if result.Response != nil {
 				return result.Response, nil
 			}
