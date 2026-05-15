@@ -314,7 +314,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	} else if rejectResp != nil {
-		result.Action = transform.ActionReject
+		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
 		p.writeResponse(w, rejectResp)
 		return
@@ -417,7 +417,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 
-	result.Action = transform.ActionContinue
+	result.Action = transform.ShortCircuitAction(result.ResponseTransforms)
 	result.StatusCode = finalResp.StatusCode
 
 	// MCP response wrapping: filter tools/list payloads and other JSON-RPC

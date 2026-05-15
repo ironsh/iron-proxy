@@ -155,6 +155,38 @@ func TestOTELAuditFunc_RejectedRequest(t *testing.T) {
 	assert.Equal(t, "allowlist", attrs["rejected_by"].AsString())
 }
 
+func TestOTELAuditFunc_StubbedRequest(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:       "oauth2.googleapis.com",
+		Method:     "POST",
+		Path:       "/token",
+		Action:     ActionStub,
+		StatusCode: 200,
+		Duration:   1 * time.Millisecond,
+		RequestTransforms: []TransformTrace{
+			{
+				Name:   "gcp_auth",
+				Action: ActionStub,
+			},
+		},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	rec := records[0]
+	assert.Equal(t, log.SeverityInfo1, rec.Severity())
+	assert.Equal(t, "INFO", rec.SeverityText())
+
+	attrs := recordAttrs(rec)
+	assert.Equal(t, "stub", attrs["action"].AsString())
+	assert.Equal(t, "gcp_auth", attrs["stubbed_by"].AsString())
+}
+
 func TestOTELAuditFunc_ErroredRequest(t *testing.T) {
 	proc := &recordProcessor{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))

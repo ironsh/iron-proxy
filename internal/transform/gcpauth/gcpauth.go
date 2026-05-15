@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/oauth2"
@@ -29,6 +30,15 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
+
+// stubAccessToken is the placeholder bearer returned to clients that fetch a
+// token from a GCP OAuth2 endpoint through the proxy. The real token is minted
+// by gcp_auth and swapped in just before the request leaves the proxy, so the
+// value here is never sent to Google: it just has to look like an opaque token
+// to the client SDK.
+const stubAccessToken = "iron-proxy-stub-token"
+
+var stubTokenJSON = []byte(`{"access_token":"` + stubAccessToken + `","expires_in":3600,"token_type":"Bearer"}`)
 
 func init() {
 	transform.Register("gcp_auth", factory)
@@ -114,6 +124,18 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 func (g *GCPAuth) Name() string { return "gcp_auth" }
 
 func (g *GCPAuth) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	// Stubbing the well-known OAuth2 token endpoints runs before host rules
+	// so client SDKs always complete their token dance against the proxy,
+	// even when the user's rules only target API hosts like
+	// bigquery.googleapis.com. gcp_auth itself mints the real token.
+	if isTokenEndpoint(req) {
+		tctx.Annotate("stubbed", "oauth2_token_endpoint")
+		return &transform.TransformResult{
+			Action:   transform.ActionStub,
+			Response: stubTokenResponse(req),
+		}, nil
+	}
+
 	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
@@ -179,4 +201,39 @@ func (g *GCPAuth) loadTokenSource(ctx context.Context) (oauth2.TokenSource, erro
 	}
 	g.tokenSource = cfg.TokenSource(ctx)
 	return g.tokenSource, nil
+}
+
+// isTokenEndpoint reports whether req targets a well-known GCP OAuth2 token
+// endpoint. Covers the JWT bearer grant endpoint used by service account
+// keyfiles (oauth2.googleapis.com/token) and the GCE/GKE metadata server
+// endpoints clients hit when they believe they are running on GCP.
+func isTokenEndpoint(req *http.Request) bool {
+	host := hostmatch.StripPort(req.Host)
+	var path string
+	if req.URL != nil {
+		path = req.URL.Path
+	}
+	switch host {
+	case "oauth2.googleapis.com":
+		return path == "/token"
+	case "metadata.google.internal", "169.254.169.254":
+		return strings.HasPrefix(path, "/computeMetadata/v1/instance/service-accounts/") &&
+			strings.HasSuffix(path, "/token")
+	}
+	return false
+}
+
+func stubTokenResponse(req *http.Request) *http.Response {
+	body := transform.NewBufferedBodyFromBytes(stubTokenJSON)
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Status:        "200 OK",
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": {"application/json"}},
+		Body:          body,
+		ContentLength: int64(len(stubTokenJSON)),
+		Request:       req,
+	}
 }

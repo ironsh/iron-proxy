@@ -31,6 +31,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Install the gcloud SDK (gcloud + bq) before the egress proxy locks
+      # down outbound traffic, so the SDK download isn't blocked. The bq CLI
+      # is exercised by TestGCPAuthBigQueryGcloudCLI.
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
       - uses: ironsh/iron-proxy-action@fa1fd82ec32396d044deba7040a6db576bec927a # v0.1.4
         with:
           egress-rules: egress-rules.yaml

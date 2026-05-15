@@ -88,9 +88,9 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		return fmt.Errorf("pipeline error for %q: %w", sni, pipelineErr)
 	}
 	if rejectResp != nil {
-		result.Action = transform.ActionReject
+		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
-		p.logger.Info("sni passthrough rejected by transform",
+		p.logger.Info("sni passthrough short-circuited by transform",
 			slog.String("sni", sni),
 			slog.Int("status", rejectResp.StatusCode),
 		)

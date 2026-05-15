@@ -279,6 +279,131 @@ secret_ref: "op://vault/missing"
 	require.ErrorContains(t, err, "not configured")
 }
 
+type stubTokenResp struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+}
+
+func decodeStubResponse(t *testing.T, resp *http.Response) stubTokenResp {
+	t.Helper()
+	require.NotNil(t, resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var out stubTokenResp
+	require.NoError(t, json.Unmarshal(body, &out))
+	return out
+}
+
+// TestGCPAuth_StubsOAuth2TokenEndpoint exercises the always-on stub for the
+// JWT bearer grant endpoint used by service-account keyfile flows. The rules
+// here target a different host on purpose: stubbing must not depend on the
+// configured rules matching the token endpoint.
+func TestGCPAuth_StubsOAuth2TokenEndpoint(t *testing.T) {
+	srv, calls := fakeTokenServer(t, "minted-token", 3600)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sa.json")
+	require.NoError(t, os.WriteFile(path, testKeyfileJSON(t, srv.URL, "sa@p.iam.gserviceaccount.com"), 0o600))
+
+	cfgYAML := `
+keyfile_path: ` + path + `
+scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+rules:
+  - host: "bigquery.googleapis.com"
+`
+	var c config
+	node := yamlFromString(t, cfgYAML)
+	require.NoError(t, node.Decode(&c))
+	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	require.NoError(t, err)
+	tctx := newContext()
+	res, err := g.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionStub, res.Action)
+
+	decoded := decodeStubResponse(t, res.Response)
+	require.Equal(t, stubAccessToken, decoded.AccessToken)
+	require.Equal(t, "Bearer", decoded.TokenType)
+	require.Equal(t, 3600, decoded.ExpiresIn)
+
+	annotations := tctx.DrainAnnotations()
+	require.Equal(t, "oauth2_token_endpoint", annotations["stubbed"])
+
+	require.Empty(t, req.Header.Get("Authorization"))
+	require.Equal(t, int64(0), calls.Load(), "real GCP token endpoint must not be hit when stubbing")
+}
+
+func TestGCPAuth_StubsMetadataServerToken(t *testing.T) {
+	srv, _ := fakeTokenServer(t, "minted-token", 3600)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sa.json")
+	require.NoError(t, os.WriteFile(path, testKeyfileJSON(t, srv.URL, "sa@p.iam.gserviceaccount.com"), 0o600))
+
+	cfg := config{
+		KeyfilePath: path,
+		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
+	}
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	require.NoError(t, err)
+
+	urls := []string{
+		"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+		"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/sa@p.iam.gserviceaccount.com/token",
+		"http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
+	}
+	for _, u := range urls {
+		t.Run(u, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, u, nil)
+			require.NoError(t, err)
+			tctx := newContext()
+			res, err := g.TransformRequest(context.Background(), tctx, req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionStub, res.Action)
+
+			decoded := decodeStubResponse(t, res.Response)
+			require.Equal(t, stubAccessToken, decoded.AccessToken)
+			require.Equal(t, "oauth2_token_endpoint", tctx.DrainAnnotations()["stubbed"])
+		})
+	}
+}
+
+// Paths on the same hosts that aren't the token endpoint should not be stubbed
+// — they fall through to the normal injection path so the matching upstream
+// keeps working.
+func TestGCPAuth_DoesNotStubNonTokenPaths(t *testing.T) {
+	srv, _ := fakeTokenServer(t, "minted-token", 3600)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sa.json")
+	require.NoError(t, os.WriteFile(path, testKeyfileJSON(t, srv.URL, "sa@p.iam.gserviceaccount.com"), 0o600))
+
+	cfg := config{
+		KeyfilePath: path,
+		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
+	}
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	require.NoError(t, err)
+
+	cases := []string{
+		"https://oauth2.googleapis.com/revoke",
+		"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, u, nil)
+			require.NoError(t, err)
+			res, err := g.TransformRequest(context.Background(), newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+			require.Equal(t, "Bearer minted-token", req.Header.Get("Authorization"))
+		})
+	}
+}
+
 // End-to-end through the registered transform factory and the real secrets
 // package: keyfile loaded via the env source.
 func TestGCPAuth_Factory_EndToEnd(t *testing.T) {
