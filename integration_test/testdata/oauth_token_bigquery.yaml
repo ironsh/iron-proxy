@@ -1,0 +1,38 @@
+dns:
+  proxy_ip: "127.0.0.1"
+  listen: "127.0.0.1:0"
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  tunnel_listen: "127.0.0.1:0"
+  max_request_body_bytes: 1048576
+  upstream_deny_cidrs: []
+
+tls:
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
+
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "bigquery.googleapis.com"
+
+  - name: oauth_token
+    config:
+      tokens:
+        - grant: jwt_bearer
+          credential:
+            type: env
+            var: GCP_BIGQUERY_KEYFILE_JSON
+          scopes:
+            - "https://www.googleapis.com/auth/bigquery"
+          rules:
+            - host: "bigquery.googleapis.com"
+
+metrics:
+  listen: "127.0.0.1:0"
+
+log:
+  level: info

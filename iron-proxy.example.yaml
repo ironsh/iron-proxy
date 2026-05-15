@@ -256,6 +256,44 @@ transforms:
   #     rules:
   #       - host: "*.googleapis.com"
 
+  # OAuth2 token injection. Mints short-lived OAuth2 access tokens and sets
+  # Authorization: Bearer on matching requests. Each entry under tokens names
+  # a grant type, a credential, and the hosts it applies to. Token exchange,
+  # caching, and refresh are handled automatically. Requires MITM mode. On a
+  # minting failure the request is rejected with a 502.
+  #
+  # grant is one of:
+  #   refresh_token       RFC 6749 — an authorized-user blob (a refresh token)
+  #   jwt_bearer          RFC 7523 — a GCP service-account keyfile
+  #   client_credentials  RFC 6749 4.4 — a client id and secret
+  #
+  # credential resolves the credential blob from any secret source (env,
+  # aws_sm, aws_ssm, 1password, 1password_connect), the same shape as a
+  # secrets transform source. Setting token_endpoint also stubs that endpoint,
+  # so a sandboxed client SDK can complete its own token dance against the
+  # proxy with a placeholder token while the proxy injects the real one.
+  # - name: oauth_token
+  #   config:
+  #     tokens:
+  #       - grant: refresh_token
+  #         credential:
+  #           type: 1password_connect
+  #           secret_ref: "op://Engineering/GSUITE-OAUTH/credential"
+  #         token_endpoint: "https://oauth2.googleapis.com/token"
+  #         scopes:
+  #           - "https://www.googleapis.com/auth/gmail.readonly"
+  #         rules:
+  #           - host: "gmail.googleapis.com"
+  #       - grant: jwt_bearer
+  #         credential:
+  #           type: 1password_connect
+  #           secret_ref: "op://Engineering/BIGQUERY-SA/credential"
+  #         subject: ""   # set for Workspace domain-wide delegation
+  #         scopes:
+  #           - "https://www.googleapis.com/auth/bigquery.readonly"
+  #         rules:
+  #           - host: "bigquery.googleapis.com"
+
   # Header allowlist: strips any request header not listed below before the
   # request goes upstream. Default-deny — every header must either match a
   # literal name (case-insensitive) or a /regex/ pattern. Place this AFTER
