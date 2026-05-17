@@ -81,6 +81,13 @@ type TransformContext struct {
 	Mode       Mode
 	Tunnel     *TunnelInfo
 
+	// BodyCapture is the side channel a body_capture transform uses to
+	// communicate captured request body bytes out of the pipeline. The proxy
+	// copies it onto PipelineResult after the request pipeline runs so the
+	// audit emitters can render top-level `request_body` / `request_body_truncated`
+	// fields. nil when no body_capture rule matched.
+	BodyCapture BodyCapture
+
 	// annotations is written by transforms via Annotate and read by the pipeline
 	// to build TransformTrace. Not exported — transforms use the Annotate method.
 	annotations map[string]any
@@ -142,6 +149,15 @@ type PipelineResult struct {
 	// internal/mcp.
 	MCP MCPAudit
 
+	// BodyCapture carries captured request body bytes from a body_capture
+	// transform when the request matched a configured rule. nil otherwise.
+	// Populated by the proxy by copying tctx.BodyCapture after the request
+	// pipeline runs; rendered by the audit functions as top-level
+	// `request_body` and `request_body_truncated` fields. The transform
+	// package treats the concrete type as opaque to avoid an import cycle
+	// with internal/transform/bodycapture.
+	BodyCapture BodyCapture
+
 	Err error
 
 	// ClientCanceled distinguishes client-initiated disconnect from a real
@@ -159,6 +175,22 @@ type MCPAudit interface {
 	// MCPMessages returns the audit messages in observed order. Each entry
 	// is a flat key/value map suitable for JSON encoding (string-keyed).
 	MCPMessages() []map[string]any
+}
+
+// BodyCapture is the read-only view of a body_capture transform's per-request
+// captured body data. The interface decouples internal/transform's audit
+// renderers from the concrete struct in internal/transform/bodycapture so the
+// audit emitters can render captured bodies without an import cycle.
+//
+// This interface covers request bodies only.
+type BodyCapture interface {
+	// RequestBody returns the captured request body bytes (truncated to the
+	// transform's configured cap). Empty string when no rule matched the
+	// request or the request had no body.
+	RequestBody() string
+	// RequestBodyTruncated reports whether the captured RequestBody was
+	// truncated to fit the transform's configured cap.
+	RequestBodyTruncated() bool
 }
 
 // TransformTrace records what a single transform did.

@@ -32,6 +32,7 @@ import (
 	// Register built-in transforms.
 	_ "github.com/ironsh/iron-proxy/internal/transform/allowlist"
 	_ "github.com/ironsh/iron-proxy/internal/transform/annotate"
+	_ "github.com/ironsh/iron-proxy/internal/transform/bodycapture"
 	_ "github.com/ironsh/iron-proxy/internal/transform/gcpauth"
 	_ "github.com/ironsh/iron-proxy/internal/transform/grpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/headerallowlist"

@@ -208,8 +208,9 @@ Transforms run in order. Built-in transforms:
 
 | Transform   | What it does                                                                                                            |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `allowlist` | Permits requests to matching domains/CIDRs; rejects everything else (403).                                              |
-| `secrets`   | Scans headers, query params, and optionally body for proxy tokens and swaps in real secrets from environment variables. |
+| `allowlist`    | Permits requests to matching domains/CIDRs; rejects everything else (403).                                              |
+| `secrets`      | Scans headers, query params, and optionally body for proxy tokens and swaps in real secrets from environment variables. |
+| `body_capture` | Records decoded request bodies of matching hosts as `request_body` audit fields. Observation-only; never rejects.       |
 
 ## Configuration
 
@@ -356,6 +357,44 @@ transforms:
         - "/^X-Trace-.*$/"
       rules:
         - host: "api.openai.com"
+```
+
+### Body capture
+
+Records the decoded request body of matching requests and surfaces it on the
+audit log record as top-level `request_body` and `request_body_truncated`
+fields. Useful for auditing the payloads passing through the proxy, such as the
+prompts a sandbox sends to an LLM provider, without modifying the upstream
+traffic.
+
+Hosts, methods, and paths are matched with the same `rules` syntax as
+`allowlist` and `secrets`. `max_request_body_bytes` caps how much of each body
+is captured; bodies larger than the cap are truncated to the prefix and
+`request_body_truncated` is set to `true`. The cap defaults to 16 KiB and is
+independent of the global `proxy.max_request_body_bytes` limit. This transform
+is observation-only: it never rejects a request, and body read errors are
+annotated on the trace rather than failing the request.
+
+Response bodies are not captured. Streaming responses (SSE) would have to be
+buffered end-to-end before forwarding, which would stall the client.
+
+> **Warning:** Captured bodies are written to the audit log in plain text. When
+> `secrets` runs with `match_body: true`, place `body_capture` *before* `secrets`
+> so the audit log records the sandbox's proxy tokens rather than the real
+> credentials `secrets` swaps into the body.
+
+```yaml
+transforms:
+  - name: body_capture
+    config:
+      max_request_body_bytes: 16384
+      rules:
+        - host: "api.anthropic.com"
+          methods: ["POST"]
+          paths: ["/v1/messages"]
+        - host: "api.openai.com"
+          methods: ["POST"]
+          paths: ["/v1/chat/completions"]
 ```
 
 ### Secrets

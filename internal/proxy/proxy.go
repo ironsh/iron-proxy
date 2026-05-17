@@ -304,7 +304,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	r.Body = transform.NewBufferedBody(r.Body, bodyLimits.MaxRequestBodyBytes)
 
 	// Run request transforms
-	if rejectResp, err := pl.ProcessRequest(r.Context(), tctx, r, &result.RequestTransforms); err != nil {
+	rejectResp, err := pl.ProcessRequest(r.Context(), tctx, r, &result.RequestTransforms)
+	// Copy any captured request body from the body_capture transform's side
+	// channel onto the PipelineResult so the audit emitters can render it as
+	// a top-level field. Done unconditionally so reject + error paths still
+	// preserve the captured body (matches MCP's behavior at line ~333 below).
+	result.BodyCapture = tctx.BodyCapture
+	if err != nil {
 		if markIfClientCancel(r, err, result) {
 			return
 		}
@@ -313,7 +319,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		result.Err = err
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
-	} else if rejectResp != nil {
+	}
+	if rejectResp != nil {
 		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
 		p.writeResponse(w, rejectResp)
