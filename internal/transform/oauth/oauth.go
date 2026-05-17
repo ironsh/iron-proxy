@@ -36,6 +36,15 @@ const (
 	grantClientCredentials = "client_credentials"
 )
 
+// Credential field keys. They name both a config field and the corresponding
+// key in the resolved-value map handed to the token-source builders, so the
+// two sides stay in sync.
+const (
+	fieldRefreshToken = "refresh_token"
+	fieldClientID     = "client_id"
+	fieldClientSecret = "client_secret"
+)
+
 // stubAccessToken is the placeholder bearer returned to clients that fetch a
 // token from a configured token endpoint through the proxy. The real token is
 // minted by oauth_token and swapped in just before the request leaves the
@@ -91,8 +100,7 @@ type tokenEntry struct {
 	cfgEndpoint string // config token_endpoint
 	logger      *slog.Logger
 
-	// sources holds the entry's credential secret sources, keyed by field:
-	// "refresh_token" / "client_id" / "client_secret".
+	// sources holds the entry's credential secret sources, keyed by field.
 	sources map[string]secrets.Source
 
 	// mu guards the lazily built token source and the fingerprint of the
@@ -224,11 +232,11 @@ func buildCredentialSources(tc tokenEntryConfig, logger *slog.Logger, buildSourc
 			return nil, fmt.Errorf("refresh_token grant requires \"client_id\"")
 		}
 		fields := map[string]yaml.Node{
-			"refresh_token": tc.RefreshToken,
-			"client_id":     tc.ClientID,
+			fieldRefreshToken: tc.RefreshToken,
+			fieldClientID:     tc.ClientID,
 		}
 		if isSet(tc.ClientSecret) {
-			fields["client_secret"] = tc.ClientSecret
+			fields[fieldClientSecret] = tc.ClientSecret
 		}
 		return buildAll(fields)
 
@@ -237,8 +245,8 @@ func buildCredentialSources(tc tokenEntryConfig, logger *slog.Logger, buildSourc
 			return nil, fmt.Errorf("client_credentials grant requires \"client_id\" and \"client_secret\"")
 		}
 		return buildAll(map[string]yaml.Node{
-			"client_id":     tc.ClientID,
-			"client_secret": tc.ClientSecret,
+			fieldClientID:     tc.ClientID,
+			fieldClientSecret: tc.ClientSecret,
 		})
 	}
 	return nil, fmt.Errorf("unknown grant %q", tc.Grant) // unreachable: grant is validated above

@@ -200,8 +200,6 @@ func (g *GCPAuth) loadTokenSource(ctx context.Context) (oauth2.TokenSource, erro
 	if err != nil {
 		return nil, fmt.Errorf("parsing GCP service account keyfile: %w", err)
 	}
-	// A non-empty subject impersonates that Workspace user via domain-wide
-	// delegation.
 	cfg.Subject = g.subject
 	var meta struct {
 		ClientEmail string `json:"client_email"`

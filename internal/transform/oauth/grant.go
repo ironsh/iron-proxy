@@ -98,9 +98,9 @@ func buildTokenSource(ctx context.Context, grant string, vals map[string]string,
 // client secret (public clients have none). The token endpoint comes from the
 // configured token_endpoint.
 func refreshTokenTokenSource(ctx context.Context, vals map[string]string, scopes []string, cfgEndpoint string) (oauth2.TokenSource, error) {
-	refreshToken := vals["refresh_token"]
-	clientID := vals["client_id"]
-	clientSecret := vals["client_secret"] // empty for public clients
+	refreshToken := vals[fieldRefreshToken]
+	clientID := vals[fieldClientID]
+	clientSecret := vals[fieldClientSecret] // empty for public clients
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh_token grant is missing the refresh token")
 	}
@@ -131,8 +131,8 @@ func refreshTokenTokenSource(ctx context.Context, vals map[string]string, scopes
 // clientCredentialsTokenSource builds a token source for the RFC 6749 4.4
 // client_credentials grant from discrete client_id and client_secret sources.
 func clientCredentialsTokenSource(ctx context.Context, vals map[string]string, scopes []string, tokenURL string) (oauth2.TokenSource, error) {
-	clientID := vals["client_id"]
-	clientSecret := vals["client_secret"]
+	clientID := vals[fieldClientID]
+	clientSecret := vals[fieldClientSecret]
 	if clientID == "" || clientSecret == "" {
 		return nil, fmt.Errorf("client_credentials grant needs a client id and client secret")
 	}

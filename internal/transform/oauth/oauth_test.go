@@ -273,8 +273,6 @@ tokens:
 
 // --- refresh_token grant ---
 
-// refresh_token, client_id, and client_secret are resolved from separate
-// secret sources.
 func TestRefreshTokenGrant_InjectsBearer(t *testing.T) {
 	srv := newTokenServer(t, nil)
 	o := buildTransformWith(t, `

@@ -351,9 +351,10 @@ func (cv *cachedValue) Get(ctx context.Context) (string, error) {
 // --- JSON extraction ---
 
 // jsonKeySource wraps a source whose value is a JSON object, exposing the
-// single top-level string field named by key. Extraction runs on every Get;
-// the wrapped source's own caching keeps that cheap. Available to every source
-// type via the optional json_key field (see resolveSource).
+// single top-level string field named by key. The wrapped source caches the
+// fetch; the JSON is re-parsed on every Get, which is cheap for the small
+// credential objects json_key targets. Available to every source type via the
+// optional json_key field (see resolveSource).
 type jsonKeySource struct {
 	inner secretSource
 	key   string
