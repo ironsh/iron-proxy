@@ -86,6 +86,12 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 			}
 			attrs = append(attrs, slog.Group("mcp", mcpAttrs...))
 		}
+		if result.BodyCapture != nil && result.BodyCapture.RequestBody() != "" {
+			attrs = append(attrs,
+				slog.String("request_body", result.BodyCapture.RequestBody()),
+				slog.Bool("request_body_truncated", result.BodyCapture.RequestBodyTruncated()),
+			)
+		}
 
 		switch {
 		case result.Err != nil:

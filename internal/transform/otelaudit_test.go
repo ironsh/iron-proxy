@@ -213,6 +213,80 @@ func TestOTELAuditFunc_ErroredRequest(t *testing.T) {
 	assert.Equal(t, "connection reset", attrs["error"].AsString())
 }
 
+func TestOTELAuditFunc_BodyCapture_PopulatesTopLevelFields(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:        "api.anthropic.com",
+		Method:      "POST",
+		Path:        "/v1/messages",
+		StartedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Duration:    50 * time.Millisecond,
+		Action:      ActionContinue,
+		StatusCode:  200,
+		BodyCapture: &fakeBodyCapture{body: `{"prompt":"hi"}`, truncated: false},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	attrs := recordAttrs(records[0])
+	require.Contains(t, attrs, "request_body")
+	assert.Equal(t, `{"prompt":"hi"}`, attrs["request_body"].AsString())
+	require.Contains(t, attrs, "request_body_truncated")
+	assert.Equal(t, false, attrs["request_body_truncated"].AsBool())
+}
+
+func TestOTELAuditFunc_BodyCapture_TruncationFlagPropagates(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:        "api.openai.com",
+		Method:      "POST",
+		Path:        "/v1/chat/completions",
+		StartedAt:   time.Now(),
+		Duration:    50 * time.Millisecond,
+		Action:      ActionContinue,
+		StatusCode:  200,
+		BodyCapture: &fakeBodyCapture{body: "xxxxxxxxxx", truncated: true},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	attrs := recordAttrs(records[0])
+	require.Contains(t, attrs, "request_body_truncated")
+	assert.True(t, attrs["request_body_truncated"].AsBool())
+}
+
+func TestOTELAuditFunc_BodyCapture_NilOmitsFields(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:       "example.com",
+		Method:     "GET",
+		Path:       "/",
+		StartedAt:  time.Now(),
+		Duration:   1 * time.Millisecond,
+		Action:     ActionContinue,
+		StatusCode: 200,
+		// BodyCapture: nil
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	attrs := recordAttrs(records[0])
+	assert.NotContains(t, attrs, "request_body")
+	assert.NotContains(t, attrs, "request_body_truncated")
+}
+
 func TestChainAuditFuncs(t *testing.T) {
 	var calls []string
 	f1 := AuditFunc(func(_ *PipelineResult) { calls = append(calls, "f1") })
