@@ -182,10 +182,7 @@ type MCPAudit interface {
 // renderers from the concrete struct in internal/transform/bodycapture so the
 // audit emitters can render captured bodies without an import cycle.
 //
-// Phase 1a (ENG-572 in the litmus repo) covers request bodies only. A future
-// follow-up may add ResponseBody() / ResponseBodyTruncated() once iron-proxy
-// has tee-stream support so capturing response bodies doesn't stall SSE
-// streams.
+// This interface covers request bodies only.
 type BodyCapture interface {
 	// RequestBody returns the captured request body bytes (truncated to the
 	// transform's configured cap). Empty string when no rule matched the

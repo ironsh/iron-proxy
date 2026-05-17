@@ -294,7 +294,7 @@ func TestAudit_BodyCapture_PopulatesTopLevelFields(t *testing.T) {
 
 	// request_body / request_body_truncated land at the TOP level of the log
 	// record (mirroring the MCP block's position), not inside the `audit`
-	// group. ENG-571 / litmus parseIronProxyAudit reads them at root.
+	// group.
 	require.Equal(t, `{"prompt":"hi"}`, parsed["request_body"], "raw=%s", raw)
 	require.Equal(t, false, parsed["request_body_truncated"])
 }

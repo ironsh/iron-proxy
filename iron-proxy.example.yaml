@@ -311,6 +311,20 @@ transforms:
   #     rules:
   #       - host: "api.openai.com"
 
+  # Body capture: records decoded request bodies of matching hosts onto the
+  # audit log as top-level request_body / request_body_truncated fields.
+  # Observation-only — never rejects. max_request_body_bytes caps each capture
+  # (default 16384); larger bodies are truncated and flagged. When secrets runs
+  # with match_body: true, place body_capture BEFORE secrets so the audit log
+  # records proxy tokens rather than the real swapped-in credentials.
+  # - name: body_capture
+  #   config:
+  #     max_request_body_bytes: 16384
+  #     rules:
+  #       - host: "api.anthropic.com"
+  #         methods: ["POST"]
+  #         paths: ["/v1/messages"]
+
   # gRPC transforms: each entry delegates to one external TransformService server.
   # Use multiple entries for multiple servers; they run in pipeline order.
   - name: grpc

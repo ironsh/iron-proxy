@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -90,6 +91,28 @@ func TestBodyCapture_BodyExceedsCap_TruncatesWithFlag(t *testing.T) {
 	require.True(t, tctx.BodyCapture.RequestBodyTruncated(), "truncated flag should be set")
 }
 
+func TestBodyCapture_Truncation_TrimsPartialUTF8Rune(t *testing.T) {
+	// Cap falls in the middle of a multi-byte rune. The captured body must be
+	// valid UTF-8 (no dangling fragment) so it renders cleanly in audit JSON.
+	// "€" is 3 bytes (0xE2 0x82 0xAC). With a body of "ab€" (5 bytes) and a
+	// cap of 4, the naive cut keeps "ab" + the first 2 bytes of "€".
+	const cap = 4
+	bc := newTransform(t, cap, []hostmatch.RuleConfig{
+		{Host: "api.anthropic.com"},
+	})
+	req := makeRequest(t, "api.anthropic.com", "/v1/messages", "ab€")
+	tctx := &transform.TransformContext{}
+
+	_, err := bc.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+
+	require.NotNil(t, tctx.BodyCapture)
+	got := tctx.BodyCapture.RequestBody()
+	require.True(t, utf8.ValidString(got), "captured body must be valid UTF-8, got %q", got)
+	require.Equal(t, "ab", got, "partial trailing rune should be trimmed back to a boundary")
+	require.True(t, tctx.BodyCapture.RequestBodyTruncated())
+}
+
 func TestBodyCapture_EmptyBody_DoesNotPopulateTctx(t *testing.T) {
 	bc := newTransform(t, 16*1024, []hostmatch.RuleConfig{
 		{Host: "api.anthropic.com"},
@@ -130,10 +153,9 @@ func TestBodyCapture_MultipleRules_FirstMatchCapturesOnce(t *testing.T) {
 }
 
 func TestBodyCapture_TransformResponse_IsNoop(t *testing.T) {
-	// Phase 1a: response capture is deferred until iron-proxy gains tee-stream
-	// support. TransformResponse must NOT touch the response body — doing so
-	// would force-buffer streaming SSE responses (Claude/OpenAI replies),
-	// stalling the candidate's terminal. This test pins that behavior.
+	// TransformResponse must NOT touch the response body — doing so would
+	// force-buffer streaming SSE responses (Claude/OpenAI replies), stalling
+	// the client. This test pins that behavior.
 	bc := newTransform(t, 16*1024, []hostmatch.RuleConfig{
 		{Host: "api.anthropic.com"},
 	})
@@ -152,8 +174,8 @@ func TestBodyCapture_TransformResponse_IsNoop(t *testing.T) {
 	// "never buffered"). If a future change starts reading it, this test
 	// fails and forces a deliberate update.
 	require.Equal(t, -1, transform.RequireBufferedBody(resp.Body).Len(),
-		"response body must not be read in Phase 1a — would break SSE streaming")
-	require.Nil(t, tctx.BodyCapture, "response transform must not populate BodyCapture in Phase 1a")
+		"response body must not be read — would break SSE streaming")
+	require.Nil(t, tctx.BodyCapture, "response transform must not populate BodyCapture")
 }
 
 func TestBodyCapture_BodyCaptureInterface(t *testing.T) {
