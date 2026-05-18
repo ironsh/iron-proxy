@@ -410,7 +410,11 @@ func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue
 
 	var locations []string
 	if sec.injectHeader != "" {
-		req.Header.Set(sec.injectHeader, formatted)
+		// Remove any existing header under the canonical name, then assign
+		// the map key directly so the user's configured casing is sent over
+		// the wire. http.Header.Set would canonicalize the key.
+		req.Header.Del(sec.injectHeader)
+		req.Header[sec.injectHeader] = []string{formatted}
 		locations = append(locations, "header:"+sec.injectHeader)
 	}
 	if sec.injectQueryParam != "" {

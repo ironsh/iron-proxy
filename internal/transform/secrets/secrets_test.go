@@ -1063,6 +1063,40 @@ func TestInject_HeaderNoFormatter(t *testing.T) {
 	require.Equal(t, "sk-real-openai-key", req.Header.Get("X-Api-Key"))
 }
 
+func TestInject_HeaderPreservesUserCasing(t *testing.T) {
+	// The configured header casing is sent over the wire verbatim rather
+	// than being canonicalized.
+	s := makeSecrets(t, []secretEntry{injectEntry(func(e *secretEntry) {
+		e.Inject.Formatter = ""
+		e.Inject.Header = "X-API-KEY"
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	doTransform(t, s, req)
+
+	// Stored under the user's casing; canonical lookup no longer finds it.
+	require.Equal(t, []string{"sk-real-openai-key"}, rawHeaderValues(req.Header, "X-API-KEY"))
+	_, canonicalExists := req.Header["X-Api-Key"]
+	require.False(t, canonicalExists, "canonical key should not be present")
+}
+
+func TestInject_HeaderReplacesExistingCanonicalValue(t *testing.T) {
+	// An inbound header under the canonical name is replaced, not duplicated,
+	// when the configured casing differs.
+	s := makeSecrets(t, []secretEntry{injectEntry(func(e *secretEntry) {
+		e.Inject.Formatter = ""
+		e.Inject.Header = "X-API-KEY"
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "stale-value")
+	doTransform(t, s, req)
+
+	require.Equal(t, []string{"sk-real-openai-key"}, rawHeaderValues(req.Header, "X-API-KEY"))
+	_, canonicalExists := req.Header["X-Api-Key"]
+	require.False(t, canonicalExists, "stale canonical header should be removed")
+}
+
 func TestInject_Base64Formatter(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{injectEntry(func(e *secretEntry) {
 		e.Inject.Formatter = `Basic {{ base64 "x-credential:" .Value }}`
