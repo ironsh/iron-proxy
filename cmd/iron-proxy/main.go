@@ -27,6 +27,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/postgres"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/usage"
 	"github.com/ironsh/iron-proxy/internal/version"
 
 	// Register built-in transforms.
@@ -156,6 +157,27 @@ func main() {
 	}
 	holder.Load().SetAuditFunc(auditFunc)
 
+	var usageRecorder *usage.Recorder
+	if cfg.Usage.Enabled {
+		sink, sinkErr := usage.NewS3Sink(ctx, usage.S3SinkConfig{
+			Bucket:        cfg.Usage.S3.Bucket,
+			Prefix:        cfg.Usage.S3.Prefix,
+			Region:        cfg.Usage.S3.Region,
+			QueueSize:     cfg.Usage.QueueSize,
+			MaxBatch:      cfg.Usage.MaxBatch,
+			FlushInterval: time.Duration(cfg.Usage.FlushInterval),
+		}, logger)
+		if sinkErr != nil {
+			logger.Error("initializing usage event sink", slog.String("error", sinkErr.Error()))
+			os.Exit(1)
+		}
+		usageRecorder = usage.NewRecorder(sink, logger)
+		logger.Info("usage event export enabled",
+			slog.String("bucket", cfg.Usage.S3.Bucket),
+			slog.String("prefix", cfg.Usage.S3.Prefix),
+		)
+	}
+
 	// Initialize cert cache. Not needed in sni-only mode since TLS is never
 	// terminated and no leaf certs are generated.
 	var certCache *certcache.Cache
@@ -222,6 +244,7 @@ func main() {
 		Guard:                         guard,
 		MCPPolicy:                     mcpHolder,
 		Logger:                        logger,
+		UsageRecorder:                 usageRecorder,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 	})
 
@@ -290,6 +313,11 @@ func main() {
 	}
 	if err := p.Shutdown(shutdownCtx); err != nil {
 		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
+	}
+	if usageRecorder != nil {
+		if err := usageRecorder.Close(shutdownCtx); err != nil {
+			logger.Error("usage event sink shutdown error", slog.String("error", err.Error()))
+		}
 	}
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("metrics server shutdown error", slog.String("error", err.Error()))

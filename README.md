@@ -113,6 +113,12 @@ Every request produces a structured JSON audit entry:
 Rejected requests include a `rejected_by` field and log at WARN level. See
 [Audit log format](#audit-log-format) for the full schema.
 
+When `usage_events.enabled` is true, iron-proxy also emits durable normalized
+LLM usage-count events to S3. The recorder supports Anthropic and OpenAI
+responses, including streaming responses when the provider sends usage in the
+stream. Events are queued in-process, flushed as newline-delimited JSON batches,
+and dropped with a warning if the queue is full.
+
 ## Production usage
 
 ### 1. Generate a CA
@@ -242,6 +248,16 @@ tls:
   ca_key: "/etc/iron-proxy/ca.key" # Required
   cert_cache_size: 1000 # LRU cache for generated leaf certs
   leaf_cert_expiry_hours: 72
+
+usage_events:
+  enabled: true
+  queue_size: 1000
+  max_batch: 100
+  flush_interval: "10s"
+  s3:
+    bucket: "my-usage-events"
+    prefix: "iron-proxy/usage-events"
+    region: "us-east-1"
 
 transforms:
   - name: allowlist

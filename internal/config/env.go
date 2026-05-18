@@ -43,6 +43,22 @@ func applyEnvOverrides(cfg *Config) error {
 	if v := os.Getenv("IRON_LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v
 	}
+	if v := os.Getenv("IRON_USAGE_EVENTS_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("IRON_USAGE_EVENTS_ENABLED: %w", err)
+		}
+		cfg.Usage.Enabled = b
+	}
+	if v := os.Getenv("IRON_USAGE_EVENTS_S3_BUCKET"); v != "" {
+		cfg.Usage.S3.Bucket = v
+	}
+	if v := os.Getenv("IRON_USAGE_EVENTS_S3_PREFIX"); v != "" {
+		cfg.Usage.S3.Prefix = v
+	}
+	if v := os.Getenv("IRON_USAGE_EVENTS_S3_REGION"); v != "" {
+		cfg.Usage.S3.Region = v
+	}
 
 	if v := os.Getenv("IRON_PROXY_MAX_REQUEST_BODY_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -82,6 +98,30 @@ func applyEnvOverrides(cfg *Config) error {
 			return fmt.Errorf("IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT: %w", err)
 		}
 		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(d)
+	}
+
+	if v := os.Getenv("IRON_USAGE_EVENTS_QUEUE_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("IRON_USAGE_EVENTS_QUEUE_SIZE: %w", err)
+		}
+		cfg.Usage.QueueSize = n
+	}
+
+	if v := os.Getenv("IRON_USAGE_EVENTS_MAX_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("IRON_USAGE_EVENTS_MAX_BATCH: %w", err)
+		}
+		cfg.Usage.MaxBatch = n
+	}
+
+	if v := os.Getenv("IRON_USAGE_EVENTS_FLUSH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("IRON_USAGE_EVENTS_FLUSH_INTERVAL: %w", err)
+		}
+		cfg.Usage.FlushInterval = Duration(d)
 	}
 
 	return nil

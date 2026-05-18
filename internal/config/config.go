@@ -54,6 +54,7 @@ type Config struct {
 	Postgres   yaml.Node   `yaml:"postgres"`
 	Metrics    Metrics     `yaml:"metrics"`
 	Management Management  `yaml:"management"`
+	Usage      UsageEvents `yaml:"usage_events"`
 	Log        Log         `yaml:"log"`
 }
 
@@ -149,6 +150,21 @@ type Management struct {
 	APIKeyEnv string `yaml:"api_key_env"`
 }
 
+// UsageEvents configures durable provider usage-count event emission.
+type UsageEvents struct {
+	Enabled       bool     `yaml:"enabled"`
+	QueueSize     int      `yaml:"queue_size"`
+	MaxBatch      int      `yaml:"max_batch"`
+	FlushInterval Duration `yaml:"flush_interval"`
+	S3            UsageS3  `yaml:"s3"`
+}
+
+type UsageS3 struct {
+	Bucket string `yaml:"bucket"`
+	Prefix string `yaml:"prefix"`
+	Region string `yaml:"region"`
+}
+
 // Log configures structured logging.
 type Log struct {
 	Level string `yaml:"level"`
@@ -240,6 +256,18 @@ func applyDefaults(cfg *Config) {
 	if cfg.Management.Listen != "" && cfg.Management.APIKeyEnv == "" {
 		cfg.Management.APIKeyEnv = "IRON_MANAGEMENT_API_KEY"
 	}
+	if cfg.Usage.QueueSize == 0 {
+		cfg.Usage.QueueSize = 1000
+	}
+	if cfg.Usage.MaxBatch == 0 {
+		cfg.Usage.MaxBatch = 100
+	}
+	if cfg.Usage.FlushInterval == 0 {
+		cfg.Usage.FlushInterval = Duration(10 * time.Second)
+	}
+	if cfg.Usage.S3.Prefix == "" {
+		cfg.Usage.S3.Prefix = "iron-proxy/usage-events"
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -283,6 +311,21 @@ func Validate(cfg *Config) error {
 		}
 		if os.Getenv(cfg.Management.APIKeyEnv) == "" {
 			return fmt.Errorf("management.api_key_env %q is not set in the environment", cfg.Management.APIKeyEnv)
+		}
+	}
+
+	if cfg.Usage.Enabled {
+		if cfg.Usage.S3.Bucket == "" {
+			return fmt.Errorf("usage_events.s3.bucket is required when usage_events.enabled=true")
+		}
+		if cfg.Usage.QueueSize <= 0 {
+			return fmt.Errorf("usage_events.queue_size must be positive")
+		}
+		if cfg.Usage.MaxBatch <= 0 {
+			return fmt.Errorf("usage_events.max_batch must be positive")
+		}
+		if cfg.Usage.FlushInterval <= 0 {
+			return fmt.Errorf("usage_events.flush_interval must be positive")
 		}
 	}
 

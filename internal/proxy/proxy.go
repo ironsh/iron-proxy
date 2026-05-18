@@ -23,6 +23,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/usage"
 )
 
 // Proxy is the HTTP/HTTPS proxy server. When Mode is TLSModeMITM, the HTTPS
@@ -44,6 +45,7 @@ type Proxy struct {
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
 	mcpPolicy      *mcp.PolicyHolder
+	usageRecorder  *usage.Recorder
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -59,16 +61,17 @@ type Proxy struct {
 
 // Options configures Proxy construction.
 type Options struct {
-	HTTPAddr   string
-	HTTPSAddr  string
-	TunnelAddr string
-	TLSMode    string
-	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
-	Pipeline   *transform.PipelineHolder
-	Resolver   *net.Resolver
-	Guard      *dnsguard.Guard // nil is treated as an empty (no-op) guard
-	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
-	Logger     *slog.Logger
+	HTTPAddr      string
+	HTTPSAddr     string
+	TunnelAddr    string
+	TLSMode       string
+	CertCache     *certcache.Cache // required when TLSMode == config.TLSModeMITM
+	Pipeline      *transform.PipelineHolder
+	Resolver      *net.Resolver
+	Guard         *dnsguard.Guard   // nil is treated as an empty (no-op) guard
+	MCPPolicy     *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	UsageRecorder *usage.Recorder
+	Logger        *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
 	// config.DefaultUpstreamResponseHeaderTimeout.
@@ -97,6 +100,7 @@ func New(opts Options) *Proxy {
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
+		usageRecorder:  opts.UsageRecorder,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -323,7 +327,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	if rejectResp != nil {
 		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
-		p.writeResponse(w, rejectResp)
+		_ = p.writeResponse(w, rejectResp, nil)
 		return
 	}
 
@@ -352,7 +356,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 			if rejectResp != nil {
 				result.Action = transform.ActionReject
 				result.StatusCode = rejectResp.StatusCode
-				p.writeResponse(w, rejectResp)
+				_ = p.writeResponse(w, rejectResp, nil)
 				return
 			}
 		}
@@ -393,6 +397,14 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		upstreamReq.ContentLength = int64(reqBodyLen)
 	} else {
 		upstreamReq.ContentLength = r.ContentLength
+	}
+
+	var usageObs *usage.Observation
+	if p.usageRecorder != nil {
+		usageObs = p.usageRecorder.Observe(r)
+	}
+	if usageObs != nil && upstreamReq.Body != nil {
+		upstreamReq.Body = usageObs.WrapRequestReadCloser(upstreamReq.Body)
 	}
 
 	resp, err := p.doUpstream(upstreamReq)
@@ -443,11 +455,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 
 	// SSE: stream with flushing
 	if isSSE(finalResp) {
-		p.streamSSE(w, finalResp)
+		copyErr := p.streamSSE(w, finalResp, usageObs)
+		if usageObs != nil {
+			usageObs.Finish(result.StartedAt, result.StatusCode, copyErr)
+		}
 		return
 	}
 
-	p.writeResponse(w, finalResp)
+	copyErr := p.writeResponse(w, finalResp, usageObs)
+	if usageObs != nil {
+		usageObs.Finish(result.StartedAt, result.StatusCode, copyErr)
+	}
 }
 
 // isWebSocketUpgrade detects a WebSocket upgrade request.
@@ -563,18 +581,22 @@ func isSSE(resp *http.Response) bool {
 }
 
 // streamSSE writes an SSE response with per-chunk flushing.
-func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
+func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response, usageObs *usage.Observation) error {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
 	reader := transform.RequireBufferedBody(resp.Body).StreamingReader()
+	if usageObs != nil {
+		reader = usageObs.WrapResponse(reader)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(w, reader); err != nil {
 			p.logger.Warn("SSE copy error", slog.String("error", err.Error()))
+			return err
 		}
-		return
+		return nil
 	}
 
 	buf := make([]byte, 32*1024)
@@ -583,20 +605,22 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 		if n > 0 {
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
 				p.logger.Warn("SSE write error", slog.String("error", writeErr.Error()))
-				break
+				return writeErr
 			}
 			flusher.Flush()
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
 				p.logger.Warn("SSE read error", slog.String("error", readErr.Error()))
+				return readErr
 			}
 			break
 		}
 	}
+	return nil
 }
 
-func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
+func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response, usageObs *usage.Observation) error {
 	copyHeaders(w.Header(), resp.Header)
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
 		// If a transform buffered the response body, set Content-Length
@@ -607,18 +631,29 @@ func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(n), 10))
 		}
 		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, buf.StreamingReader()); err != nil {
+		reader := buf.StreamingReader()
+		if usageObs != nil {
+			reader = usageObs.WrapResponse(reader)
+		}
+		if _, err := io.Copy(w, reader); err != nil {
 			p.logger.Warn("response body copy error", slog.String("error", err.Error()))
+			return err
 		}
 	} else {
 		// Synthetic responses (e.g. reject) with plain bodies.
 		w.WriteHeader(resp.StatusCode)
 		if resp.Body != nil {
-			if _, err := io.Copy(w, resp.Body); err != nil {
+			reader := io.Reader(resp.Body)
+			if usageObs != nil {
+				reader = usageObs.WrapResponse(reader)
+			}
+			if _, err := io.Copy(w, reader); err != nil {
 				p.logger.Warn("response body copy error", slog.String("error", err.Error()))
+				return err
 			}
 		}
 	}
+	return nil
 }
 
 // buildTransport creates the HTTP transport used for upstream requests.

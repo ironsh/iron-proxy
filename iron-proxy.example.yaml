@@ -67,6 +67,19 @@ tls:
   cert_cache_size: 1000
   leaf_cert_expiry_hours: 72
 
+# Durable LLM usage-count events. This taps request/response streams while
+# forwarding them, so it does not buffer SSE responses. Currently extracts
+# Anthropic and OpenAI token usage when providers include it in the response.
+# usage_events:
+#   enabled: true
+#   queue_size: 1000
+#   max_batch: 100
+#   flush_interval: "10s"
+#   s3:
+#     bucket: "my-usage-events"
+#     prefix: "iron-proxy/usage-events"
+#     region: "us-east-1"
+
 # Transform configuration
 transforms:
   - name: allowlist
