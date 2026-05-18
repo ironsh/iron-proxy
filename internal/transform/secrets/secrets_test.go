@@ -149,9 +149,14 @@ func TestSecrets_HeaderSwap(t *testing.T) {
 }
 
 func TestSecrets_QueryParamSwap(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
-		e.MatchHeaders = nil
-	})})
+	s := makeSecrets(t, []secretEntry{{
+		Source: envSource("OPENAI_API_KEY"),
+		Rules:  []hostmatch.RuleConfig{{Host: "api.openai.com"}},
+		Replace: &replaceConfig{
+			ProxyValue: "proxy-openai-abc123",
+			MatchQuery: true,
+		},
+	}})
 
 	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat?token=proxy-openai-abc123&other=value", nil)
 	req.Host = "api.openai.com"
@@ -161,6 +166,20 @@ func TestSecrets_QueryParamSwap(t *testing.T) {
 	require.Contains(t, req.URL.RawQuery, "sk-real-openai-key")
 	require.NotContains(t, req.URL.RawQuery, "proxy-openai-abc123")
 	require.Contains(t, req.URL.RawQuery, "other=value")
+}
+
+func TestSecrets_QueryParamNotSwappedByDefault(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = nil
+	})})
+
+	req := httptest.NewRequest("GET", "http://api.openai.com/v1/chat?token=proxy-openai-abc123&other=value", nil)
+	req.Host = "api.openai.com"
+
+	doTransform(t, s, req)
+
+	require.Contains(t, req.URL.RawQuery, "proxy-openai-abc123")
+	require.NotContains(t, req.URL.RawQuery, "sk-real-openai-key")
 }
 
 func TestSecrets_BodySwap(t *testing.T) {
