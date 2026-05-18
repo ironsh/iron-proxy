@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -384,6 +385,59 @@ func TestSecrets_RegexMatchHeaders_InvalidRegex(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid match_headers regex")
 }
 
+func TestSecrets_MatchHeaders_PreservesUserCasing(t *testing.T) {
+	// A match_headers entry with non-canonical casing matches the header
+	// case-insensitively but is written back with the user's casing.
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{"x-api-KEY"}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123") // canonical casing inbound
+
+	doTransform(t, s, req)
+
+	// Value swapped, and stored under the user-specified casing only.
+	// req.Header.Get canonicalizes its lookup, so it no longer finds it.
+	_, canonicalExists := req.Header["X-Api-Key"]
+	require.False(t, canonicalExists, "canonical key should be removed")
+	require.Equal(t, []string{"sk-real-openai-key"}, req.Header["x-api-KEY"])
+}
+
+func TestSecrets_MatchHeaders_UserCasingInLocations(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{"x-api-key"}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123")
+
+	tctx := &transform.TransformContext{}
+	res, err := s.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+
+	// The swapped location annotation reports the user's header casing.
+	encoded, err := json.Marshal(tctx.DrainAnnotations()["swapped"])
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"header:x-api-key"`)
+}
+
+func TestSecrets_RegexMatchHeaders_KeepsExistingCasing(t *testing.T) {
+	// Regex matches carry no user-specified casing, so the header's
+	// existing casing on the request is preserved.
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = []string{`/^x-api-key$/`}
+	})})
+
+	req := openaiReq("GET", "/v1/chat")
+	req.Header.Set("X-Api-Key", "proxy-openai-abc123")
+
+	doTransform(t, s, req)
+
+	require.Equal(t, []string{"sk-real-openai-key"}, req.Header["X-Api-Key"])
+}
+
 func TestSecrets_ConfigErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -705,7 +759,9 @@ func TestSecrets_MixedSourceTypes(t *testing.T) {
 
 	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
 	require.Equal(t, "aws-secret-value", req.Header.Get("X-Api-Key"))
-	require.Equal(t, "ssm-secret-value", req.Header.Get("X-SSM-Key"))
+	// match_headers preserves the user's casing, so "X-SSM-Key" is written
+	// back verbatim rather than canonicalized to "X-Ssm-Key".
+	require.Equal(t, []string{"ssm-secret-value"}, req.Header["X-SSM-Key"])
 }
 
 // --- End-to-end tests with real awsSMBuilder and mock AWS client ---

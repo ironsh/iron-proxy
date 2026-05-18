@@ -84,13 +84,16 @@ type resolvedSecret struct {
 
 // headerMatcher selects request headers to scan. Exactly one of name or re is set.
 type headerMatcher struct {
-	name string         // canonical header name; "" if regex
-	re   *regexp.Regexp // nil if literal name match
+	name     string         // canonical header name; "" if regex
+	wireName string         // header name with the user's original casing; "" if regex
+	re       *regexp.Regexp // nil if literal name match
 }
 
 // parseHeaderMatchers compiles match_headers entries. Patterns delimited by
 // "/.../" are compiled as case-insensitive regular expressions matched against
-// canonical header names; all other entries are literal header names.
+// canonical header names; all other entries are literal header names. Literal
+// names are matched case-insensitively (via canonicalization) but the user's
+// original casing is preserved when writing the header back over the wire.
 func parseHeaderMatchers(patterns []string, ctx string) ([]headerMatcher, error) {
 	if len(patterns) == 0 {
 		return nil, nil
@@ -105,7 +108,7 @@ func parseHeaderMatchers(patterns []string, ctx string) ([]headerMatcher, error)
 			matchers = append(matchers, headerMatcher{re: re})
 			continue
 		}
-		matchers = append(matchers, headerMatcher{name: http.CanonicalHeaderKey(p)})
+		matchers = append(matchers, headerMatcher{name: http.CanonicalHeaderKey(p), wireName: p})
 	}
 	return matchers, nil
 }
@@ -449,40 +452,45 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 	}
 
 	processed := make(map[string]struct{})
-	swap := func(name string) {
-		if _, done := processed[name]; done {
+	// swap scans the header identified by its canonical name and, on a match,
+	// rewrites it under wireName so the user's requested casing is sent over
+	// the wire. For regex matches wireName is the header's existing casing.
+	swap := func(canonical, wireName string) {
+		if _, done := processed[canonical]; done {
 			return
 		}
-		processed[name] = struct{}{}
-		vals := req.Header.Values(name)
+		processed[canonical] = struct{}{}
+		vals := req.Header.Values(canonical)
 		if len(vals) == 0 {
 			return
 		}
 		hit := false
 		for _, v := range vals {
-			if headerContains(name, v, sec.proxyValue) {
+			if headerContains(canonical, v, sec.proxyValue) {
 				hit = true
 				break
 			}
 		}
-		req.Header.Del(name)
+		req.Header.Del(canonical)
 		for _, v := range vals {
-			req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, realValue))
+			// Assign the map key directly: http.Header.Add would
+			// canonicalize the key and discard the user's casing.
+			req.Header[wireName] = append(req.Header[wireName], replaceInHeader(canonical, v, sec.proxyValue, realValue))
 		}
 		if hit {
-			locations = append(locations, "header:"+name)
+			locations = append(locations, "header:"+wireName)
 		}
 	}
 	for _, m := range sec.matchHeaders {
 		if m.re != nil {
 			for name := range req.Header {
 				if m.re.MatchString(name) {
-					swap(name)
+					swap(name, name)
 				}
 			}
 			continue
 		}
-		swap(m.name)
+		swap(m.name, m.wireName)
 	}
 	return locations
 }
