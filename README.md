@@ -209,7 +209,7 @@ Transforms run in order. Built-in transforms:
 | Transform   | What it does                                                                                                            |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `allowlist`    | Permits requests to matching domains/CIDRs; rejects everything else (403).                                              |
-| `secrets`      | Scans headers, query params, and optionally body for proxy tokens and swaps in real secrets from environment variables. |
+| `secrets`      | Scans headers (and optionally query, path, or body) for proxy tokens and swaps in real secrets from environment variables. |
 | `body_capture` | Records decoded request bodies of matching hosts as `request_body` audit fields. Observation-only; never rejects.       |
 
 ## Configuration
@@ -418,6 +418,9 @@ values before forwarding upstream. You control where it looks:
   Entries delimited by `/.../` are compiled as case-insensitive regular
   expressions matched against canonical header names (e.g. `/^x-.*-key$/`).
 - **`match_body`:** scan the request body (buffered up to `max_request_body_bytes`).
+- **`match_query`:** scan the URL query string. Defaults to `false`; opt in for
+  upstreams that expect the secret in a query parameter. Query strings often
+  appear in access logs on either side of the proxy, so this is off by default.
 - **`match_path`:** scan the URL path. Defaults to `false`; opt in for upstreams
   like Telegram that embed the secret in the path (e.g.
   `/bot<TOKEN>/sendMessage`). URL paths often appear in access logs on either
@@ -821,8 +824,10 @@ transforms:
         - source:
             type: env
             var: OPENAI_API_KEY
-          proxy_value: "proxy-openai-abc123"
-          match_headers: ["Authorization"]
+          replace:
+            proxy_value: "proxy-openai-abc123"
+            match_headers: ["Authorization"]
+            match_query: true # scan the query string
           rules:
             - host: "httpbin.org"
 

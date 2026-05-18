@@ -28,9 +28,11 @@ transforms:
         - source:
             type: env
             var: OPENAI_API_KEY
-          proxy_value: "proxy-openai-abc123"
-          match_headers: ["Authorization"]
-          match_body: false
+          replace:
+            proxy_value: "proxy-openai-abc123"
+            match_headers: ["Authorization"]
+            match_query: true
+            match_body: false
           rules:
             - host: "httpbin.org"
 

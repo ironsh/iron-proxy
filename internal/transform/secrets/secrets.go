@@ -49,6 +49,7 @@ type replaceConfig struct {
 	MatchHeaders []string `yaml:"match_headers,omitempty"`
 	MatchBody    bool     `yaml:"match_body,omitempty"`
 	MatchPath    bool     `yaml:"match_path,omitempty"`
+	MatchQuery   bool     `yaml:"match_query,omitempty"`
 	Require      bool     `yaml:"require,omitempty"`
 }
 
@@ -72,6 +73,7 @@ type resolvedSecret struct {
 	matchHeaders []headerMatcher // empty = all headers
 	matchBody    bool
 	matchPath    bool
+	matchQuery   bool
 	require      bool
 
 	// inject mode fields
@@ -238,6 +240,7 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 				matchHeaders: matchers,
 				matchBody:    replace.MatchBody,
 				matchPath:    replace.MatchPath,
+				matchQuery:   replace.MatchQuery,
 				require:      replace.Require,
 				rules:        rules,
 			})
@@ -358,7 +361,10 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 		var locations []string
 		locations = append(locations, s.swapHeaders(req, &sec, realValue)...)
-		locations = append(locations, s.swapQuery(req, &sec, realValue)...)
+
+		if sec.matchQuery {
+			locations = append(locations, s.swapQuery(req, &sec, realValue)...)
+		}
 
 		if sec.matchPath {
 			if loc := s.swapPath(req, &sec, realValue); loc != "" {

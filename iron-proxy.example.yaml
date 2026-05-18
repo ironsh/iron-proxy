@@ -159,6 +159,20 @@ transforms:
         #   rules:
         #     - host: "api.telegram.org"
 
+        # Replace mode with URL query string scanning. Use match_query when the
+        # client puts the proxy token in a query parameter. Defaults to false;
+        # opt in explicitly because query strings often appear in access logs.
+        # - source:
+        #     type: env
+        #     var: MAPS_API_KEY
+        #   replace:
+        #     proxy_value: "proxy-maps-token-123"
+        #     match_headers: []          # disable header scanning if query-only
+        #     match_query: true
+        #     require: true
+        #   rules:
+        #     - host: "maps.googleapis.com"
+
         # Replace mode with AWS Secrets Manager and background refresh:
         # - source:
         #     type: aws_sm
