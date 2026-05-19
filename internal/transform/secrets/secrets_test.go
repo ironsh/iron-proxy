@@ -125,13 +125,6 @@ func makeSecrets(t *testing.T, entries []secretEntry) *Secrets {
 	return s
 }
 
-// rawHeaderValues reads header values by the exact map key, bypassing the
-// canonicalization that http.Header.Get/Values apply. The indirection through
-// a variable also keeps staticcheck's SA1008 from flagging non-canonical keys.
-func rawHeaderValues(h http.Header, name string) []string {
-	return h[name]
-}
-
 func doTransform(t *testing.T, s *Secrets, req *http.Request) {
 	t.Helper()
 	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
@@ -408,7 +401,7 @@ func TestSecrets_MatchHeaders_PreservesUserCasing(t *testing.T) {
 	// req.Header.Get canonicalizes its lookup, so it no longer finds it.
 	_, canonicalExists := req.Header["X-Api-Key"]
 	require.False(t, canonicalExists, "canonical key should be removed")
-	require.Equal(t, []string{"sk-real-openai-key"}, rawHeaderValues(req.Header, "x-api-KEY"))
+	require.Equal(t, []string{"sk-real-openai-key"}, transform.HeaderValuesByExactName(req.Header, "x-api-KEY"))
 }
 
 func TestSecrets_MatchHeaders_UserCasingInLocations(t *testing.T) {
@@ -768,7 +761,7 @@ func TestSecrets_MixedSourceTypes(t *testing.T) {
 	require.Equal(t, "aws-secret-value", req.Header.Get("X-Api-Key"))
 	// match_headers preserves the user's casing, so "X-SSM-Key" is written
 	// back verbatim rather than canonicalized to "X-Ssm-Key".
-	require.Equal(t, []string{"ssm-secret-value"}, rawHeaderValues(req.Header, "X-SSM-Key"))
+	require.Equal(t, []string{"ssm-secret-value"}, transform.HeaderValuesByExactName(req.Header, "X-SSM-Key"))
 }
 
 // --- End-to-end tests with real awsSMBuilder and mock AWS client ---
@@ -1075,7 +1068,7 @@ func TestInject_HeaderPreservesUserCasing(t *testing.T) {
 	doTransform(t, s, req)
 
 	// Stored under the user's casing; canonical lookup no longer finds it.
-	require.Equal(t, []string{"sk-real-openai-key"}, rawHeaderValues(req.Header, "X-API-KEY"))
+	require.Equal(t, []string{"sk-real-openai-key"}, transform.HeaderValuesByExactName(req.Header, "X-API-KEY"))
 	_, canonicalExists := req.Header["X-Api-Key"]
 	require.False(t, canonicalExists, "canonical key should not be present")
 }
@@ -1092,7 +1085,7 @@ func TestInject_HeaderReplacesExistingCanonicalValue(t *testing.T) {
 	req.Header.Set("X-Api-Key", "stale-value")
 	doTransform(t, s, req)
 
-	require.Equal(t, []string{"sk-real-openai-key"}, rawHeaderValues(req.Header, "X-API-KEY"))
+	require.Equal(t, []string{"sk-real-openai-key"}, transform.HeaderValuesByExactName(req.Header, "X-API-KEY"))
 	_, canonicalExists := req.Header["X-Api-Key"]
 	require.False(t, canonicalExists, "stale canonical header should be removed")
 }

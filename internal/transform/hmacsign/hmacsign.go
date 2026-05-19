@@ -265,10 +265,7 @@ func (h *HMACSign) TransformRequest(ctx context.Context, tctx *transform.Transfo
 				Response: errorResponse(req, http.StatusInternalServerError, "header_template_failed"),
 			}, nil
 		}
-		// Preserve user-specified casing on the wire: req.Header.Set would
-		// canonicalize the key.
-		req.Header.Del(hdr.name)
-		req.Header[hdr.name] = []string{buf.String()}
+		transform.SetHeaderPreservingCase(req.Header, hdr.name, buf.String())
 		injected = append(injected, "header:"+hdr.name)
 	}
 
