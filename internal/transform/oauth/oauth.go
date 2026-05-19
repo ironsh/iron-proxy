@@ -2,11 +2,17 @@
 // injects them as Authorization: Bearer headers on matching requests.
 //
 // One oauth_token transform carries a list of token entries. Each entry names
-// an OAuth2 grant (refresh_token or client_credentials), the credential fields
-// it needs — each resolved from any secrets-package source (env, 1password,
-// 1password_connect, aws_sm, aws_ssm) — and host rules selecting the requests
-// it applies to. Token exchange, caching, refresh, and single-flight are
-// delegated to golang.org/x/oauth2 — the same code path the official SDKs use.
+// an OAuth2 grant (refresh_token, client_credentials, or password), the
+// credential fields it needs — each resolved from any secrets-package source
+// (env, 1password, 1password_connect, aws_sm, aws_ssm) — and host rules
+// selecting the requests it applies to. Token exchange, caching, refresh, and
+// single-flight are delegated to golang.org/x/oauth2 — the same code path the
+// official SDKs use.
+//
+// Entries may also declare token_endpoint_headers: a map of header name to
+// secret source whose resolved values are sent on the token POST itself. Some
+// vendors require an api-key header on the token endpoint in addition to the
+// standard client_id / client_secret form fields.
 //
 // GCP service-account auth (the RFC 7523 JWT-bearer grant against a Google
 // keyfile) is handled by the separate gcp_auth transform.
@@ -34,6 +40,7 @@ import (
 const (
 	grantRefreshToken      = "refresh_token"
 	grantClientCredentials = "client_credentials"
+	grantPassword          = "password"
 )
 
 // Credential field keys. They name both a config field and the corresponding
@@ -43,6 +50,8 @@ const (
 	fieldRefreshToken = "refresh_token"
 	fieldClientID     = "client_id"
 	fieldClientSecret = "client_secret"
+	fieldUsername     = "username"
+	fieldPassword     = "password"
 )
 
 // stubAccessToken is the placeholder bearer returned to clients that fetch a
@@ -65,19 +74,27 @@ type config struct {
 type tokenEntryConfig struct {
 	Grant string `yaml:"grant"`
 
-	// RefreshToken, ClientID, and ClientSecret are the credential fields. Each
-	// is a secrets source resolved independently, so the fields can live in
-	// different stores or be pulled out of one JSON secret with json_key.
-	// ClientSecret is optional for public refresh_token clients.
+	// Credential fields. Each is a secrets source resolved independently, so
+	// the fields can live in different stores or be pulled out of one JSON
+	// secret with json_key. ClientSecret is optional for public refresh_token
+	// clients. Username and Password are only used by the password grant.
 	RefreshToken yaml.Node `yaml:"refresh_token"`
 	ClientID     yaml.Node `yaml:"client_id"`
 	ClientSecret yaml.Node `yaml:"client_secret"`
+	Username     yaml.Node `yaml:"username"`
+	Password     yaml.Node `yaml:"password"`
 
 	TokenEndpoint string                 `yaml:"token_endpoint,omitempty"`
 	Scopes        []string               `yaml:"scopes,omitempty"`
 	Rules         []hostmatch.RuleConfig `yaml:"rules"`
 	Header        string                 `yaml:"header,omitempty"`
 	ValuePrefix   string                 `yaml:"value_prefix,omitempty"`
+
+	// TokenEndpointHeaders is a map of header name to secret source. Each
+	// resolved value is sent as a request header on the token POST itself —
+	// used by vendors that require an api-key header alongside the standard
+	// form-body client auth.
+	TokenEndpointHeaders map[string]yaml.Node `yaml:"token_endpoint_headers,omitempty"`
 }
 
 // sourceBuilder is the signature of secrets.BuildSource. Pulled out so tests
@@ -102,6 +119,10 @@ type tokenEntry struct {
 
 	// sources holds the entry's credential secret sources, keyed by field.
 	sources map[string]secrets.Source
+
+	// endpointHeaderSources holds secret sources for headers sent on the
+	// token POST itself, keyed by header name.
+	endpointHeaderSources map[string]secrets.Source
 
 	// mu guards the lazily built token source and the fingerprint of the
 	// credential values it was built from. The token source is rebuilt when
@@ -151,15 +172,20 @@ func isSet(n yaml.Node) bool { return n.Kind != 0 }
 
 func buildEntry(tc tokenEntryConfig, logger *slog.Logger, buildSource sourceBuilder) (*tokenEntry, *tokenEndpoint, error) {
 	switch tc.Grant {
-	case grantRefreshToken, grantClientCredentials:
+	case grantRefreshToken, grantClientCredentials, grantPassword:
 	default:
-		return nil, nil, fmt.Errorf("\"grant\" must be one of refresh_token, client_credentials (got %q)", tc.Grant)
+		return nil, nil, fmt.Errorf("\"grant\" must be one of refresh_token, client_credentials, password (got %q)", tc.Grant)
 	}
 	if tc.TokenEndpoint == "" {
 		return nil, nil, fmt.Errorf("%s grant requires \"token_endpoint\"", tc.Grant)
 	}
 
 	sources, err := buildCredentialSources(tc, logger, buildSource)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	endpointHeaders, err := buildEndpointHeaderSources(tc.TokenEndpointHeaders, logger, buildSource)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -190,14 +216,15 @@ func buildEntry(tc tokenEntryConfig, logger *slog.Logger, buildSource sourceBuil
 	}
 
 	return &tokenEntry{
-		grant:       tc.Grant,
-		scopes:      tc.Scopes,
-		rules:       rules,
-		header:      header,
-		valuePrefix: valuePrefix,
-		cfgEndpoint: tc.TokenEndpoint,
-		sources:     sources,
-		logger:      logger,
+		grant:                 tc.Grant,
+		scopes:                tc.Scopes,
+		rules:                 rules,
+		header:                header,
+		valuePrefix:           valuePrefix,
+		cfgEndpoint:           tc.TokenEndpoint,
+		sources:               sources,
+		endpointHeaderSources: endpointHeaders,
+		logger:                logger,
 	}, stub, nil
 }
 
@@ -248,8 +275,46 @@ func buildCredentialSources(tc tokenEntryConfig, logger *slog.Logger, buildSourc
 			fieldClientID:     tc.ClientID,
 			fieldClientSecret: tc.ClientSecret,
 		})
+
+	case grantPassword:
+		if !isSet(tc.Username) || !isSet(tc.Password) {
+			return nil, fmt.Errorf("password grant requires \"username\" and \"password\"")
+		}
+		if !isSet(tc.ClientID) {
+			return nil, fmt.Errorf("password grant requires \"client_id\"")
+		}
+		fields := map[string]yaml.Node{
+			fieldUsername: tc.Username,
+			fieldPassword: tc.Password,
+			fieldClientID: tc.ClientID,
+		}
+		if isSet(tc.ClientSecret) {
+			fields[fieldClientSecret] = tc.ClientSecret
+		}
+		return buildAll(fields)
 	}
 	return nil, fmt.Errorf("unknown grant %q", tc.Grant) // unreachable: grant is validated above
+}
+
+// buildEndpointHeaderSources resolves each token_endpoint_headers entry to a
+// secrets.Source. Header names are kept verbatim so vendors that demand a
+// specific casing (e.g. "x-api-key") get it on the wire.
+func buildEndpointHeaderSources(headers map[string]yaml.Node, logger *slog.Logger, buildSource sourceBuilder) (map[string]secrets.Source, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]secrets.Source, len(headers))
+	for name, node := range headers {
+		if name == "" {
+			return nil, fmt.Errorf("token_endpoint_headers: header name must not be empty")
+		}
+		src, err := buildSource(node, logger)
+		if err != nil {
+			return nil, fmt.Errorf("token_endpoint_headers[%q]: %w", name, err)
+		}
+		out[name] = src
+	}
+	return out, nil
 }
 
 // parseTokenEndpoint splits a configured token endpoint URL into the host and

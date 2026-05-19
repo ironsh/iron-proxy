@@ -62,9 +62,10 @@ func mapBuilder(srcs map[string]secrets.Source) sourceBuilder {
 // each request's form so tests can assert on the exchange.
 type tokenServer struct {
 	*httptest.Server
-	mu    sync.Mutex
-	calls int
-	forms []url.Values
+	mu      sync.Mutex
+	calls   int
+	forms   []url.Values
+	headers []http.Header
 }
 
 func (ts *tokenServer) Calls() int {
@@ -77,6 +78,12 @@ func (ts *tokenServer) LastForm() url.Values {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.forms[len(ts.forms)-1]
+}
+
+func (ts *tokenServer) LastHeaders() http.Header {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.headers[len(ts.headers)-1]
 }
 
 // newTokenServer serves the OAuth2 token endpoint. respond decides the HTTP
@@ -99,6 +106,7 @@ func newTokenServer(t *testing.T, respond func(form url.Values) (int, map[string
 		ts.mu.Lock()
 		ts.calls++
 		ts.forms = append(ts.forms, r.PostForm)
+		ts.headers = append(ts.headers, r.Header.Clone())
 		ts.mu.Unlock()
 		status, body := respond(r.PostForm)
 		w.Header().Set("Content-Type", "application/json")
@@ -258,6 +266,32 @@ tokens:
       - host: "example.com"
 `,
 			wantError: "requires \"client_id\" and \"client_secret\"",
+		},
+		{
+			name: "password missing username",
+			yaml: `
+tokens:
+  - grant: password
+    password: {type: env, var: PW}
+    client_id: {type: env, var: CID}
+    token_endpoint: "https://t.example.com/token"
+    rules:
+      - host: "example.com"
+`,
+			wantError: "password grant requires \"username\" and \"password\"",
+		},
+		{
+			name: "password missing client_id",
+			yaml: `
+tokens:
+  - grant: password
+    username: {type: env, var: USER}
+    password: {type: env, var: PW}
+    token_endpoint: "https://t.example.com/token"
+    rules:
+      - host: "example.com"
+`,
+			wantError: "password grant requires \"client_id\"",
 		},
 	}
 	for _, tc := range cases {
@@ -591,6 +625,126 @@ tokens:
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionReject, res.Action)
 	require.Equal(t, http.StatusBadGateway, res.Response.StatusCode)
+}
+
+// --- password grant ---
+
+func TestPasswordGrant_InjectsBearer(t *testing.T) {
+	srv := newTokenServer(t, nil)
+	o := buildTransformWith(t, `
+tokens:
+  - grant: password
+    username:      {type: env, var: USER}
+    password:      {type: env, var: PW}
+    client_id:     {type: env, var: CID}
+    client_secret: {type: env, var: CSECRET}
+    token_endpoint: "`+srv.URL+`/token"
+    scopes: ["read"]
+    rules:
+      - host: "api.alpha-sense.com"
+`, mapBuilder(map[string]secrets.Source{
+		"USER":    &staticSource{name: "u", value: "alice"},
+		"PW":      &staticSource{name: "p", value: "s3cret"},
+		"CID":     &staticSource{name: "cid", value: "the-client-id"},
+		"CSECRET": &staticSource{name: "cs", value: "the-client-secret"},
+	}))
+
+	req := newRequest(t, http.MethodPost, "https://api.alpha-sense.com/gql")
+	res, err := o.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "Bearer minted-token", req.Header.Get("Authorization"))
+
+	form := srv.LastForm()
+	require.Equal(t, "password", form.Get("grant_type"))
+	require.Equal(t, "alice", form.Get("username"))
+	require.Equal(t, "s3cret", form.Get("password"))
+	require.Equal(t, "the-client-id", form.Get("client_id"))
+	require.Equal(t, "the-client-secret", form.Get("client_secret"))
+	require.Equal(t, "read", form.Get("scope"))
+}
+
+// A password client without a client_secret (public client) omits the form field.
+func TestPasswordGrant_PublicClient(t *testing.T) {
+	srv := newTokenServer(t, nil)
+	o := buildTransformWith(t, `
+tokens:
+  - grant: password
+    username:  {type: env, var: USER}
+    password:  {type: env, var: PW}
+    client_id: {type: env, var: CID}
+    token_endpoint: "`+srv.URL+`/token"
+    rules:
+      - host: "api.example.com"
+`, mapBuilder(map[string]secrets.Source{
+		"USER": &staticSource{name: "u", value: "alice"},
+		"PW":   &staticSource{name: "p", value: "s3cret"},
+		"CID":  &staticSource{name: "cid", value: "the-client-id"},
+	}))
+
+	req := newRequest(t, http.MethodGet, "https://api.example.com/v1/x")
+	_, err := o.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Empty(t, srv.LastForm().Get("client_secret"))
+}
+
+// --- token_endpoint_headers ---
+
+func TestTokenEndpointHeaders_SentOnMint(t *testing.T) {
+	srv := newTokenServer(t, nil)
+	o := buildTransformWith(t, `
+tokens:
+  - grant: password
+    username:  {type: env, var: USER}
+    password:  {type: env, var: PW}
+    client_id: {type: env, var: CID}
+    token_endpoint: "`+srv.URL+`/token"
+    token_endpoint_headers:
+      x-api-key: {type: env, var: APIKEY}
+    rules:
+      - host: "api.alpha-sense.com"
+`, mapBuilder(map[string]secrets.Source{
+		"USER":   &staticSource{name: "u", value: "alice"},
+		"PW":     &staticSource{name: "p", value: "s3cret"},
+		"CID":    &staticSource{name: "cid", value: "the-client-id"},
+		"APIKEY": &staticSource{name: "k", value: "venue-api-key"},
+	}))
+
+	req := newRequest(t, http.MethodPost, "https://api.alpha-sense.com/gql")
+	_, err := o.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+
+	// Header casing preserved verbatim. Go's http.Header canonicalizes on Get,
+	// but the wire bytes use the original "x-api-key" since we Set on a cloned
+	// request inside our RoundTripper, then the server canonicalizes on read.
+	require.Equal(t, "venue-api-key", srv.LastHeaders().Get("X-Api-Key"))
+	// The inbound request itself must not have received the header.
+	require.Empty(t, req.Header.Get("X-Api-Key"))
+}
+
+// Endpoint headers also work for other grants — verify with client_credentials.
+func TestTokenEndpointHeaders_ClientCredentials(t *testing.T) {
+	srv := newTokenServer(t, nil)
+	o := buildTransformWith(t, `
+tokens:
+  - grant: client_credentials
+    client_id:     {type: env, var: CID}
+    client_secret: {type: env, var: CSECRET}
+    token_endpoint: "`+srv.URL+`/token"
+    token_endpoint_headers:
+      x-tenant: {type: env, var: TENANT}
+    rules:
+      - host: "api.example.com"
+`, mapBuilder(map[string]secrets.Source{
+		"CID":     &staticSource{name: "cid", value: "cid"},
+		"CSECRET": &staticSource{name: "cs", value: "cs"},
+		"TENANT":  &staticSource{name: "t", value: "acme"},
+	}))
+
+	req := newRequest(t, http.MethodGet, "https://api.example.com/v1/x")
+	_, err := o.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, "acme", srv.LastHeaders().Get("X-Tenant"))
 }
 
 // --- factory end-to-end through the real secrets package ---

@@ -284,6 +284,9 @@ transforms:
   # grant is one of:
   #   refresh_token       RFC 6749 — a refresh token plus a client id
   #   client_credentials  RFC 6749 4.4 — a client id and secret
+  #   password            RFC 6749 4.3 — username + password + client id
+  #                       (+ optional client secret). Used by vendors that
+  #                       trade a service-account login for a bearer.
   #
   # (For GCP service-account auth — the RFC 7523 JWT-bearer grant — use the
   # gcp_auth transform above instead.)
@@ -296,6 +299,11 @@ transforms:
   # Setting token_endpoint also stubs that endpoint, so a sandboxed client SDK
   # can complete its own token dance against the proxy with a placeholder
   # token while the proxy injects the real one.
+  #
+  # token_endpoint_headers (optional, any grant) sends extra request headers
+  # on the token POST itself. Some vendors require an api-key header on the
+  # token endpoint in addition to client_id/client_secret in the form body.
+  # Each value is a discrete secret source.
   # - name: oauth_token
   #   config:
   #     tokens:
@@ -328,6 +336,38 @@ transforms:
   #         token_endpoint: "https://login.example.com/oauth2/token"
   #         rules:
   #           - host: "api.example.com"
+  #
+  # AlphaSense-style: password grant + an api-key header on both the token
+  # endpoint and the resource endpoint. The bearer is minted here; the static
+  # api-key and clientId headers that GraphQL also wants are injected by two
+  # plain secrets entries below.
+  # - name: oauth_token
+  #   config:
+  #     tokens:
+  #       - grant: password
+  #         username:      {type: env, var: ALPHASENSE_USERNAME}
+  #         password:      {type: env, var: ALPHASENSE_PASSWORD}
+  #         client_id:     {type: env, var: ALPHASENSE_CLIENT_ID}
+  #         client_secret: {type: env, var: ALPHASENSE_CLIENT_SECRET}
+  #         token_endpoint: "https://api.alpha-sense.com/token"
+  #         token_endpoint_headers:
+  #           x-api-key: {type: env, var: ALPHASENSE_API_KEY}
+  #         rules:
+  #           - host: "api.alpha-sense.com"
+  #             paths: ["/gql", "/gql/*"]
+  # - name: secrets
+  #   config:
+  #     secrets:
+  #       - source: {type: env, var: ALPHASENSE_API_KEY}
+  #         inject: {header: "x-api-key"}
+  #         rules:
+  #           - host: "api.alpha-sense.com"
+  #             paths: ["/gql", "/gql/*"]
+  #       - source: {type: env, var: ALPHASENSE_CLIENT_ID}
+  #         inject: {header: "clientId"}
+  #         rules:
+  #           - host: "api.alpha-sense.com"
+  #             paths: ["/gql", "/gql/*"]
 
   # Generic HMAC request signing. Computes an HMAC signature over a Go-template
   # message derived from the request (timestamp, method, path, query, host,

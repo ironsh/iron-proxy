@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -38,13 +39,22 @@ func (e *tokenEntry) tokenSourceFor(ctx context.Context) (oauth2.TokenSource, er
 	if err != nil {
 		return nil, err
 	}
+	headers, headerFingerprint, err := e.resolveEndpointHeaders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fingerprint += headerFingerprint
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.tokenSource != nil && fingerprint == e.fingerprint {
 		return e.tokenSource, nil
 	}
-	ts, err := buildTokenSource(ctx, e.grant, vals, e.scopes, e.cfgEndpoint)
+	tsCtx := ctx
+	if len(headers) > 0 {
+		tsCtx = context.WithValue(ctx, oauth2.HTTPClient, newHeaderInjectingClient(headers))
+	}
+	ts, err := buildTokenSource(tsCtx, e.grant, vals, e.scopes, e.cfgEndpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +89,63 @@ func (e *tokenEntry) resolveCredentials(ctx context.Context) (map[string]string,
 	return vals, fp.String(), nil
 }
 
+// resolveEndpointHeaders mirrors resolveCredentials for the token-endpoint
+// header sources. The returned fingerprint slot is namespaced with a NUL so it
+// can't collide with credential field names.
+func (e *tokenEntry) resolveEndpointHeaders(ctx context.Context) (map[string]string, string, error) {
+	if len(e.endpointHeaderSources) == 0 {
+		return nil, "", nil
+	}
+	keys := make([]string, 0, len(e.endpointHeaderSources))
+	for k := range e.endpointHeaderSources {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make(map[string]string, len(e.endpointHeaderSources))
+	var fp strings.Builder
+	fp.WriteByte(0)
+	fp.WriteString("endpoint_headers")
+	fp.WriteByte(0)
+	for _, k := range keys {
+		v, err := e.endpointHeaderSources[k].Get(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("loading token_endpoint_headers[%q] from %q: %w", k, e.endpointHeaderSources[k].Name(), err)
+		}
+		out[k] = v
+		fp.WriteString(k)
+		fp.WriteByte('=')
+		fp.WriteString(v)
+		fp.WriteByte(0)
+	}
+	return out, fp.String(), nil
+}
+
+// headerInjectingTransport sets configured headers on every request before
+// delegating to the underlying RoundTripper. Used to decorate token-endpoint
+// POSTs with vendor-specific headers like x-api-key.
+type headerInjectingTransport struct {
+	headers map[string]string
+	base    http.RoundTripper
+}
+
+func (t *headerInjectingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone before mutating: the oauth2 lib may retry, and we must not leak
+	// header mutations back to the caller's request object.
+	r := req.Clone(req.Context())
+	for k, v := range t.headers {
+		r.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(r)
+}
+
+func newHeaderInjectingClient(headers map[string]string) *http.Client {
+	return &http.Client{Transport: &headerInjectingTransport{
+		headers: headers,
+		base:    http.DefaultTransport,
+	}}
+}
+
 // buildTokenSource constructs an oauth2.TokenSource for one grant from its
 // resolved credential values. It performs no I/O: the token is exchanged
 // lazily on the first Token() call.
@@ -88,6 +155,8 @@ func buildTokenSource(ctx context.Context, grant string, vals map[string]string,
 		return refreshTokenTokenSource(ctx, vals, scopes, cfgEndpoint)
 	case grantClientCredentials:
 		return clientCredentialsTokenSource(ctx, vals, scopes, cfgEndpoint)
+	case grantPassword:
+		return passwordTokenSource(ctx, vals, scopes, cfgEndpoint)
 	default:
 		return nil, fmt.Errorf("unknown grant %q", grant)
 	}
@@ -126,6 +195,51 @@ func refreshTokenTokenSource(ctx context.Context, vals map[string]string, scopes
 	// use. One extra exchange at startup is cheaper than carrying a
 	// provider-specific expiry format.
 	return cfg.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken}), nil
+}
+
+// passwordTokenSource builds a token source for the RFC 6749 4.3 password
+// (resource owner password credentials) grant. When the token endpoint returns
+// a refresh_token the standard oauth2.Config token source uses it; otherwise
+// the source re-runs the password exchange to refresh.
+func passwordTokenSource(ctx context.Context, vals map[string]string, scopes []string, cfgEndpoint string) (oauth2.TokenSource, error) {
+	username := vals[fieldUsername]
+	password := vals[fieldPassword]
+	clientID := vals[fieldClientID]
+	clientSecret := vals[fieldClientSecret] // optional
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("password grant is missing the username or password")
+	}
+	if clientID == "" {
+		return nil, fmt.Errorf("password grant is missing the client id")
+	}
+	if cfgEndpoint == "" {
+		return nil, fmt.Errorf("password grant needs a token endpoint: set \"token_endpoint\"")
+	}
+
+	cfg := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Scopes:       scopes,
+		Endpoint: oauth2.Endpoint{
+			TokenURL:  cfgEndpoint,
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
+	}
+	src := &passwordSource{ctx: ctx, cfg: cfg, username: username, password: password}
+	return oauth2.ReuseTokenSource(nil, src), nil
+}
+
+// passwordSource implements oauth2.TokenSource by re-running the password
+// exchange whenever a fresh token is requested. ReuseTokenSource wraps it to
+// cache and single-flight, so this only fires on first use and after expiry.
+type passwordSource struct {
+	ctx                context.Context
+	cfg                *oauth2.Config
+	username, password string
+}
+
+func (s *passwordSource) Token() (*oauth2.Token, error) {
+	return s.cfg.PasswordCredentialsToken(s.ctx, s.username, s.password)
 }
 
 // clientCredentialsTokenSource builds a token source for the RFC 6749 4.4
