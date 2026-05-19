@@ -329,6 +329,46 @@ transforms:
   #         rules:
   #           - host: "api.example.com"
 
+  # Generic HMAC request signing. Computes an HMAC signature over a Go-template
+  # message derived from the request (timestamp, method, path, query, host,
+  # body) and injects the resulting signature plus any auxiliary credentials
+  # into a configurable set of headers. Configure once per venue (FalconX,
+  # Coinbase Prime, etc.) — the four enums (algorithm, key_encoding,
+  # output_encoding, timestamp format) cover most signing schemes.
+  #
+  # Requires MITM mode. A truncated body would produce an invalid signature, so
+  # the transform rejects any request whose body cannot be verified intact:
+  # bodies shorter than Content-Length (truncated by max_request_body_bytes
+  # above) → 413, chunked bodies → 400 unless allow_chunked_body: true. If you
+  # sign large bodies, raise proxy.max_request_body_bytes accordingly.
+  #
+  # The required "secret" credential is the HMAC key; all other credentials are
+  # user-named and addressable from header templates as .Credentials.<name>.
+  #
+  # Example: FalconX RFQ/RFS authentication
+  # - name: hmac_sign
+  #   config:
+  #     timestamp:
+  #       format: unix_seconds      # unix_seconds | unix_millis | unix_nanos | rfc3339
+  #     signature:
+  #       algorithm: sha256         # sha256 | sha512 | sha1
+  #       key_encoding: base64      # raw | base64 | hex (decoded before HMAC keying)
+  #       output_encoding: base64   # base64 | hex
+  #       # Go template. Available: .Timestamp .Method .Path .PathWithQuery .Query .Host .Body
+  #       message: "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}"
+  #     credentials:
+  #       key:        {type: env, var: FALCONX_API_KEY}
+  #       secret:     {type: env, var: FALCONX_SECRET}      # required: the HMAC key
+  #       passphrase: {type: env, var: FALCONX_PASSPHRASE}
+  #     headers:                    # ordered list — case is preserved on the wire
+  #       - {name: "FX-ACCESS-KEY",        value: "{{.Credentials.key}}"}
+  #       - {name: "FX-ACCESS-SIGN",       value: "{{.Signature}}"}
+  #       - {name: "FX-ACCESS-TIMESTAMP",  value: "{{.Timestamp}}"}
+  #       - {name: "FX-ACCESS-PASSPHRASE", value: "{{.Credentials.passphrase}}"}
+  #     # allow_chunked_body: false # opt-in to signing chunked (no Content-Length) bodies
+  #     rules:
+  #       - host: "api.falconx.io"
+
   # Header allowlist: strips any request header not listed below before the
   # request goes upstream. Default-deny — every header must either match a
   # literal name (case-insensitive) or a /regex/ pattern. Place this AFTER

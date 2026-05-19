@@ -36,6 +36,7 @@ import (
 	_ "github.com/ironsh/iron-proxy/internal/transform/gcpauth"
 	_ "github.com/ironsh/iron-proxy/internal/transform/grpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/headerallowlist"
+	_ "github.com/ironsh/iron-proxy/internal/transform/hmacsign"
 	_ "github.com/ironsh/iron-proxy/internal/transform/judge"
 	_ "github.com/ironsh/iron-proxy/internal/transform/oauth"
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
