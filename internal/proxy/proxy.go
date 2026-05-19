@@ -260,6 +260,15 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 
+	// Reject paths with "." or ".." segments. Policy rules (allowlist,
+	// secrets, etc.) match against the raw request path, but an upstream
+	// may canonicalize "/public/../admin" to "/admin" and serve a resource
+	// the rule was meant to protect. Rejecting up front avoids the gap.
+	if containsDotSegments(r.URL.Path) {
+		http.Error(w, "path contains dot segments", http.StatusBadRequest)
+		return
+	}
+
 	// Validate SNI matches Host header on TLS connections
 	if r.TLS != nil {
 		hostOnly := r.Host
@@ -386,6 +395,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 	copyHeaders(upstreamReq.Header, r.Header)
+	sanitizeUpstreamHeaders(upstreamReq.Header)
 	// If a transform buffered the request body, set ContentLength so the
 	// upstream receives a Content-Length header instead of chunked encoding.
 	// Otherwise, preserve the original Content-Length from the client.
@@ -450,10 +460,70 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	p.writeResponse(w, finalResp)
 }
 
-// isWebSocketUpgrade detects a WebSocket upgrade request.
+// isWebSocketUpgrade detects a WebSocket upgrade request. Connection is
+// parsed as comma-separated tokens with an exact case-insensitive "upgrade"
+// match so a value like "notupgrade" does not satisfy the check.
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+		headerHasToken(r.Header, "Connection", "upgrade")
+}
+
+// headerHasToken reports whether the named header contains an exact
+// case-insensitive token (per RFC 7230 §3.2.6 comma-separated values).
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hopByHopHeaders are the headers consumed at the connection boundary per
+// RFC 7230 §6.1, plus Proxy-Connection (a common non-standard variant).
+// These must not be forwarded to the upstream.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// sanitizeUpstreamHeaders removes hop-by-hop headers and any header named
+// by the client's Connection header before the request is forwarded
+// upstream. Modeled after net/http/httputil.ReverseProxy.
+func sanitizeUpstreamHeaders(h http.Header) {
+	// Collect Connection-named tokens before deleting Connection itself.
+	var connectionTokens []string
+	for _, v := range h.Values("Connection") {
+		for _, t := range strings.Split(v, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				connectionTokens = append(connectionTokens, t)
+			}
+		}
+	}
+
+	// Preserve TE: trailers for gRPC-over-HTTP/1.1 compatibility, matching
+	// net/http/httputil.ReverseProxy.
+	keepTrailers := headerHasToken(h, "Te", "trailers")
+
+	for _, name := range hopByHopHeaders {
+		h.Del(name)
+	}
+	for _, name := range connectionTokens {
+		h.Del(name)
+	}
+	if keepTrailers {
+		h.Set("Te", "trailers")
+	}
 }
 
 // handleWebSocket hijacks the client connection and proxies raw bytes
@@ -500,7 +570,15 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 		return
 	}
 
-	// Write the original HTTP upgrade request to upstream
+	// Sanitize the inbound request headers before serializing the upgrade
+	// upstream so client-supplied Proxy-Authorization, hop-by-hop headers,
+	// and Connection-named tokens are not leaked. Re-set the upgrade
+	// headers explicitly with the proxy's own values.
+	sanitizeUpstreamHeaders(r.Header)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+
+	// Write the rewritten HTTP upgrade request to upstream
 	if writeErr := r.Write(upstreamConn); writeErr != nil {
 		p.logger.Error("websocket upstream write failed", slog.String("error", writeErr.Error()))
 		upstreamConn.Close()
@@ -666,6 +744,16 @@ func markIfClientCancel(r *http.Request, err error, result *transform.PipelineRe
 	result.StatusCode = http.StatusOK
 	result.ClientCanceled = true
 	return true
+}
+
+// containsDotSegments reports whether p has any "." or ".." path segment.
+func containsDotSegments(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func copyHeaders(dst, src http.Header) {
