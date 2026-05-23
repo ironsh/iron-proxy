@@ -3,11 +3,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,17 +116,11 @@ func TestGCPAuthBigQueryGcloudCLI(t *testing.T) {
 // gcloud auth activate-service-account but corresponds to no real identity.
 func writeDummyServiceAccountKeyfile(t *testing.T, dir string) string {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	require.NoError(t, err)
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-
 	keyfile := map[string]string{
 		"type":                        "service_account",
 		"project_id":                  "iron-proxy-stub",
 		"private_key_id":              "stub-private-key-id",
-		"private_key":                 string(pemBytes),
+		"private_key":                 generateServiceAccountKeyPEM(t),
 		"client_email":                "stub@iron-proxy-stub.iam.gserviceaccount.com",
 		"client_id":                   "000000000000000000000",
 		"auth_uri":                    "https://accounts.google.com/o/oauth2/auth",

@@ -3,7 +3,11 @@ package integration_test
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +20,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// generateServiceAccountKeyPEM returns a freshly-minted RSA private key in
+// PEM (PKCS#8) form, suitable for embedding in a service-account JSON keyfile.
+// Used by tests that construct synthetic GCP credentials.
+func generateServiceAccountKeyPEM(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+}
 
 // proxyInstance holds information about a running iron-proxy process.
 type proxyInstance struct {
