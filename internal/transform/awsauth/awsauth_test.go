@@ -172,7 +172,7 @@ secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
 
 	t.Run("valid minimal config", func(t *testing.T) {
 		a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
-		require.Equal(t, "static", a.credsKind)
+		require.Equal(t, "static", a.credsKind())
 		require.Nil(t, a.allowedRegions)
 		require.Nil(t, a.allowedServices)
 	})
@@ -215,7 +215,7 @@ rules:
 		stub := &stubCredsProvider{creds: aws.Credentials{AccessKeyID: "AKIA", SecretAccessKey: "shh"}}
 		a, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), stubCredBuilder(stub))
 		require.NoError(t, err)
-		require.Equal(t, "workload_identity", a.credsKind)
+		require.Equal(t, "workload_identity", a.credsKind())
 	})
 
 	t.Run("allow lists compiled into sets", func(t *testing.T) {

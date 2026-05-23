@@ -83,6 +83,12 @@ type sourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 // reaching for the real signer.
 type signFunc func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error
 
+// Credential provider kinds, annotated on credential-unavailable rejections.
+const (
+	providerStatic           = "static"
+	providerWorkloadIdentity = "workload_identity"
+)
+
 // AWSAuth is the transform.
 type AWSAuth struct {
 	logger           *slog.Logger
@@ -90,12 +96,19 @@ type AWSAuth struct {
 	allowedRegions   map[string]struct{} // nil → allow any
 	allowedServices  map[string]struct{} // nil → allow any
 	creds            aws.CredentialsProvider
-	credsKind        string // "static" or "workload_identity" — annotated on credential failures
 	unsignedPayload  bool
 	allowChunkedBody bool
 
 	now  func() time.Time
 	sign signFunc
+}
+
+// credsKind reports which kind of provider backs the transform, for telemetry.
+func (a *AWSAuth) credsKind() string {
+	if _, ok := a.creds.(*staticSourceProvider); ok {
+		return providerStatic
+	}
+	return providerWorkloadIdentity
 }
 
 func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) {
@@ -116,17 +129,13 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		return nil, fmt.Errorf("aws_auth: requires either access_key_id+secret_access_key or credentials_provider")
 	}
 
-	var (
-		creds     aws.CredentialsProvider
-		credsKind string
-	)
+	var creds aws.CredentialsProvider
 	if hasProvider {
 		p, err := buildCreds(c.CredentialsProvider, logger)
 		if err != nil {
 			return nil, fmt.Errorf("aws_auth: building credentials_provider: %w", err)
 		}
 		creds = p
-		credsKind = "workload_identity"
 	} else {
 		if c.AccessKeyID.IsZero() {
 			return nil, fmt.Errorf("aws_auth: access_key_id is required")
@@ -143,7 +152,6 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 			return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
 		}
 		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
-		credsKind = "static"
 	}
 
 	rules, err := hostmatch.CompileRules(c.Rules, "aws_auth")
@@ -161,7 +169,6 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		allowedRegions:   buildAllowSet(c.AllowedRegions),
 		allowedServices:  buildAllowSet(c.AllowedServices),
 		creds:            creds,
-		credsKind:        credsKind,
 		unsignedPayload:  c.UnsignedPayload,
 		allowChunkedBody: c.AllowChunkedBody,
 		now:              time.Now,
@@ -171,9 +178,8 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 	}, nil
 }
 
-// staticSourceProvider adapts two secrets.Source values (access key, secret
-// key) into an aws.CredentialsProvider. Each Retrieve calls Get on both
-// sources; the sources themselves cache via their own TTL settings.
+// staticSourceProvider adapts two secrets.Source values into an
+// aws.CredentialsProvider. The sources do their own TTL caching.
 type staticSourceProvider struct {
 	accessKey secrets.Source
 	secretKey secrets.Source
@@ -252,7 +258,7 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 	creds, err := a.creds.Retrieve(ctx)
 	if err != nil {
-		return a.rejectCredentialUnavailable(tctx, req, a.credsKind, err), nil
+		return a.rejectCredentialUnavailable(tctx, req, a.credsKind(), err), nil
 	}
 
 	payloadHash, reject := a.payloadHash(tctx, req)

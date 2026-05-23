@@ -159,13 +159,9 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 }
 
 // tokenSourceFromKeyfile parses a service-account JSON keyfile and returns a
-// token source plus the service-account email. JWTConfigFromJSON is the
-// narrowed, non-deprecated form of credential loading. It only accepts
-// service-account JSON keyfiles, which is what the keyfile path is designed
-// for; we don't want to silently accept the broader set of credential
-// configurations (workload identity federation, external_account, etc.) that
-// CredentialsFromJSON allows. Use credentials_provider: workload_identity for
-// those.
+// token source plus the service-account email. Uses JWTConfigFromJSON (not
+// CredentialsFromJSON) to reject broader credential shapes here; those go
+// through credentials_provider: workload_identity instead.
 func tokenSourceFromKeyfile(ctx context.Context, keyJSON []byte, scopes []string, subject string) (oauth2.TokenSource, string, error) {
 	cfg, err := google.JWTConfigFromJSON(keyJSON, scopes...)
 	if err != nil {
