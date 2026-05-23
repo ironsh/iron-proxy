@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/transform"
@@ -46,6 +47,18 @@ func staticBuilder(src secrets.Source) sourceBuilder {
 
 func failingBuilder(err error) sourceBuilder {
 	return func(yaml.Node, *slog.Logger) (secrets.Source, error) { return nil, err }
+}
+
+// errTokenSourceBuilder fails if invoked. Used in tests that exercise the
+// keyfile paths so an accidental credentials_provider entry is caught.
+func errTokenSourceBuilder(context.Context, yaml.Node, []string, *slog.Logger) (oauth2.TokenSource, string, error) {
+	return nil, "", fmt.Errorf("tokenSourceBuilder must not be called in this test")
+}
+
+func staticTokenSourceBuilder(ts oauth2.TokenSource, principal string) tokenSourceBuilder {
+	return func(context.Context, yaml.Node, []string, *slog.Logger) (oauth2.TokenSource, string, error) {
+		return ts, principal, nil
+	}
 }
 
 // testKeyfileJSON generates a service-account JSON keyfile pointing token
@@ -143,16 +156,65 @@ rules:
 `,
 			wantError: "scopes",
 		},
+		{
+			name: "keyfile_path and credentials_provider both set",
+			yaml: `
+keyfile_path: /tmp/k.json
+credentials_provider:
+  type: workload_identity
+scopes: [a]
+rules:
+  - host: "*.googleapis.com"
+`,
+			wantError: "exactly one of",
+		},
+		{
+			name: "subject combined with credentials_provider",
+			yaml: `
+credentials_provider:
+  type: workload_identity
+subject: user@workspace.example.com
+scopes: [a]
+rules:
+  - host: "*.googleapis.com"
+`,
+			wantError: "subject",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var c config
 			node := yamlFromString(t, tc.yaml)
 			require.NoError(t, node.Decode(&c))
-			_, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+			_, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 			require.ErrorContains(t, err, tc.wantError)
 		})
 	}
+}
+
+func TestGCPAuth_InjectsBearerFromCredentialsProvider(t *testing.T) {
+	cfgYAML := `
+credentials_provider:
+  type: workload_identity
+scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+rules:
+  - host: "*.googleapis.com"
+`
+	var c config
+	node := yamlFromString(t, cfgYAML)
+	require.NoError(t, node.Decode(&c))
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "wi-token", TokenType: "Bearer"})
+	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), staticTokenSourceBuilder(ts, "wi-principal@example.com"))
+	require.NoError(t, err)
+
+	req := newRequest(t, "storage.googleapis.com")
+	tctx := newContext()
+	res, err := g.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "Bearer wi-token", req.Header.Get("Authorization"))
+	require.Equal(t, "wi-principal@example.com", tctx.DrainAnnotations()["service_account"])
 }
 
 func TestGCPAuth_InjectsBearerFromKeyfilePath(t *testing.T) {
@@ -165,7 +227,7 @@ func TestGCPAuth_InjectsBearerFromKeyfilePath(t *testing.T) {
 		KeyfilePath: path,
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	req := newRequest(t, "storage.googleapis.com")
@@ -188,7 +250,7 @@ secret_ref: "op://vault/gcp-sa/credential"
 `),
 		Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(nested))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(nested), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	req := newRequest(t, "storage.googleapis.com")
@@ -214,7 +276,7 @@ rules:
 	var c config
 	node := yamlFromString(t, cfgYAML)
 	require.NoError(t, node.Decode(&c))
-	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	// Matching host gets the header.
@@ -241,7 +303,7 @@ func TestGCPAuth_CachesTokenAcrossRequests(t *testing.T) {
 		KeyfilePath: path,
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	for i := 0; i < 5; i++ {
@@ -258,7 +320,7 @@ func TestGCPAuth_KeyfileMissing_Rejects(t *testing.T) {
 		KeyfilePath: "/does/not/exist.json",
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	req := newRequest(t, "storage.googleapis.com")
@@ -276,7 +338,7 @@ secret_ref: "op://vault/missing"
 `),
 		Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	_, err := newFromConfig(cfg, slog.Default(), os.ReadFile, failingBuilder(fmt.Errorf("not configured")))
+	_, err := newFromConfig(cfg, slog.Default(), os.ReadFile, failingBuilder(fmt.Errorf("not configured")), errTokenSourceBuilder)
 	require.ErrorContains(t, err, "building keyfile source")
 	require.ErrorContains(t, err, "not configured")
 }
@@ -318,7 +380,7 @@ rules:
 	var c config
 	node := yamlFromString(t, cfgYAML)
 	require.NoError(t, node.Decode(&c))
-	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
@@ -350,7 +412,7 @@ func TestGCPAuth_StubsMetadataServerToken(t *testing.T) {
 		KeyfilePath: path,
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	urls := []string{
@@ -387,7 +449,7 @@ func TestGCPAuth_DoesNotStubNonTokenPaths(t *testing.T) {
 		KeyfilePath: path,
 		Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 	}
-	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 	require.NoError(t, err)
 
 	cases := []string{
@@ -477,7 +539,7 @@ func TestGCPAuth_Subject(t *testing.T) {
 				Subject:     tc.subject,
 				Scopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 			}
-			g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))
+			g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
 			require.NoError(t, err)
 
 			req := newRequest(t, "storage.googleapis.com")

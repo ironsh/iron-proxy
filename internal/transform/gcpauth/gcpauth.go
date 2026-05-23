@@ -1,16 +1,24 @@
 // Package gcpauth implements a transform that mints short-lived GCP OAuth2
-// access tokens from a service account keyfile and injects them as
-// Authorization: Bearer headers on matching requests.
+// access tokens and injects them as Authorization: Bearer headers on matching
+// requests.
 //
-// The keyfile can be loaded from disk (keyfile_path) or from any secret
-// source registered with the secrets package (env, aws_sm, aws_ssm,
-// 1password, 1password_connect) via a nested keyfile block. Token minting,
-// caching, and refresh are delegated to golang.org/x/oauth2/google — the same
-// code path the official GCP SDKs use.
+// Credentials come from one of three sources, mutually exclusive:
+//   - keyfile_path: a service account JSON keyfile loaded from disk.
+//   - keyfile: a service account JSON keyfile loaded from any registered
+//     secret source (env, aws_sm, aws_ssm, 1password, 1password_connect).
+//   - credentials_provider: a structured block dispatching on a type field.
+//     The "workload_identity" type defers to Google Application Default
+//     Credentials, which resolves GKE Workload Identity via the metadata
+//     server, GOOGLE_APPLICATION_CREDENTIALS keyfiles, and Workload Identity
+//     Federation external_account JSON.
+//
+// Token minting, caching, and refresh are delegated to
+// golang.org/x/oauth2/google — the same code path the official GCP SDKs use.
 //
 // A non-empty subject impersonates that Workspace user via domain-wide
 // delegation: the minted token acts as the subject rather than the service
-// account itself.
+// account itself. Only valid with the keyfile sources; credentials_provider
+// rejects subject because metadata-server credentials cannot impersonate.
 //
 // Like all header-injecting transforms, this requires MITM mode; sni-only
 // mode has no way to rewrite headers.
@@ -49,25 +57,28 @@ func init() {
 }
 
 type config struct {
-	KeyfilePath string                 `yaml:"keyfile_path,omitempty"`
-	Keyfile     yaml.Node              `yaml:"keyfile,omitempty"`
-	Subject     string                 `yaml:"subject,omitempty"`
-	Scopes      []string               `yaml:"scopes"`
-	Rules       []hostmatch.RuleConfig `yaml:"rules"`
+	KeyfilePath         string                 `yaml:"keyfile_path,omitempty"`
+	Keyfile             yaml.Node              `yaml:"keyfile,omitempty"`
+	CredentialsProvider yaml.Node              `yaml:"credentials_provider,omitempty"`
+	Subject             string                 `yaml:"subject,omitempty"`
+	Scopes              []string               `yaml:"scopes"`
+	Rules               []hostmatch.RuleConfig `yaml:"rules"`
 }
 
 // GCPAuth is the transform.
 type GCPAuth struct {
-	scopes  []string
-	subject string           // Workspace user to impersonate; "" for none
-	rules   []hostmatch.Rule // empty = apply to all requests
-	loadKey func(ctx context.Context) ([]byte, error)
-	logger  *slog.Logger
+	rules    []hostmatch.Rule // empty = apply to all requests
+	tsLoader tokenSourceLoader
+	logger   *slog.Logger
 
 	mu          sync.Mutex
 	tokenSource oauth2.TokenSource
-	email       string
+	principal   string
 }
+
+// tokenSourceLoader returns a fresh token source for one transform instance,
+// plus a best-effort principal identifier for audit annotations.
+type tokenSourceLoader func(ctx context.Context) (oauth2.TokenSource, string, error)
 
 // sourceBuilder is the signature of secrets.BuildSource. Pulled out so tests
 // can inject a stub instead of constructing real source backends.
@@ -78,54 +89,93 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing gcp_auth config: %w", err)
 	}
-	return newFromConfig(c, logger, os.ReadFile, secrets.BuildSource)
+	return newFromConfig(c, logger, os.ReadFile, secrets.BuildSource, BuildTokenSource)
 }
 
-func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte, error), buildSource sourceBuilder) (*GCPAuth, error) {
+func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte, error), buildSource sourceBuilder, buildTS tokenSourceBuilder) (*GCPAuth, error) {
 	hasPath := c.KeyfilePath != ""
 	hasNested := c.Keyfile.Kind != 0
-	if hasPath == hasNested {
-		return nil, fmt.Errorf("gcp_auth: requires exactly one of \"keyfile_path\" or \"keyfile\"")
+	hasProvider := c.CredentialsProvider.Kind != 0
+	sources := 0
+	for _, b := range []bool{hasPath, hasNested, hasProvider} {
+		if b {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, fmt.Errorf("gcp_auth: requires exactly one of \"keyfile_path\", \"keyfile\", or \"credentials_provider\"")
 	}
 	if len(c.Scopes) == 0 {
 		return nil, fmt.Errorf("gcp_auth: at least one entry in \"scopes\" is required")
+	}
+	if hasProvider && c.Subject != "" {
+		return nil, fmt.Errorf("gcp_auth: \"subject\" cannot be combined with \"credentials_provider\" (only keyfile sources support domain-wide delegation)")
 	}
 	rules, err := hostmatch.CompileRules(c.Rules, "gcp_auth")
 	if err != nil {
 		return nil, err
 	}
 
-	var load func(context.Context) ([]byte, error)
-	if hasPath {
+	var tsLoader tokenSourceLoader
+	switch {
+	case hasPath:
 		path := c.KeyfilePath
-		load = func(context.Context) ([]byte, error) {
+		subject := c.Subject
+		scopes := c.Scopes
+		tsLoader = func(ctx context.Context) (oauth2.TokenSource, string, error) {
 			data, err := readFile(path)
 			if err != nil {
-				return nil, fmt.Errorf("reading GCP keyfile %q: %w", path, err)
+				return nil, "", fmt.Errorf("reading GCP keyfile %q: %w", path, err)
 			}
-			return data, nil
+			return tokenSourceFromKeyfile(ctx, data, scopes, subject)
 		}
-	} else {
+	case hasNested:
 		nested, err := buildSource(c.Keyfile, logger)
 		if err != nil {
 			return nil, fmt.Errorf("gcp_auth: building keyfile source: %w", err)
 		}
-		load = func(ctx context.Context) ([]byte, error) {
+		subject := c.Subject
+		scopes := c.Scopes
+		tsLoader = func(ctx context.Context) (oauth2.TokenSource, string, error) {
 			v, err := nested.Get(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("loading GCP keyfile from %q: %w", nested.Name(), err)
+				return nil, "", fmt.Errorf("loading GCP keyfile from %q: %w", nested.Name(), err)
 			}
-			return []byte(v), nil
+			return tokenSourceFromKeyfile(ctx, []byte(v), scopes, subject)
+		}
+	case hasProvider:
+		providerNode := c.CredentialsProvider
+		scopes := c.Scopes
+		tsLoader = func(ctx context.Context) (oauth2.TokenSource, string, error) {
+			return buildTS(ctx, providerNode, scopes, logger)
 		}
 	}
 
 	return &GCPAuth{
-		scopes:  c.Scopes,
-		subject: c.Subject,
-		rules:   rules,
-		loadKey: load,
-		logger:  logger,
+		rules:    rules,
+		tsLoader: tsLoader,
+		logger:   logger,
 	}, nil
+}
+
+// tokenSourceFromKeyfile parses a service-account JSON keyfile and returns a
+// token source plus the service-account email. Uses JWTConfigFromJSON (not
+// CredentialsFromJSON) to reject broader credential shapes here; those go
+// through credentials_provider: workload_identity instead.
+func tokenSourceFromKeyfile(ctx context.Context, keyJSON []byte, scopes []string, subject string) (oauth2.TokenSource, string, error) {
+	cfg, err := google.JWTConfigFromJSON(keyJSON, scopes...)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing GCP service account keyfile: %w", err)
+	}
+	cfg.Subject = subject
+	var meta struct {
+		ClientEmail string `json:"client_email"`
+	}
+	email := ""
+	if err := json.Unmarshal(keyJSON, &meta); err == nil {
+		email = meta.ClientEmail
+	}
+	return cfg.TokenSource(ctx), email, nil
 }
 
 func (g *GCPAuth) Name() string { return "gcp_auth" }
@@ -155,8 +205,8 @@ func (g *GCPAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 
 	req.Header.Set("Authorization", "Bearer "+tok)
-	if g.email != "" {
-		tctx.Annotate("service_account", g.email)
+	if g.principal != "" {
+		tctx.Annotate("service_account", g.principal)
 	}
 	tctx.Annotate("injected", []string{"header:Authorization"})
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
@@ -187,27 +237,12 @@ func (g *GCPAuth) loadTokenSource(ctx context.Context) (oauth2.TokenSource, erro
 	if g.tokenSource != nil {
 		return g.tokenSource, nil
 	}
-	keyJSON, err := g.loadKey(ctx)
+	ts, principal, err := g.tsLoader(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// JWTConfigFromJSON is the narrowed, non-deprecated form of credential
-	// loading. It only accepts service-account JSON keyfiles, which is what
-	// gcp_auth is designed for; we don't want to silently accept the broader
-	// set of credential configurations (workload identity federation,
-	// external_account, etc.) that CredentialsFromJSON allows.
-	cfg, err := google.JWTConfigFromJSON(keyJSON, g.scopes...)
-	if err != nil {
-		return nil, fmt.Errorf("parsing GCP service account keyfile: %w", err)
-	}
-	cfg.Subject = g.subject
-	var meta struct {
-		ClientEmail string `json:"client_email"`
-	}
-	if err := json.Unmarshal(keyJSON, &meta); err == nil {
-		g.email = meta.ClientEmail
-	}
-	g.tokenSource = cfg.TokenSource(ctx)
+	g.tokenSource = ts
+	g.principal = principal
 	return g.tokenSource, nil
 }
 

@@ -3,9 +3,18 @@
 // signature produced by any AWS SDK using placeholder credentials. This
 // transform reads the region and service from the inbound credential scope,
 // strips the placeholder signature, and re-signs the request with real
-// credentials drawn from a registered secret source (env, aws_sm, aws_ssm,
-// 1password, ...). This lets a single transform entry handle every AWS
-// service a client speaks to without enumerating them in config.
+// credentials. This lets a single transform entry handle every AWS service a
+// client speaks to without enumerating them in config.
+//
+// Credentials come from one of two sources, mutually exclusive:
+//   - access_key_id + secret_access_key: each backed by any registered secret
+//     source (env, aws_sm, aws_ssm, 1password, ...). Best for calling AWS
+//     from outside AWS with long-lived static keys.
+//   - credentials_provider: a structured block dispatching on a type field.
+//     The "workload_identity" type defers to the AWS SDK default credential
+//     chain, which natively resolves IRSA, EKS Pod Identity, IMDSv2, env
+//     vars, shared profiles, and SSO. Best for pod-bound rotating creds the
+//     agent should never see.
 //
 // Like hmac_sign, this requires MITM mode: sni-only mode has no method, path,
 // or body to sign. A truncated body would produce an invalid signature, so
@@ -55,14 +64,14 @@ const (
 )
 
 type config struct {
-	AccessKeyID      yaml.Node              `yaml:"access_key_id"`
-	SecretAccessKey  yaml.Node              `yaml:"secret_access_key"`
-	SessionToken     yaml.Node              `yaml:"session_token,omitempty"`
-	AllowedRegions   []string               `yaml:"allowed_regions,omitempty"`
-	AllowedServices  []string               `yaml:"allowed_services,omitempty"`
-	UnsignedPayload  bool                   `yaml:"unsigned_payload,omitempty"`
-	AllowChunkedBody bool                   `yaml:"allow_chunked_body,omitempty"`
-	Rules            []hostmatch.RuleConfig `yaml:"rules"`
+	AccessKeyID         yaml.Node              `yaml:"access_key_id,omitempty"`
+	SecretAccessKey     yaml.Node              `yaml:"secret_access_key,omitempty"`
+	CredentialsProvider yaml.Node              `yaml:"credentials_provider,omitempty"`
+	AllowedRegions      []string               `yaml:"allowed_regions,omitempty"`
+	AllowedServices     []string               `yaml:"allowed_services,omitempty"`
+	UnsignedPayload     bool                   `yaml:"unsigned_payload,omitempty"`
+	AllowChunkedBody    bool                   `yaml:"allow_chunked_body,omitempty"`
+	Rules               []hostmatch.RuleConfig `yaml:"rules"`
 }
 
 // sourceBuilder is the signature of secrets.BuildSource, factored out so tests
@@ -74,15 +83,19 @@ type sourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 // reaching for the real signer.
 type signFunc func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error
 
+// Credential provider kinds, annotated on credential-unavailable rejections.
+const (
+	providerStatic           = "static"
+	providerWorkloadIdentity = "workload_identity"
+)
+
 // AWSAuth is the transform.
 type AWSAuth struct {
 	logger           *slog.Logger
 	rules            []hostmatch.Rule
 	allowedRegions   map[string]struct{} // nil → allow any
 	allowedServices  map[string]struct{} // nil → allow any
-	accessKeyID      secrets.Source
-	secretAccessKey  secrets.Source
-	sessionToken     secrets.Source // nil when omitted
+	creds            aws.CredentialsProvider
 	unsignedPayload  bool
 	allowChunkedBody bool
 
@@ -90,36 +103,55 @@ type AWSAuth struct {
 	sign signFunc
 }
 
+// credsKind reports which kind of provider backs the transform, for telemetry.
+func (a *AWSAuth) credsKind() string {
+	if _, ok := a.creds.(*staticSourceProvider); ok {
+		return providerStatic
+	}
+	return providerWorkloadIdentity
+}
+
 func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) {
 	var c config
 	if err := cfg.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parsing aws_auth config: %w", err)
 	}
-	return newFromConfig(c, logger, secrets.BuildSource)
+	return newFromConfig(c, logger, secrets.BuildSource, BuildCredentialsProvider)
 }
 
-func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*AWSAuth, error) {
-	if c.AccessKeyID.IsZero() {
-		return nil, fmt.Errorf("aws_auth: access_key_id is required")
+func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCreds credentialsProviderBuilder) (*AWSAuth, error) {
+	hasStatic := !c.AccessKeyID.IsZero() || !c.SecretAccessKey.IsZero()
+	hasProvider := !c.CredentialsProvider.IsZero()
+	if hasStatic && hasProvider {
+		return nil, fmt.Errorf("aws_auth: set either access_key_id/secret_access_key or credentials_provider, not both")
 	}
-	if c.SecretAccessKey.IsZero() {
-		return nil, fmt.Errorf("aws_auth: secret_access_key is required")
+	if !hasStatic && !hasProvider {
+		return nil, fmt.Errorf("aws_auth: requires either access_key_id+secret_access_key or credentials_provider")
 	}
 
-	accessKey, err := build(c.AccessKeyID, logger)
-	if err != nil {
-		return nil, fmt.Errorf("aws_auth: building access_key_id source: %w", err)
-	}
-	secretKey, err := build(c.SecretAccessKey, logger)
-	if err != nil {
-		return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
-	}
-	var sessionToken secrets.Source
-	if !c.SessionToken.IsZero() {
-		sessionToken, err = build(c.SessionToken, logger)
+	var creds aws.CredentialsProvider
+	if hasProvider {
+		p, err := buildCreds(c.CredentialsProvider, logger)
 		if err != nil {
-			return nil, fmt.Errorf("aws_auth: building session_token source: %w", err)
+			return nil, fmt.Errorf("aws_auth: building credentials_provider: %w", err)
 		}
+		creds = p
+	} else {
+		if c.AccessKeyID.IsZero() {
+			return nil, fmt.Errorf("aws_auth: access_key_id is required")
+		}
+		if c.SecretAccessKey.IsZero() {
+			return nil, fmt.Errorf("aws_auth: secret_access_key is required")
+		}
+		accessKey, err := build(c.AccessKeyID, logger)
+		if err != nil {
+			return nil, fmt.Errorf("aws_auth: building access_key_id source: %w", err)
+		}
+		secretKey, err := build(c.SecretAccessKey, logger)
+		if err != nil {
+			return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
+		}
+		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
 	}
 
 	rules, err := hostmatch.CompileRules(c.Rules, "aws_auth")
@@ -136,15 +168,36 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*AWSAuth
 		rules:            rules,
 		allowedRegions:   buildAllowSet(c.AllowedRegions),
 		allowedServices:  buildAllowSet(c.AllowedServices),
-		accessKeyID:      accessKey,
-		secretAccessKey:  secretKey,
-		sessionToken:     sessionToken,
+		creds:            creds,
 		unsignedPayload:  c.UnsignedPayload,
 		allowChunkedBody: c.AllowChunkedBody,
 		now:              time.Now,
 		sign: func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error {
 			return signer.SignHTTP(ctx, creds, req, payloadHash, service, region, signingTime)
 		},
+	}, nil
+}
+
+// staticSourceProvider adapts two secrets.Source values into an
+// aws.CredentialsProvider. The sources do their own TTL caching.
+type staticSourceProvider struct {
+	accessKey secrets.Source
+	secretKey secrets.Source
+}
+
+func (p *staticSourceProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	ak, err := p.accessKey.Get(ctx)
+	if err != nil {
+		return aws.Credentials{}, fmt.Errorf("access_key_id: %w", err)
+	}
+	sk, err := p.secretKey.Get(ctx)
+	if err != nil {
+		return aws.Credentials{}, fmt.Errorf("secret_access_key: %w", err)
+	}
+	return aws.Credentials{
+		AccessKeyID:     ak,
+		SecretAccessKey: sk,
+		Source:          "iron-proxy aws_auth static",
 	}, nil
 }
 
@@ -203,20 +256,9 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		}
 	}
 
-	accessKey, err := a.accessKeyID.Get(ctx)
+	creds, err := a.creds.Retrieve(ctx)
 	if err != nil {
-		return a.rejectCredentialUnavailable(tctx, req, "access_key_id", err), nil
-	}
-	secretKey, err := a.secretAccessKey.Get(ctx)
-	if err != nil {
-		return a.rejectCredentialUnavailable(tctx, req, "secret_access_key", err), nil
-	}
-	var token string
-	if a.sessionToken != nil {
-		token, err = a.sessionToken.Get(ctx)
-		if err != nil {
-			return a.rejectCredentialUnavailable(tctx, req, "session_token", err), nil
-		}
+		return a.rejectCredentialUnavailable(tctx, req, a.credsKind(), err), nil
 	}
 
 	payloadHash, reject := a.payloadHash(tctx, req)
@@ -232,11 +274,6 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	// services.
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
-	creds := aws.Credentials{
-		AccessKeyID:     accessKey,
-		SecretAccessKey: secretKey,
-		SessionToken:    token,
-	}
 	if err := a.sign(ctx, creds, req, payloadHash, scope.service, scope.region, a.now()); err != nil {
 		tctx.Annotate("rejected", "signing_failed")
 		tctx.Annotate("error", err.Error())
@@ -247,7 +284,7 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 
 	injected := []string{"header:Authorization", "header:X-Amz-Date", "header:X-Amz-Content-Sha256"}
-	if token != "" {
+	if creds.SessionToken != "" {
 		injected = append(injected, "header:X-Amz-Security-Token")
 	}
 	tctx.Annotate("injected", injected)

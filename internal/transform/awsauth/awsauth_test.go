@@ -99,12 +99,39 @@ func signedRequest(t *testing.T, method, rawURL, region, service string, body []
 
 func buildTransformWith(t *testing.T, cfgYAML string, build sourceBuilder) *AWSAuth {
 	t.Helper()
+	return buildTransformWithBoth(t, cfgYAML, build, errCredBuilder)
+}
+
+func buildTransformWithBoth(t *testing.T, cfgYAML string, build sourceBuilder, buildCreds credentialsProviderBuilder) *AWSAuth {
+	t.Helper()
 	var c config
 	node := yamlFromString(t, cfgYAML)
 	require.NoError(t, node.Decode(&c))
-	a, err := newFromConfig(c, slog.Default(), build)
+	a, err := newFromConfig(c, slog.Default(), build, buildCreds)
 	require.NoError(t, err)
 	return a
+}
+
+// errCredBuilder fails if invoked. Used in tests that exercise the legacy
+// static path so an accidental credentials_provider entry is caught.
+func errCredBuilder(yaml.Node, *slog.Logger) (aws.CredentialsProvider, error) {
+	return nil, fmt.Errorf("credentials_provider builder must not be called in this test")
+}
+
+// stubCredsProvider returns canned credentials.
+type stubCredsProvider struct {
+	creds aws.Credentials
+	err   error
+	calls atomic.Int64
+}
+
+func (p *stubCredsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	p.calls.Add(1)
+	return p.creds, p.err
+}
+
+func stubCredBuilder(p aws.CredentialsProvider) credentialsProviderBuilder {
+	return func(yaml.Node, *slog.Logger) (aws.CredentialsProvider, error) { return p, nil }
 }
 
 const minimalYAML = `
@@ -128,7 +155,7 @@ rules:
   - host: "*.amazonaws.com"
 `)
 		require.NoError(t, node.Decode(&c))
-		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
 		require.ErrorContains(t, err, "access_key_id is required")
 	})
 
@@ -139,31 +166,56 @@ access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
 secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
 `)
 		require.NoError(t, node.Decode(&c))
-		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
 		require.ErrorContains(t, err, `at least one entry in "rules" is required`)
 	})
 
 	t.Run("valid minimal config", func(t *testing.T) {
 		a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
-		require.Nil(t, a.sessionToken)
+		require.Equal(t, "static", a.credsKind())
 		require.Nil(t, a.allowedRegions)
 		require.Nil(t, a.allowedServices)
 	})
 
-	t.Run("session token wired when present", func(t *testing.T) {
-		srcs := map[string]secrets.Source{
-			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "AKIA"},
-			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "shh"},
-			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "tok"},
-		}
-		a := buildTransformWith(t, `
+	t.Run("rejects both static and credentials_provider", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
 access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
 secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
-session_token:     {type: env, var: AWS_SESSION_TOKEN}
+credentials_provider:
+  type: workload_identity
 rules:
   - host: "*.amazonaws.com"
-`, mapBuilder(srcs))
-		require.NotNil(t, a.sessionToken)
+`)
+		require.NoError(t, node.Decode(&c))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
+		require.ErrorContains(t, err, "not both")
+	})
+
+	t.Run("rejects neither static nor credentials_provider", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
+rules:
+  - host: "*.amazonaws.com"
+`)
+		require.NoError(t, node.Decode(&c))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
+		require.ErrorContains(t, err, "requires either")
+	})
+
+	t.Run("credentials_provider builds workload_identity path", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
+credentials_provider:
+  type: workload_identity
+rules:
+  - host: "*.amazonaws.com"
+`)
+		require.NoError(t, node.Decode(&c))
+		stub := &stubCredsProvider{creds: aws.Credentials{AccessKeyID: "AKIA", SecretAccessKey: "shh"}}
+		a, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), stubCredBuilder(stub))
+		require.NoError(t, err)
+		require.Equal(t, "workload_identity", a.credsKind())
 	})
 
 	t.Run("allow lists compiled into sets", func(t *testing.T) {
@@ -290,24 +342,25 @@ func TestTransformRequest(t *testing.T) {
 		require.Contains(t, req.Header.Get("Authorization"), "/eu-west-1/s3/aws4_request")
 	})
 
-	t.Run("session token populates security-token header", func(t *testing.T) {
-		srcs := map[string]secrets.Source{
-			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "AKIA"},
-			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "shh"},
-			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "IQoJb3JpZ2luX2VjE..."},
-		}
-		a := buildTransformWith(t, `
-access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
-secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
-session_token:     {type: env, var: AWS_SESSION_TOKEN}
+	t.Run("workload_identity provider session token populates security-token header", func(t *testing.T) {
+		stub := &stubCredsProvider{creds: aws.Credentials{
+			AccessKeyID:     "ASIAEXAMPLE",
+			SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+			SessionToken:    "IQoJb3JpZ2luX2VjE...",
+		}}
+		a := buildTransformWithBoth(t, `
+credentials_provider:
+  type: workload_identity
 rules:
   - host: "*.amazonaws.com"
-`, mapBuilder(srcs))
+`, mapBuilder(srcs), stubCredBuilder(stub))
 
 		req := signedRequest(t, http.MethodGet, "https://bucket.s3.us-east-1.amazonaws.com/key", "us-east-1", "s3", nil, 1<<20)
 		_, err := a.TransformRequest(context.Background(), newContext(), req)
 		require.NoError(t, err)
 		require.Equal(t, "IQoJb3JpZ2luX2VjE...", req.Header.Get("X-Amz-Security-Token"))
+		require.Contains(t, req.Header.Get("Authorization"), "ASIAEXAMPLE")
+		require.Equal(t, int64(1), stub.calls.Load())
 	})
 
 	t.Run("placeholder signature is stripped before re-signing", func(t *testing.T) {

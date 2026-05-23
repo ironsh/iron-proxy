@@ -30,13 +30,11 @@ func TestAWSAuth(t *testing.T) {
 		mu      sync.Mutex
 		gotAuth string
 		gotDate string
-		gotTok  string
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
 		gotDate = r.Header.Get("X-Amz-Date")
-		gotTok = r.Header.Get("X-Amz-Security-Token")
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -46,7 +44,6 @@ func TestAWSAuth(t *testing.T) {
 	env := []string{
 		"AWS_ACCESS_KEY_ID=AKIAEXAMPLE",
 		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		"AWS_SESSION_TOKEN=test-session-token",
 	}
 	proxy := startProxy(t, binary, cfgPath, env)
 	upstreamHost := upstream.Listener.Addr().String()
@@ -87,5 +84,4 @@ func TestAWSAuth(t *testing.T) {
 	require.Contains(t, gotAuth, "SignedHeaders=")
 	require.Contains(t, gotAuth, "Signature=")
 	require.Regexp(t, `^\d{8}T\d{6}Z$`, gotDate)
-	require.Equal(t, "test-session-token", gotTok)
 }

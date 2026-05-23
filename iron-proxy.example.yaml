@@ -274,6 +274,23 @@ transforms:
   #       - "https://www.googleapis.com/auth/cloud-platform"
   #     rules:
   #       - host: "*.googleapis.com"
+  #
+  # Workload identity: ironproxy holds the pod credentials via Google
+  # Application Default Credentials (GKE Workload Identity through the
+  # metadata server, GOOGLE_APPLICATION_CREDENTIALS, Workload Identity
+  # Federation, etc.) and the agent never sees them. The agent SDK can run
+  # with any stub credentials: gcp_auth stubs the OAuth2 token endpoint and
+  # the metadata server, then injects the real bearer token on outbound
+  # requests. The subject field is rejected with this provider because
+  # metadata-server credentials cannot perform domain-wide delegation.
+  # - name: gcp_auth
+  #   config:
+  #     credentials_provider:
+  #       type: workload_identity
+  #     scopes:
+  #       - "https://www.googleapis.com/auth/cloud-platform"
+  #     rules:
+  #       - host: "*.googleapis.com"
 
   # OAuth2 token injection. Mints short-lived OAuth2 access tokens and sets
   # Authorization: Bearer on matching requests. Each entry under tokens names
@@ -458,11 +475,24 @@ transforms:
   #   config:
   #     access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
   #     secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
-  #     # session_token:   {type: env, var: AWS_SESSION_TOKEN}  # optional, for STS / role creds
   #     # allowed_regions:  ["us-east-1", "eu-west-1"]           # optional safety gate; default allows any region
   #     # allowed_services: ["bedrock", "s3", "dynamodb"]        # optional safety gate; default allows any service
   #     # unsigned_payload: false
   #     # allow_chunked_body: false
+  #     rules:
+  #       - host: "*.amazonaws.com"
+  #
+  # Workload identity: ironproxy holds the rotating pod credentials (EKS IRSA,
+  # Pod Identity, IMDSv2, or any source the AWS SDK default chain understands)
+  # and the agent never sees them. Configure the agent's AWS SDK with any
+  # placeholder credentials so it produces a signed request; aws_auth strips
+  # the placeholder signature and re-signs with the real workload identity.
+  # - name: aws_auth
+  #   config:
+  #     credentials_provider:
+  #       type: workload_identity
+  #       # region: us-east-1     # optional; overrides AWS_REGION discovery
+  #     allowed_services: ["bedrock"]
   #     rules:
   #       - host: "*.amazonaws.com"
 

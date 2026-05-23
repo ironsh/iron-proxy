@@ -22,7 +22,6 @@ transforms:
     config:
       access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
       secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
-      session_token:     {type: env, var: AWS_SESSION_TOKEN}
       rules:
         - host: "127.0.0.1"
 
