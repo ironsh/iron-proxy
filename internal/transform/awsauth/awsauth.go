@@ -1,4 +1,4 @@
-// Package awssigv4 implements an AWS Signature Version 4 request-signing
+// Package awsauth implements an AWS Signature Version 4 request-signing
 // transform. It signs matching outbound requests with credentials drawn from
 // the standard secret sources (env, aws_sm, aws_ssm, 1password, etc.) and
 // injects the resulting Authorization, X-Amz-Date, and X-Amz-Security-Token
@@ -10,7 +10,7 @@
 // default; set allow_chunked_body: true to opt out of the chunked check, or
 // unsigned_payload: true to sign without buffering the body at all (S3
 // streaming uploads, etc.).
-package awssigv4
+package awsauth
 
 import (
 	"context"
@@ -33,7 +33,7 @@ import (
 )
 
 func init() {
-	transform.Register("awssigv4", factory)
+	transform.Register("aws_auth", factory)
 }
 
 // unsignedPayload is the literal placeholder AWS accepts in lieu of a real
@@ -65,8 +65,8 @@ type sourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 // reaching for the real signer.
 type signFunc func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error
 
-// AWSSigV4 is the transform.
-type AWSSigV4 struct {
+// AWSAuth is the transform.
+type AWSAuth struct {
 	logger           *slog.Logger
 	rules            []hostmatch.Rule
 	region           string
@@ -84,51 +84,51 @@ type AWSSigV4 struct {
 func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) {
 	var c config
 	if err := cfg.Decode(&c); err != nil {
-		return nil, fmt.Errorf("parsing awssigv4 config: %w", err)
+		return nil, fmt.Errorf("parsing aws_auth config: %w", err)
 	}
 	return newFromConfig(c, logger, secrets.BuildSource)
 }
 
-func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*AWSSigV4, error) {
+func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*AWSAuth, error) {
 	if c.Region == "" {
-		return nil, fmt.Errorf("awssigv4: region is required")
+		return nil, fmt.Errorf("aws_auth: region is required")
 	}
 	if c.Service == "" {
-		return nil, fmt.Errorf("awssigv4: service is required")
+		return nil, fmt.Errorf("aws_auth: service is required")
 	}
 	if c.AccessKeyID.IsZero() {
-		return nil, fmt.Errorf("awssigv4: access_key_id is required")
+		return nil, fmt.Errorf("aws_auth: access_key_id is required")
 	}
 	if c.SecretAccessKey.IsZero() {
-		return nil, fmt.Errorf("awssigv4: secret_access_key is required")
+		return nil, fmt.Errorf("aws_auth: secret_access_key is required")
 	}
 
 	accessKey, err := build(c.AccessKeyID, logger)
 	if err != nil {
-		return nil, fmt.Errorf("awssigv4: building access_key_id source: %w", err)
+		return nil, fmt.Errorf("aws_auth: building access_key_id source: %w", err)
 	}
 	secretKey, err := build(c.SecretAccessKey, logger)
 	if err != nil {
-		return nil, fmt.Errorf("awssigv4: building secret_access_key source: %w", err)
+		return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
 	}
 	var sessionToken secrets.Source
 	if !c.SessionToken.IsZero() {
 		sessionToken, err = build(c.SessionToken, logger)
 		if err != nil {
-			return nil, fmt.Errorf("awssigv4: building session_token source: %w", err)
+			return nil, fmt.Errorf("aws_auth: building session_token source: %w", err)
 		}
 	}
 
-	rules, err := hostmatch.CompileRules(c.Rules, "awssigv4")
+	rules, err := hostmatch.CompileRules(c.Rules, "aws_auth")
 	if err != nil {
 		return nil, err
 	}
 	if len(rules) == 0 {
-		return nil, fmt.Errorf("awssigv4: at least one entry in \"rules\" is required")
+		return nil, fmt.Errorf("aws_auth: at least one entry in \"rules\" is required")
 	}
 
 	signer := v4.NewSigner()
-	return &AWSSigV4{
+	return &AWSAuth{
 		logger:           logger,
 		rules:            rules,
 		region:           c.Region,
@@ -145,9 +145,9 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*AWSSigV
 	}, nil
 }
 
-func (a *AWSSigV4) Name() string { return "awssigv4" }
+func (a *AWSAuth) Name() string { return "aws_auth" }
 
-func (a *AWSSigV4) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	if !hostmatch.MatchAnyRule(a.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
@@ -197,7 +197,7 @@ func (a *AWSSigV4) TransformRequest(ctx context.Context, tctx *transform.Transfo
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
-func (a *AWSSigV4) TransformResponse(context.Context, *transform.TransformContext, *http.Request, *http.Response) (*transform.TransformResult, error) {
+func (a *AWSAuth) TransformResponse(context.Context, *transform.TransformContext, *http.Request, *http.Response) (*transform.TransformResult, error) {
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
@@ -206,7 +206,7 @@ func (a *AWSSigV4) TransformResponse(context.Context, *transform.TransformContex
 // hmac_sign's body-verification policy: a truncated body or (by default) a
 // chunked body produces a clean proxy-side rejection rather than a request
 // the upstream will reject with an opaque "signature mismatch" error.
-func (a *AWSSigV4) payloadHash(tctx *transform.TransformContext, req *http.Request) (string, *transform.TransformResult) {
+func (a *AWSAuth) payloadHash(tctx *transform.TransformContext, req *http.Request) (string, *transform.TransformResult) {
 	if a.unsignedPayload {
 		return unsignedPayload, nil
 	}
@@ -249,7 +249,7 @@ func (a *AWSSigV4) payloadHash(tctx *transform.TransformContext, req *http.Reque
 			Response: errorResponse(req, http.StatusBadRequest, "chunked_body_not_allowed"),
 		}
 	case req.ContentLength < 0 && a.allowChunkedBody:
-		a.logger.Warn("awssigv4 signing chunked request body without length verification",
+		a.logger.Warn("aws_auth signing chunked request body without length verification",
 			"host", hostmatch.StripPort(req.Host),
 			"path", req.URL.Path,
 			"buffered_length", len(body),
@@ -261,7 +261,7 @@ func (a *AWSSigV4) payloadHash(tctx *transform.TransformContext, req *http.Reque
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (a *AWSSigV4) rejectCredentialUnavailable(tctx *transform.TransformContext, req *http.Request, which string, err error) *transform.TransformResult {
+func (a *AWSAuth) rejectCredentialUnavailable(tctx *transform.TransformContext, req *http.Request, which string, err error) *transform.TransformResult {
 	tctx.Annotate("rejected", "credential_unavailable")
 	tctx.Annotate("credential", which)
 	tctx.Annotate("error", err.Error())
@@ -272,7 +272,7 @@ func (a *AWSSigV4) rejectCredentialUnavailable(tctx *transform.TransformContext,
 }
 
 func errorResponse(req *http.Request, status int, reason string) *http.Response {
-	body := []byte(`{"error":"awssigv4","reason":"` + reason + `"}`)
+	body := []byte(`{"error":"aws_auth","reason":"` + reason + `"}`)
 	return &http.Response{
 		StatusCode:    status,
 		Status:        strconv.Itoa(status) + " " + http.StatusText(status),

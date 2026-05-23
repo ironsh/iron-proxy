@@ -1,4 +1,4 @@
-package awssigv4
+package awsauth
 
 import (
 	"bytes"
@@ -80,7 +80,7 @@ func requestWithBody(t *testing.T, method, rawURL string, body []byte, maxBytes 
 	return req
 }
 
-func buildTransformWith(t *testing.T, cfgYAML string, build sourceBuilder) *AWSSigV4 {
+func buildTransformWith(t *testing.T, cfgYAML string, build sourceBuilder) *AWSAuth {
 	t.Helper()
 	var c config
 	node := yamlFromString(t, cfgYAML)

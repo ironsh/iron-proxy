@@ -435,7 +435,7 @@ transforms:
   #     rules:
   #       - host: "api.falconx.io"
 
-  # AWS SigV4 signing: attaches an AWS Signature Version 4 Authorization header
+  # AWS auth: attaches an AWS Signature Version 4 Authorization header
   # to outbound requests. Credentials are pulled from any registered secret
   # source (env, aws_sm, aws_ssm, 1password, ...). Use one entry per
   # region/service/credential combination and gate each with rules.
@@ -446,7 +446,7 @@ transforms:
   # unsigned_payload: true.
   #
   # Example: Bedrock model invocation
-  # - name: awssigv4
+  # - name: aws_auth
   #   config:
   #     region: us-east-1
   #     service: bedrock
@@ -461,7 +461,7 @@ transforms:
   #         paths: ["/model/*"]
   #
   # Example: S3 in eu-west-1 (streaming uploads)
-  # - name: awssigv4
+  # - name: aws_auth
   #   config:
   #     region: eu-west-1
   #     service: s3

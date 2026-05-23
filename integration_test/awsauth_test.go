@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAWSSigV4 boots the proxy with the awssigv4 transform configured and
+// TestAWSAuth boots the proxy with the aws_auth transform configured and
 // verifies that requests routed through it arrive at the upstream with a
 // valid-looking AWS Signature Version 4 Authorization header.
-func TestAWSSigV4(t *testing.T) {
+func TestAWSAuth(t *testing.T) {
 	tmpDir := t.TempDir()
 	binary := proxyBinary(t)
 
@@ -35,7 +35,7 @@ func TestAWSSigV4(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfgPath := renderConfig(t, tmpDir, "awssigv4.yaml", nil)
+	cfgPath := renderConfig(t, tmpDir, "awsauth.yaml", nil)
 	env := []string{
 		"AWS_ACCESS_KEY_ID=AKIAEXAMPLE",
 		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
