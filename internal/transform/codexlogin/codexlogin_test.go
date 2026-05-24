@@ -34,9 +34,15 @@ func (s *fakeSource) Get(context.Context) (string, error) {
 
 type fakeWriter struct {
 	current      string
+	reads        int
 	swaps        int
 	seenOld      string
 	seenNewValue string
+}
+
+func (w *fakeWriter) Current(context.Context) (string, error) {
+	w.reads++
+	return w.current, nil
 }
 
 func (w *fakeWriter) CompareAndSwap(_ context.Context, oldRefreshToken, newValue string) (string, bool, error) {
@@ -92,6 +98,45 @@ func TestCodexLoginRefreshesAndWritesBack(t *testing.T) {
 	require.Equal(t, "refresh-old", writer.seenOld)
 	require.Equal(t, "refresh-new", mustRefresh(t, writer.current))
 	require.Equal(t, "id-new", nestedString(mustDoc(t, writer.current), "tokens", "id_token"))
+}
+
+func TestCodexLoginPreservesRefreshTokenWhenRefreshOmitsRotation(t *testing.T) {
+	expired := authJSON(t, validJWT(t, time.Now().Add(-time.Hour)), "refresh-old", "acct_123")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"` + validJWT(t, time.Now().Add(time.Hour)) + `","expires_in":3600,"token_type":"Bearer"}`))
+	}))
+	defer server.Close()
+
+	writer := &fakeWriter{current: expired}
+	tr := newTestTransform(t, expired, writer, &testOptions{tokenEndpoint: server.URL})
+
+	req := newRequest(t, "https://chatgpt.com/backend-api/codex/responses")
+	res, err := tr.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "refresh-old", mustRefresh(t, writer.current))
+}
+
+func TestCodexLoginReloadsWritebackOnRefreshTokenReuse(t *testing.T) {
+	expired := authJSON(t, validJWT(t, time.Now().Add(-time.Hour)), "refresh-old", "acct_123")
+	newer := authJSON(t, validJWT(t, time.Now().Add(time.Hour)), "refresh-new", "acct_123")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"Your refresh token has already been used to generate a new access token. Please try signing in again.","code":"refresh_token_reused"}}`))
+	}))
+	defer server.Close()
+	writer := &fakeWriter{current: newer}
+	tr := newTestTransform(t, expired, writer, &testOptions{tokenEndpoint: server.URL})
+
+	req := newRequest(t, "https://chatgpt.com/backend-api/codex/responses")
+	res, err := tr.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Equal(t, "Bearer "+mustAccess(t, newer), req.Header.Get("Authorization"))
+	require.Equal(t, 1, writer.reads)
+	require.Equal(t, 0, writer.swaps)
 }
 
 func TestCodexLoginReloadsOnCASMismatch(t *testing.T) {

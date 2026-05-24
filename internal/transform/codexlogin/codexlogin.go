@@ -54,6 +54,7 @@ type sourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 type writerBuilder func(yaml.Node, *slog.Logger) (authJSONWriter, error)
 
 type authJSONWriter interface {
+	Current(ctx context.Context) (currentValue string, err error)
 	CompareAndSwap(ctx context.Context, oldRefreshToken, newValue string) (currentValue string, swapped bool, err error)
 }
 
@@ -212,8 +213,25 @@ func (c *CodexLogin) refreshWithCAS(ctx context.Context, auth *codexAuth) (*code
 		if currentAuth.refreshToken == "" {
 			return nil, fmt.Errorf("auth_json tokens.refresh_token is required")
 		}
+		attemptedRefreshToken := currentAuth.refreshToken
 		updatedRaw, updatedAuth, err := c.refresh(ctx, currentAuth)
 		if err != nil {
+			if isRefreshTokenReused(err) {
+				storedRaw, currentErr := c.auth.writer.Current(ctx)
+				if currentErr != nil {
+					return nil, fmt.Errorf("refresh token reused and loading latest auth_json failed: %w", currentErr)
+				}
+				currentAuth, currentErr = parseAuthJSON(storedRaw)
+				if currentErr != nil {
+					return nil, currentErr
+				}
+				if !currentAuth.needsRefresh(c.now(), c.refreshSkew) {
+					return currentAuth, nil
+				}
+				if currentAuth.refreshToken != attemptedRefreshToken {
+					continue
+				}
+			}
 			return nil, err
 		}
 		storedRaw, swapped, err := c.auth.writer.CompareAndSwap(ctx, currentAuth.refreshToken, updatedRaw)
@@ -257,6 +275,10 @@ func (c *CodexLogin) refresh(ctx context.Context, auth *codexAuth) (string, *cod
 		return "", nil, fmt.Errorf("reading codex refresh response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err == nil && isRefreshTokenReusedPayload(payload) {
+			return "", nil, refreshTokenReusedError{status: resp.StatusCode}
+		}
 		return "", nil, fmt.Errorf("codex refresh returned %d", resp.StatusCode)
 	}
 	var tokenResp map[string]any
@@ -272,6 +294,34 @@ func (c *CodexLogin) refresh(ctx context.Context, auth *codexAuth) (string, *cod
 		return "", nil, err
 	}
 	return updatedRaw, updatedAuth, nil
+}
+
+type refreshTokenReusedError struct {
+	status int
+}
+
+func (e refreshTokenReusedError) Error() string {
+	return fmt.Sprintf("codex refresh returned %d refresh_token_reused", e.status)
+}
+
+func isRefreshTokenReused(err error) bool {
+	_, ok := err.(refreshTokenReusedError)
+	return ok
+}
+
+func isRefreshTokenReusedPayload(payload map[string]any) bool {
+	if stringValue(payload["error"]) == "refresh_token_reused" {
+		return true
+	}
+	if stringValue(payload["code"]) == "refresh_token_reused" {
+		return true
+	}
+	if errorBody, ok := payload["error"].(map[string]any); ok {
+		if stringValue(errorBody["code"]) == "refresh_token_reused" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CodexLogin) matchesTokenEndpoint(req *http.Request) bool {

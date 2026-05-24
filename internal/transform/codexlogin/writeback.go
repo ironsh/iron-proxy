@@ -149,6 +149,30 @@ func (w *opWriter) CompareAndSwap(ctx context.Context, oldRefreshToken, newValue
 	return newValue, true, nil
 }
 
+func (w *opWriter) Current(ctx context.Context) (string, error) {
+	client, err := w.clientFor(ctx)
+	if err != nil {
+		return "", err
+	}
+	vaultID, err := resolveOPVaultID(ctx, client, w.ref.vault)
+	if err != nil {
+		return "", err
+	}
+	itemID, err := resolveOPItemID(ctx, client, vaultID, w.ref.item)
+	if err != nil {
+		return "", err
+	}
+	item, err := client.Items().Get(ctx, vaultID, itemID)
+	if err != nil {
+		return "", fmt.Errorf("loading 1password item: %w", err)
+	}
+	field, err := selectOPField(&item, w.ref)
+	if err != nil {
+		return "", err
+	}
+	return field.Value, nil
+}
+
 func (w *opWriter) clientFor(ctx context.Context) (*opsdk.Client, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -300,6 +324,26 @@ func (w *opConnectWriter) CompareAndSwap(ctx context.Context, oldRefreshToken, n
 		return "", false, fmt.Errorf("updating 1password_connect item: %w", err)
 	}
 	return newValue, true, nil
+}
+
+func (w *opConnectWriter) Current(ctx context.Context) (string, error) {
+	client, err := w.clientFor(ctx)
+	if err != nil {
+		return "", err
+	}
+	vault, err := client.GetVault(w.ref.vault)
+	if err != nil {
+		return "", fmt.Errorf("loading 1password_connect vault %q: %w", w.ref.vault, err)
+	}
+	item, err := client.GetItem(w.ref.item, vault.ID)
+	if err != nil {
+		return "", fmt.Errorf("loading 1password_connect item %q: %w", w.ref.item, err)
+	}
+	field, err := selectOPConnectField(item, w.ref)
+	if err != nil {
+		return "", err
+	}
+	return field.Value, nil
 }
 
 func (w *opConnectWriter) clientFor(context.Context) (opConnectClient, error) {
