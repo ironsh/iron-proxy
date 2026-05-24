@@ -140,6 +140,8 @@ func TestCodexLoginStubsTokenEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(body), stubAccessToken)
 	require.Contains(t, string(body), stubRefreshToken)
+	requireStubJWT(t, stubAccessToken)
+	requireStubJWT(t, stubIDToken)
 }
 
 func TestOPConnectWriterCompareAndSwapUpdatesOnlyConfiguredField(t *testing.T) {
@@ -288,6 +290,25 @@ func validJWT(t *testing.T, exp time.Time) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"exp":` + jsonNumber(exp.Unix()) + `}`))
 	return header + "." + payload + ".sig"
+}
+
+func requireStubJWT(t *testing.T, token string) {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	for _, part := range parts {
+		require.NotEmpty(t, part)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	exp, ok := claims["exp"].(float64)
+	require.True(t, ok)
+	require.Greater(t, int64(exp), time.Now().Add(24*time.Hour).Unix())
+	auth, ok := claims["https://api.openai.com/auth"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "iron-proxy-codex-stub-account", auth["chatgpt_account_id"])
 }
 
 func jsonNumber(v int64) string {

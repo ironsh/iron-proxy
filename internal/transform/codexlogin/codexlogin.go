@@ -25,9 +25,10 @@ const (
 	defaultTokenEndpoint = "https://auth.openai.com/oauth/token"
 	defaultRefreshSkew   = 5 * time.Minute
 
-	stubAccessToken  = "iron-proxy-codex-stub-token"
+	stubJWT          = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsImVtYWlsIjoiaXJvbi1wcm94eS1jb2RleC1zdHViQGV4YW1wbGUuaW52YWxpZCIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vcHJvZmlsZSI6eyJlbWFpbCI6Imlyb24tcHJveHktY29kZXgtc3R1YkBleGFtcGxlLmludmFsaWQifSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7InVzZXJfaWQiOiJpcm9uLXByb3h5LWNvZGV4LXN0dWItdXNlciIsImNoYXRncHRfdXNlcl9pZCI6Imlyb24tcHJveHktY29kZXgtc3R1Yi11c2VyIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiaXJvbi1wcm94eS1jb2RleC1zdHViLWFjY291bnQiLCJjaGF0Z3B0X2FjY291bnRfaXNfZmVkcmFtcCI6ZmFsc2V9fQ.stub-signature"
+	stubAccessToken  = stubJWT
 	stubRefreshToken = "iron-proxy-codex-stub-refresh-token"
-	stubIDToken      = "iron-proxy-codex-stub-id-token"
+	stubIDToken      = stubJWT
 )
 
 var stubTokenJSON = []byte(`{"access_token":"` + stubAccessToken + `","refresh_token":"` + stubRefreshToken + `","id_token":"` + stubIDToken + `","expires_in":3600,"token_type":"Bearer"}`)
