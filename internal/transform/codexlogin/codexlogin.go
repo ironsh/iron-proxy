@@ -189,7 +189,6 @@ func (c *CodexLogin) authForRequest(ctx context.Context) (*codexAuth, error) {
 	if c.auth.cachedRaw != "" {
 		if cachedAuth, cacheErr := parseAuthJSON(c.auth.cachedRaw); cacheErr == nil {
 			if auth.refreshToken != cachedAuth.refreshToken && auth.needsRefresh(c.now(), c.refreshSkew) {
-				raw = c.auth.cachedRaw
 				auth = cachedAuth
 			} else {
 				c.auth.cachedRaw = raw
@@ -199,7 +198,7 @@ func (c *CodexLogin) authForRequest(ctx context.Context) (*codexAuth, error) {
 	if !auth.needsRefresh(c.now(), c.refreshSkew) {
 		return auth, nil
 	}
-	refreshed, err := c.refreshWithCAS(ctx, raw, auth)
+	refreshed, err := c.refreshWithCAS(ctx, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +206,7 @@ func (c *CodexLogin) authForRequest(ctx context.Context) (*codexAuth, error) {
 	return refreshed, nil
 }
 
-func (c *CodexLogin) refreshWithCAS(ctx context.Context, raw string, auth *codexAuth) (*codexAuth, error) {
-	currentRaw := raw
+func (c *CodexLogin) refreshWithCAS(ctx context.Context, auth *codexAuth) (*codexAuth, error) {
 	currentAuth := auth
 	for attempt := 0; attempt < 2; attempt++ {
 		if currentAuth.refreshToken == "" {
@@ -225,8 +223,7 @@ func (c *CodexLogin) refreshWithCAS(ctx context.Context, raw string, auth *codex
 		if swapped {
 			return updatedAuth, nil
 		}
-		currentRaw = storedRaw
-		currentAuth, err = parseAuthJSON(currentRaw)
+		currentAuth, err = parseAuthJSON(storedRaw)
 		if err != nil {
 			return nil, err
 		}
