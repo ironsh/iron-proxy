@@ -232,7 +232,10 @@ func looksLikeUUID(s string) bool {
 
 func isAlnumLower(s string) bool {
 	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		default:
 			return false
 		}
 	}
