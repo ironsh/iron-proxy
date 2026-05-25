@@ -133,14 +133,15 @@ store:
   type: file
   path: /var/lib/iron-token-broker/openai-codex.json
 
-# 1Password via SDK (service account token). vault and item segments of
-# secret_ref must be UUIDs: the SDK takes raw IDs and looking names up
-# would cost a list call per refresh. Copy UUIDs with the 1Password
-# app's right-click "Copy Item UUID" / "Copy Vault UUID" actions. Reads
-# OP_SERVICE_ACCOUNT_TOKEN from the environment.
+# 1Password via SDK (service account token). vault, item, and section
+# segments of secret_ref accept either UUIDs or human titles; titles are
+# resolved once per handle via Vaults.List / Items.List and the IDs are
+# cached for the lifetime of the broker, so subsequent refreshes go
+# straight to Items.Get. Reads OP_SERVICE_ACCOUNT_TOKEN from the
+# environment.
 store:
   type: 1password
-  secret_ref: "op://abcd1234efgh5678ijkl9012mn/1234abcd5678efgh9012ijkl3m/credential_blob"
+  secret_ref: "op://ai-agents/CODEX_BLOB/credential"
 
 # 1Password via Connect server. Accepts UUIDs or human titles (Connect
 # resolves them server-side). Reads OP_CONNECT_HOST and OP_CONNECT_TOKEN

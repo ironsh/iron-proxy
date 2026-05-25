@@ -38,16 +38,6 @@ func (opBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("1password store: %w", err)
 	}
-	// The SDK's Items.Get takes raw vault and item IDs — there is no
-	// name-lookup helper that doesn't require a separate List round trip
-	// per resolution. Require UUIDs at config time so the broker doesn't
-	// silently hit the list endpoint on every refresh.
-	if !looksLikeUUID(ref.Vault) {
-		return nil, fmt.Errorf("1password store secret_ref %q: vault segment must be a UUID (use the SDK \"Copy Vault UUID\" action)", cfg.SecretRef)
-	}
-	if !looksLikeUUID(ref.Item) {
-		return nil, fmt.Errorf("1password store secret_ref %q: item segment must be a UUID (use the SDK \"Copy Item UUID\" action)", cfg.SecretRef)
-	}
 	return &opHandle{
 		ref:    ref,
 		secret: cfg.SecretRef,
@@ -60,6 +50,13 @@ func (opBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error) {
 type opSDKItemsAPI interface {
 	Get(ctx context.Context, vaultID, itemID string) (onepassword.Item, error)
 	Put(ctx context.Context, item onepassword.Item) (onepassword.Item, error)
+	List(ctx context.Context, vaultID string, filters ...onepassword.ItemListFilter) ([]onepassword.ItemOverview, error)
+}
+
+// opSDKVaultsAPI is the subset of the 1Password SDK Vaults API used by
+// opHandle, narrowed for testability.
+type opSDKVaultsAPI interface {
+	List(ctx context.Context, params ...onepassword.VaultListParams) ([]onepassword.VaultOverview, error)
 }
 
 // opHandle persists the credential blob as the value of a single field on
@@ -69,25 +66,28 @@ type opHandle struct {
 	secret string // original secret_ref string for log/Name output
 	logger *slog.Logger
 
-	mu    sync.Mutex
-	items opSDKItemsAPI
+	mu              sync.Mutex
+	items           opSDKItemsAPI
+	vaults          opSDKVaultsAPI
+	resolvedVaultID string
+	resolvedItemID  string
 }
 
 func (h *opHandle) Name() string { return h.secret }
 
 func (h *opHandle) Get(ctx context.Context) (CredentialBlob, error) {
-	items, err := h.getItems(ctx)
+	vaultID, itemID, err := h.resolve(ctx)
 	if err != nil {
 		return CredentialBlob{}, err
 	}
-	item, err := items.Get(ctx, h.ref.Vault, h.ref.Item)
+	item, err := h.items.Get(ctx, vaultID, itemID)
 	if err != nil {
 		if isOPNotFound(err) {
 			return CredentialBlob{}, ErrNotFound
 		}
 		return CredentialBlob{}, fmt.Errorf("1password Items.Get %q: %w", h.secret, err)
 	}
-	raw, err := selectOPField(item.Fields, h.ref)
+	raw, err := selectOPField(item, h.ref)
 	if err != nil {
 		return CredentialBlob{}, fmt.Errorf("1password store %q: %w", h.secret, err)
 	}
@@ -104,14 +104,14 @@ func (h *opHandle) Get(ctx context.Context) (CredentialBlob, error) {
 }
 
 func (h *opHandle) Put(ctx context.Context, blob CredentialBlob) error {
-	items, err := h.getItems(ctx)
+	vaultID, itemID, err := h.resolve(ctx)
 	if err != nil {
 		return err
 	}
 	// Re-fetch the item before mutating: the SDK Put requires the full
 	// Item document, so we hydrate it from the server to avoid clobbering
 	// any unrelated fields the operator added in 1Password's UI.
-	item, err := items.Get(ctx, h.ref.Vault, h.ref.Item)
+	item, err := h.items.Get(ctx, vaultID, itemID)
 	if err != nil {
 		return fmt.Errorf("1password Items.Get (pre-put) %q: %w", h.secret, err)
 	}
@@ -122,46 +122,127 @@ func (h *opHandle) Put(ctx context.Context, blob CredentialBlob) error {
 	if !setOPField(&item, h.ref, string(raw)) {
 		return fmt.Errorf("1password store %q: field %q not found on item; create it before bootstrap", h.secret, h.ref.Field)
 	}
-	if _, err := items.Put(ctx, item); err != nil {
+	if _, err := h.items.Put(ctx, item); err != nil {
 		return fmt.Errorf("1password Items.Put %q: %w", h.secret, err)
 	}
 	return nil
 }
 
-func (h *opHandle) getItems(ctx context.Context) (opSDKItemsAPI, error) {
+// resolve returns the cached vault and item UUIDs, initializing the SDK
+// client and looking up titles on first use. After the first successful
+// call all subsequent Get/Put operations go straight to Items.Get with
+// the cached IDs — title resolution costs at most one Vaults.List and
+// one Items.List per handle lifetime.
+func (h *opHandle) resolve(ctx context.Context) (string, string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.items != nil {
-		return h.items, nil
+	if err := h.ensureClientLocked(ctx); err != nil {
+		return "", "", err
+	}
+	if h.resolvedVaultID == "" {
+		id, err := h.resolveVaultLocked(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		h.resolvedVaultID = id
+	}
+	if h.resolvedItemID == "" {
+		id, err := h.resolveItemLocked(ctx, h.resolvedVaultID)
+		if err != nil {
+			return "", "", err
+		}
+		h.resolvedItemID = id
+	}
+	return h.resolvedVaultID, h.resolvedItemID, nil
+}
+
+func (h *opHandle) ensureClientLocked(ctx context.Context) error {
+	if h.items != nil && h.vaults != nil {
+		return nil
 	}
 	token := os.Getenv(opTokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("1password store %q: env var %q is not set or empty", h.secret, opTokenEnv)
+		return fmt.Errorf("1password store %q: env var %q is not set or empty", h.secret, opTokenEnv)
 	}
 	client, err := onepassword.NewClient(ctx,
 		onepassword.WithServiceAccountToken(token),
 		onepassword.WithIntegrationInfo("iron-token-broker", version.Version),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("1password store %q: creating client: %w", h.secret, err)
+		return fmt.Errorf("1password store %q: creating client: %w", h.secret, err)
 	}
-	h.items = client.Items()
-	return h.items, nil
+	if h.items == nil {
+		h.items = client.Items()
+	}
+	if h.vaults == nil {
+		h.vaults = client.Vaults()
+	}
+	return nil
 }
 
-// selectOPField looks up the field identified by ref on a list of SDK
-// ItemFields. The field is matched by ID or Title; when ref carries a
-// section, the field's SectionID must also match. Symmetric with
-// secrets.SelectConnectField but specialized for the SDK's
-// onepassword.ItemField type, which uses a SectionID pointer instead of
-// the Connect SDK's *ItemSection.
-func selectOPField(fields []onepassword.ItemField, ref secrets.OPRef) (string, error) {
-	for _, f := range fields {
+func (h *opHandle) resolveVaultLocked(ctx context.Context) (string, error) {
+	if looksLikeUUID(h.ref.Vault) {
+		return h.ref.Vault, nil
+	}
+	vaults, err := h.vaults.List(ctx)
+	if err != nil {
+		return "", fmt.Errorf("1password store %q: Vaults.List: %w", h.secret, err)
+	}
+	var match string
+	for _, v := range vaults {
+		if v.Title == h.ref.Vault {
+			if match != "" {
+				return "", fmt.Errorf("1password store %q: multiple vaults named %q; use the vault UUID instead", h.secret, h.ref.Vault)
+			}
+			match = v.ID
+		}
+	}
+	if match == "" {
+		return "", fmt.Errorf("1password store %q: vault %q not found (service account has access to %d vault(s))", h.secret, h.ref.Vault, len(vaults))
+	}
+	return match, nil
+}
+
+func (h *opHandle) resolveItemLocked(ctx context.Context, vaultID string) (string, error) {
+	if looksLikeUUID(h.ref.Item) {
+		return h.ref.Item, nil
+	}
+	items, err := h.items.List(ctx, vaultID)
+	if err != nil {
+		return "", fmt.Errorf("1password store %q: Items.List: %w", h.secret, err)
+	}
+	var match string
+	for _, it := range items {
+		if it.Title == h.ref.Item {
+			if match != "" {
+				return "", fmt.Errorf("1password store %q: multiple items named %q in vault; use the item UUID instead", h.secret, h.ref.Item)
+			}
+			match = it.ID
+		}
+	}
+	if match == "" {
+		return "", fmt.Errorf("1password store %q: item %q not found in vault", h.secret, h.ref.Item)
+	}
+	return match, nil
+}
+
+// selectOPField looks up the field identified by ref on item. Field is
+// matched by ID or Title; when ref carries a section, the field's
+// SectionID must point at a section whose ID or Title matches.
+// Symmetric with secrets.SelectConnectField but specialized for the
+// SDK's onepassword.Item type, which carries sections in a separate slice
+// and references them from fields via SectionID.
+func selectOPField(item onepassword.Item, ref secrets.OPRef) (string, error) {
+	sectionID, err := resolveOPSectionID(item.Sections, ref.Section)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range item.Fields {
 		if f.ID != ref.Field && f.Title != ref.Field {
 			continue
 		}
 		if ref.Section != "" {
-			if f.SectionID == nil || *f.SectionID != ref.Section {
+			if f.SectionID == nil || *f.SectionID != sectionID {
 				continue
 			}
 		}
@@ -177,13 +258,17 @@ func selectOPField(fields []onepassword.ItemField, ref secrets.OPRef) (string, e
 // if a matching field was found and mutated. Does not create new fields:
 // the operator must shape the item during bootstrap.
 func setOPField(item *onepassword.Item, ref secrets.OPRef, value string) bool {
+	sectionID, err := resolveOPSectionID(item.Sections, ref.Section)
+	if err != nil {
+		return false
+	}
 	for i := range item.Fields {
 		f := &item.Fields[i]
 		if f.ID != ref.Field && f.Title != ref.Field {
 			continue
 		}
 		if ref.Section != "" {
-			if f.SectionID == nil || *f.SectionID != ref.Section {
+			if f.SectionID == nil || *f.SectionID != sectionID {
 				continue
 			}
 		}
@@ -191,6 +276,21 @@ func setOPField(item *onepassword.Item, ref secrets.OPRef, value string) bool {
 		return true
 	}
 	return false
+}
+
+// resolveOPSectionID maps a section ref (ID or Title) to its concrete
+// section ID for use against ItemField.SectionID. Returns "" with no
+// error when ref is empty (no section constraint).
+func resolveOPSectionID(sections []onepassword.ItemSection, ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	for _, s := range sections {
+		if s.ID == ref || s.Title == ref {
+			return s.ID, nil
+		}
+	}
+	return "", fmt.Errorf("section %q not found on item", ref)
 }
 
 // isOPNotFound matches the SDK's item-not-found error message.
@@ -204,9 +304,9 @@ func isOPNotFound(err error) bool {
 
 // looksLikeUUID is a loose syntactic check for the 26-character base32 IDs
 // used by 1Password (e.g. "abcd1234efgh5678ijkl9012mn") and standard
-// 36-character UUIDs. Strict validation belongs to the SDK; this is just
-// enough to catch operators pasting human titles into a field that needs an
-// ID.
+// 36-character UUIDs. Used to decide whether a secret_ref segment is
+// already an ID we can pass straight to Items.Get or whether we need to
+// look it up by title via Vaults.List / Items.List.
 func looksLikeUUID(s string) bool {
 	if len(s) == 0 {
 		return false
