@@ -37,6 +37,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ironsh/iron-proxy/internal/headers"
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
@@ -265,7 +266,7 @@ func (h *HMACSign) TransformRequest(ctx context.Context, tctx *transform.Transfo
 				Response: errorResponse(req, http.StatusInternalServerError, "header_template_failed"),
 			}, nil
 		}
-		transform.SetHeaderPreservingCase(req.Header, hdr.name, buf.String())
+		headers.Set(req.Header, hdr.name, buf.String())
 		injected = append(injected, "header:"+hdr.name)
 	}
 

@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ironsh/iron-proxy/internal/headers"
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
@@ -411,7 +412,7 @@ func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue
 
 	var locations []string
 	if sec.injectHeader != "" {
-		transform.SetHeaderPreservingCase(req.Header, sec.injectHeader, formatted)
+		headers.Set(req.Header, sec.injectHeader, formatted)
 		locations = append(locations, "header:"+sec.injectHeader)
 	}
 	if sec.injectQueryParam != "" {
@@ -461,23 +462,13 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 			return
 		}
 		processed[canonical] = struct{}{}
-		vals := req.Header.Values(canonical)
-		if len(vals) == 0 {
-			return
-		}
 		hit := false
-		for _, v := range vals {
+		headers.Swap(req.Header, canonical, wireName, func(v string) string {
 			if headerContains(canonical, v, sec.proxyValue) {
 				hit = true
-				break
 			}
-		}
-		req.Header.Del(canonical)
-		for _, v := range vals {
-			// Assign the map key directly: http.Header.Add would
-			// canonicalize the key and discard the user's casing.
-			req.Header[wireName] = append(req.Header[wireName], replaceInHeader(canonical, v, sec.proxyValue, realValue))
-		}
+			return replaceInHeader(canonical, v, sec.proxyValue, realValue)
+		})
 		if hit {
 			locations = append(locations, "header:"+wireName)
 		}
