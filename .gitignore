@@ -1,5 +1,6 @@
 # Binaries
 /iron-proxy
+/iron-token-broker
 *.exe
 
 # IDE

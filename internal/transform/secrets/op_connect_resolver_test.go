@@ -286,18 +286,18 @@ func TestParseOPRef(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
-		want    opRef
+		want    OPRef
 		wantErr string
 	}{
 		{
 			name:  "three segments",
 			input: "op://Engineering/OpenAI/credential",
-			want:  opRef{vault: "Engineering", item: "OpenAI", field: "credential"},
+			want:  OPRef{Vault: "Engineering", Item: "OpenAI", Field: "credential"},
 		},
 		{
 			name:  "four segments with section",
 			input: "op://Engineering/OpenAI/api/key",
-			want:  opRef{vault: "Engineering", item: "OpenAI", section: "api", field: "key"},
+			want:  OPRef{Vault: "Engineering", Item: "OpenAI", Section: "api", Field: "key"},
 		},
 		{
 			name:    "missing op:// prefix",
@@ -327,7 +327,7 @@ func TestParseOPRef(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseOPRef(tt.input)
+			got, err := ParseOPRef(tt.input)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.wantErr)
@@ -339,49 +339,49 @@ func TestParseOPRef(t *testing.T) {
 	}
 }
 
-func TestSelectField(t *testing.T) {
+func TestSelectConnectField(t *testing.T) {
 	item := sampleItem()
 
 	tests := []struct {
 		name    string
-		ref     opRef
+		ref     OPRef
 		want    string
 		wantErr string
 	}{
 		{
 			name: "match by label",
-			ref:  opRef{field: "credential"},
+			ref:  OPRef{Field: "credential"},
 			want: "real-secret",
 		},
 		{
 			name: "match by id",
-			ref:  opRef{field: "field-uuid"},
+			ref:  OPRef{Field: "field-uuid"},
 			want: "real-secret",
 		},
 		{
 			name: "match with section label",
-			ref:  opRef{section: "api", field: "api_key"},
+			ref:  OPRef{Section: "api", Field: "api_key"},
 			want: "section-secret",
 		},
 		{
 			name: "match with section id",
-			ref:  opRef{section: "section-uuid", field: "api_key"},
+			ref:  OPRef{Section: "section-uuid", Field: "api_key"},
 			want: "section-secret",
 		},
 		{
 			name:    "section specified but field has no section",
-			ref:     opRef{section: "api", field: "credential"},
+			ref:     OPRef{Section: "api", Field: "credential"},
 			wantErr: "field \"credential\" in section \"api\" not found",
 		},
 		{
 			name:    "missing field",
-			ref:     opRef{field: "nope"},
+			ref:     OPRef{Field: "nope"},
 			wantErr: "field \"nope\" not found",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := selectField(item, tt.ref)
+			got, err := SelectConnectField(item, tt.ref)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.wantErr)
