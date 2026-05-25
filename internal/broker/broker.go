@@ -103,11 +103,10 @@ func (b *Broker) Wait() {
 // ListenAndServe starts the HTTP API server. Blocks until Shutdown is
 // called or the server errors. Errors after ListenAndServe returns are
 // non-nil only on a true failure (http.ErrServerClosed is filtered).
+// The "broker HTTP API starting" log line is emitted from inside the
+// server after the listener binds, so the resolved address is logged
+// even when the operator configured port 0.
 func (b *Broker) ListenAndServe() error {
-	b.log.Info("broker HTTP API starting",
-		slog.String("addr", b.api.Addr()),
-		slog.Int("credentials", len(b.creds)),
-	)
 	if err := b.api.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("broker http: %w", err)
 	}

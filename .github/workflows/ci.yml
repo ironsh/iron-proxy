@@ -48,6 +48,9 @@ jobs:
       - name: Build iron-proxy
         run: go build -o iron-proxy ./cmd/iron-proxy
 
+      - name: Build iron-token-broker
+        run: go build -o iron-token-broker ./cmd/iron-token-broker
+
       - name: Generate test CA
         run: ./iron-proxy generate-ca -outdir tmp -alg ed25519
 
