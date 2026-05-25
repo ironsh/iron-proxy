@@ -792,9 +792,11 @@ tokens:
 	_, err := o.TransformRequest(context.Background(), newContext(), req)
 	require.NoError(t, err)
 
-	// Header casing preserved verbatim. Go's http.Header canonicalizes on Get,
-	// but the wire bytes use the original "x-api-key" since we Set on a cloned
-	// request inside our RoundTripper, then the server canonicalizes on read.
+	// httptest can't observe wire-level casing (the server parses through
+	// textproto, which canonicalizes); the wire-level preservation guarantee
+	// is exercised by the broker's TestRefreshPreservesHeaderCasing, which
+	// uses a raw TCP listener. Here we just confirm the value reached the
+	// token endpoint at all.
 	require.Equal(t, "venue-api-key", srv.LastHeaders().Get("X-Api-Key"))
 	// The inbound request itself must not have received the header.
 	require.Empty(t, req.Header.Get("X-Api-Key"))

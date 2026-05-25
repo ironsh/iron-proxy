@@ -66,3 +66,17 @@ credentials:
       type: aws_sm
       secret_id: iron-broker/okta/credential_blob
       region: us-east-1
+
+  # A vendor that requires an api-key header on the token endpoint in
+  # addition to the standard form-body client_id/client_secret. Mirrors
+  # the oauth_token transform's token_endpoint_headers: each value is a
+  # discrete secret source, header names go on the wire verbatim.
+  - id: example-vendor
+    token_endpoint: https://api.example-vendor.com/oauth/token
+    client_id:     {type: env, var: EXAMPLE_VENDOR_CLIENT_ID}
+    client_secret: {type: env, var: EXAMPLE_VENDOR_CLIENT_SECRET}
+    token_endpoint_headers:
+      x-api-key: {type: env, var: EXAMPLE_VENDOR_API_KEY}
+    store:
+      type: file
+      path: /var/lib/iron-token-broker/example-vendor.json

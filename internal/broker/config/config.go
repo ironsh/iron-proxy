@@ -84,6 +84,12 @@ type Credential struct {
 	ClientSecret yaml.Node `yaml:"client_secret,omitempty"`
 	Store        yaml.Node `yaml:"store"`
 
+	// TokenEndpointHeaders is a map of header name to secret source. Each
+	// resolved value is sent as a request header on the token POST itself.
+	// Mirrors the oauth_token transform's token_endpoint_headers — some
+	// vendors require an api-key header alongside client_id/client_secret.
+	TokenEndpointHeaders map[string]yaml.Node `yaml:"token_endpoint_headers,omitempty"`
+
 	// Per-credential overrides for the broker-level defaults.
 	EarlyRefreshSlack    Duration `yaml:"early_refresh_slack,omitempty"`
 	EarlyRefreshFraction float64  `yaml:"early_refresh_fraction,omitempty"`
@@ -218,6 +224,11 @@ func Validate(cfg *Config) error {
 		if c.RefreshTimeout < 0 {
 			return fmt.Errorf("credentials[%q].refresh_timeout must be non-negative", c.ID)
 		}
+		for name := range c.TokenEndpointHeaders {
+			if name == "" {
+				return fmt.Errorf("credentials[%q].token_endpoint_headers: header name must not be empty", c.ID)
+			}
+		}
 	}
 	return nil
 }
@@ -233,6 +244,12 @@ type BuiltCredential struct {
 	ClientID      secrets.Source
 	ClientSecret  secrets.Source // nil for public clients
 	Store         store.Handle
+
+	// TokenEndpointHeaders holds resolved secret sources for headers sent
+	// on the refresh POST itself, keyed by header name. Header names are
+	// kept verbatim so vendors that demand a specific casing get it on
+	// the wire.
+	TokenEndpointHeaders map[string]secrets.Source
 
 	EarlyRefreshSlack    time.Duration
 	EarlyRefreshFraction float64
@@ -264,6 +281,17 @@ func BuildCredentials(cfg *Config, logger *slog.Logger) ([]BuiltCredential, erro
 		if err != nil {
 			return nil, fmt.Errorf("credentials[%q].store: %w", c.ID, err)
 		}
+		var endpointHeaders map[string]secrets.Source
+		if len(c.TokenEndpointHeaders) > 0 {
+			endpointHeaders = make(map[string]secrets.Source, len(c.TokenEndpointHeaders))
+			for name, node := range c.TokenEndpointHeaders {
+				src, err := secrets.BuildSource(node, logger)
+				if err != nil {
+					return nil, fmt.Errorf("credentials[%q].token_endpoint_headers[%q]: %w", c.ID, name, err)
+				}
+				endpointHeaders[name] = src
+			}
+		}
 		out = append(out, BuiltCredential{
 			ID:                   c.ID,
 			TokenEndpoint:        c.TokenEndpoint,
@@ -271,6 +299,7 @@ func BuildCredentials(cfg *Config, logger *slog.Logger) ([]BuiltCredential, erro
 			ClientID:             clientID,
 			ClientSecret:         clientSecret,
 			Store:                handle,
+			TokenEndpointHeaders: endpointHeaders,
 			EarlyRefreshSlack:    nonZero(time.Duration(c.EarlyRefreshSlack), time.Duration(cfg.Defaults.EarlyRefreshSlack)),
 			EarlyRefreshFraction: nonZeroFloat(c.EarlyRefreshFraction, cfg.Defaults.EarlyRefreshFraction),
 			MaxRefreshInterval:   nonZero(time.Duration(c.MaxRefreshInterval), time.Duration(cfg.Defaults.MaxRefreshInterval)),

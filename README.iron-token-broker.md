@@ -168,6 +168,22 @@ sources from iron-proxy's `internal/transform/secrets` package, including
 `env` (which the store side cannot use because environment variables are
 not writable).
 
+Vendors that require an extra header on the token endpoint (e.g.
+`x-api-key` alongside the standard form-body client auth) can declare it
+under `token_endpoint_headers`. The shape matches the oauth_token
+transform's option of the same name: each value is a discrete secret
+source, header names go on the wire verbatim.
+
+```yaml
+credentials:
+  - id: example
+    token_endpoint: https://idp.example.com/oauth/token
+    client_id: {type: env, var: EXAMPLE_CLIENT_ID}
+    token_endpoint_headers:
+      x-api-key: {type: env, var: EXAMPLE_API_KEY}
+    store: {type: file, path: /var/lib/iron-token-broker/example.json}
+```
+
 ## Deployment patterns
 
 - **One broker per credential id, always.** The store is a dumb

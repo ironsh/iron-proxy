@@ -122,6 +122,48 @@ credentials:
 	}
 }
 
+func TestBuildCredentialsResolvesTokenEndpointHeaders(t *testing.T) {
+	t.Setenv("EXAMPLE_CLIENT_ID", "client-A")
+	t.Setenv("EXAMPLE_API_KEY", "venue-key")
+	cfg, err := loadYAML(t, `
+credentials:
+  - id: example
+    token_endpoint: https://idp.example/oauth/token
+    client_id:
+      type: env
+      var: EXAMPLE_CLIENT_ID
+    token_endpoint_headers:
+      x-api-key:
+        type: env
+        var: EXAMPLE_API_KEY
+    store:
+      type: file
+      path: `+filepath.Join(t.TempDir(), "creds.json")+`
+`)
+	require.NoError(t, err)
+	built, err := BuildCredentials(cfg, slog.Default())
+	require.NoError(t, err)
+	require.Len(t, built, 1)
+	require.Len(t, built[0].TokenEndpointHeaders, 1)
+	val, err := built[0].TokenEndpointHeaders["x-api-key"].Get(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "venue-key", val)
+}
+
+func TestLoadRejectsEmptyTokenEndpointHeaderName(t *testing.T) {
+	_, err := loadYAML(t, `
+credentials:
+  - id: example
+    token_endpoint: https://idp.example
+    client_id: {type: env, var: X}
+    store: {type: file, path: /tmp/x.json}
+    token_endpoint_headers:
+      "": {type: env, var: APIKEY}
+`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "token_endpoint_headers")
+}
+
 func TestParseLogLevel(t *testing.T) {
 	for _, level := range []string{"debug", "info", "warn", "error"} {
 		_, err := ParseLogLevel(level)

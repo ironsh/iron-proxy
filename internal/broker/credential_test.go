@@ -130,6 +130,42 @@ func TestCredentialFirstRefreshRotates(t *testing.T) {
 	require.Equal(t, "rt-1", persisted.RefreshToken)
 }
 
+func TestCredentialResolvesTokenEndpointHeaders(t *testing.T) {
+	bootstrap := store.CredentialBlob{
+		RefreshToken: "rt-0",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+		LastRefresh:  time.Now().Add(-time.Hour),
+	}
+	handle, _ := newFileHandle(t, bootstrap)
+
+	var seenHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	built := config.BuiltCredential{
+		ID:            "test",
+		TokenEndpoint: srv.URL,
+		ClientID:      newConstantSource("client_id", "client-A"),
+		Store:         handle,
+		TokenEndpointHeaders: map[string]secrets.Source{
+			"x-api-key": newConstantSource("apikey", "venue-key"),
+		},
+		EarlyRefreshSlack:    1 * time.Minute,
+		EarlyRefreshFraction: 0.2,
+		MaxRefreshInterval:   24 * time.Hour,
+		RefreshTimeout:       5 * time.Second,
+	}
+	c := newCredentialState(built, slog.Default(), newMetrics(), &http.Client{Timeout: 5 * time.Second})
+	require.NoError(t, c.load(t.Context()))
+	require.NoError(t, c.refreshOnce(t.Context()))
+
+	require.Equal(t, "venue-key", seenHeaders.Get("X-Api-Key"))
+}
+
 func TestCredentialInvalidGrantMarksDead(t *testing.T) {
 	bootstrap := store.CredentialBlob{RefreshToken: "rt-0"}
 	handle, _ := newFileHandle(t, bootstrap)

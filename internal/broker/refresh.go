@@ -31,6 +31,10 @@ type refreshRequest struct {
 	ClientSecret  string // empty for public clients
 	RefreshToken  string
 	Scopes        []string // optional
+	// Headers are extra request headers to set on the token POST itself.
+	// Used for vendors that require an api-key header alongside the form
+	// body. Header names go on the wire verbatim.
+	Headers map[string]string
 }
 
 // refreshClient performs the raw RFC 6749 4.5 refresh_token grant POST and
@@ -79,6 +83,15 @@ func (rc *refreshClient) Refresh(ctx context.Context, req refreshRequest) (refre
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Accept", "application/json")
+	// Vendor-specific headers (e.g. x-api-key) bypass Header.Set so the
+	// operator-supplied casing reaches the wire verbatim. Go's net/http
+	// writes Header map keys as-is, but Set canonicalizes via
+	// textproto.CanonicalMIMEHeaderKey, which would rewrite "x-api-key"
+	// to "X-Api-Key". A handful of IdP gateways validate the lowercase
+	// form and reject the canonical one.
+	for k, v := range req.Headers {
+		httpReq.Header[k] = []string{v}
+	}
 
 	resp, err := rc.http.Do(httpReq)
 	if err != nil {

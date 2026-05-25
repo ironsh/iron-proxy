@@ -1,10 +1,13 @@
 package broker
 
 import (
+	"bufio"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,6 +52,91 @@ func TestRefreshSuccessRotatesToken(t *testing.T) {
 	require.Contains(t, seenForm, "client_id=client-A")
 	require.Contains(t, seenForm, "client_secret=secret-A")
 	require.Contains(t, seenForm, "scope=a+b")
+}
+
+func TestRefreshSendsTokenEndpointHeaders(t *testing.T) {
+	var seenHeaders http.Header
+	srv := newRefreshTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		_, _ = io.WriteString(w, `{"access_token":"at","expires_in":60}`)
+	})
+
+	rc := newRefreshClient(nil)
+	_, err := rc.Refresh(t.Context(), refreshRequest{
+		TokenEndpoint: srv.URL,
+		ClientID:      "c",
+		RefreshToken:  "rt",
+		Headers: map[string]string{
+			"x-api-key": "venue-api-key",
+			"x-tenant":  "acme",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "venue-api-key", seenHeaders.Get("X-Api-Key"))
+	require.Equal(t, "acme", seenHeaders.Get("X-Tenant"))
+	// Defaults still present.
+	require.Equal(t, "application/x-www-form-urlencoded", seenHeaders.Get("Content-Type"))
+	require.Equal(t, "application/json", seenHeaders.Get("Accept"))
+}
+
+// TestRefreshPreservesHeaderCasing reads the raw HTTP request bytes off
+// the wire to verify that operator-supplied header names land in their
+// original casing — a handful of IdP gateways validate the lowercase
+// form and reject Go's canonical "X-Api-Key".
+func TestRefreshPreservesHeaderCasing(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	requestLine := make(chan []string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		br := bufio.NewReader(conn)
+		var lines []string
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				break
+			}
+			lines = append(lines, line)
+		}
+		requestLine <- lines
+		// Drain the body and reply 200 so the client doesn't error first.
+		body := `{"access_token":"at","expires_in":60}`
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "+
+			strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	}()
+
+	rc := newRefreshClient(&http.Client{Timeout: 2 * time.Second})
+	_, err = rc.Refresh(t.Context(), refreshRequest{
+		TokenEndpoint: "http://" + ln.Addr().String(),
+		ClientID:      "c",
+		RefreshToken:  "rt",
+		Headers: map[string]string{
+			"x-api-key":   "venue-key",
+			"X-Tenant-ID": "acme",
+		},
+	})
+	require.NoError(t, err)
+
+	select {
+	case lines := <-requestLine:
+		joined := strings.Join(lines, "\n")
+		require.Contains(t, joined, "x-api-key: venue-key",
+			"operator-supplied lowercase header must reach the wire verbatim, got:\n%s", joined)
+		require.Contains(t, joined, "X-Tenant-ID: acme",
+			"operator-supplied mixed-case header must reach the wire verbatim, got:\n%s", joined)
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive the request")
+	}
 }
 
 func TestRefreshOmitsEmptyClientSecret(t *testing.T) {

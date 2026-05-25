@@ -219,6 +219,17 @@ func (c *credentialState) refreshOnce(ctx context.Context) error {
 			return fmt.Errorf("resolving client_secret from %q: %w", c.cfg.ClientSecret.Name(), err)
 		}
 	}
+	var headers map[string]string
+	if len(c.cfg.TokenEndpointHeaders) > 0 {
+		headers = make(map[string]string, len(c.cfg.TokenEndpointHeaders))
+		for name, src := range c.cfg.TokenEndpointHeaders {
+			v, err := src.Get(ctx)
+			if err != nil {
+				return fmt.Errorf("resolving token_endpoint_headers[%q] from %q: %w", name, src.Name(), err)
+			}
+			headers[name] = v
+		}
+	}
 
 	start := c.now()
 	out, err := c.refresh.Refresh(ctx, refreshRequest{
@@ -227,6 +238,7 @@ func (c *credentialState) refreshOnce(ctx context.Context) error {
 		ClientSecret:  clientSecret,
 		RefreshToken:  prevBlob.RefreshToken,
 		Scopes:        c.cfg.Scopes,
+		Headers:       headers,
 	})
 	elapsed := c.now().Sub(start)
 	if err != nil {
