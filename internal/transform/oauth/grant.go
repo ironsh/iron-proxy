@@ -14,6 +14,8 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/oauth2/jwt"
+
+	"github.com/ironsh/iron-proxy/internal/headers"
 )
 
 // mint returns a cached or freshly minted access token for the entry.
@@ -147,14 +149,7 @@ func (t *headerInjectingTransport) RoundTrip(req *http.Request) (*http.Response,
 	// Clone before mutating: the oauth2 lib may retry, and we must not leak
 	// header mutations back to the caller's request object.
 	r := req.Clone(req.Context())
-	// Direct map assignment bypasses textproto.CanonicalMIMEHeaderKey so the
-	// operator-supplied casing reaches the wire verbatim. Go's net/http
-	// writes Header map keys as-is, but Set would rewrite "x-api-key" to
-	// "X-Api-Key" — a handful of IdP gateways validate the lowercase form
-	// and reject the canonical one.
-	for k, v := range t.headers {
-		r.Header[k] = []string{v}
-	}
+	headers.Apply(r.Header, t.headers)
 	return t.base.RoundTrip(r)
 }
 

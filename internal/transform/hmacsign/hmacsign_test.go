@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/ironsh/iron-proxy/internal/headers"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
@@ -146,10 +147,10 @@ func TestTransformRequest(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, transform.ActionContinue, res.Action)
 
-		require.Equal(t, []string{"the-api-key"}, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-KEY"))
-		require.Equal(t, []string{wantSig}, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-SIGN"))
-		require.Equal(t, []string{wantTimestamp}, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-TIMESTAMP"))
-		require.Equal(t, []string{"the-passphrase"}, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-PASSPHRASE"))
+		require.Equal(t, []string{"the-api-key"}, headers.Values(req.Header, "FX-ACCESS-KEY"))
+		require.Equal(t, []string{wantSig}, headers.Values(req.Header, "FX-ACCESS-SIGN"))
+		require.Equal(t, []string{wantTimestamp}, headers.Values(req.Header, "FX-ACCESS-TIMESTAMP"))
+		require.Equal(t, []string{"the-passphrase"}, headers.Values(req.Header, "FX-ACCESS-PASSPHRASE"))
 	})
 
 	t.Run("sha512 hex output with raw key", func(t *testing.T) {
@@ -181,8 +182,8 @@ rules:
 		res, err := h.TransformRequest(context.Background(), newContext(), req)
 		require.NoError(t, err)
 		require.Equal(t, transform.ActionContinue, res.Action)
-		require.Equal(t, []string{wantSig}, transform.HeaderValuesByExactName(req.Header, "X-Signature"))
-		require.Equal(t, []string{"1700000000000"}, transform.HeaderValuesByExactName(req.Header, "X-Timestamp"))
+		require.Equal(t, []string{wantSig}, headers.Values(req.Header, "X-Signature"))
+		require.Equal(t, []string{"1700000000000"}, headers.Values(req.Header, "X-Timestamp"))
 	})
 
 	t.Run("GET request has empty body in signature", func(t *testing.T) {
@@ -221,7 +222,7 @@ rules:
 		req2.ContentLength = 0
 		_, err = h.TransformRequest(context.Background(), newContext(), req2)
 		require.NoError(t, err)
-		require.Equal(t, transform.HeaderValuesByExactName(req.Header, "X-Sig"), transform.HeaderValuesByExactName(req2.Header, "X-Sig"))
+		require.Equal(t, headers.Values(req.Header, "X-Sig"), headers.Values(req2.Header, "X-Sig"))
 	})
 
 	t.Run("rule miss skips transform", func(t *testing.T) {
@@ -265,8 +266,8 @@ rules:
 		require.NoError(t, err)
 		// HeaderValuesByExactName bypasses http.Header.Get's canonicalization
 		// so we can verify the user's exact casing landed on the wire.
-		require.NotEmpty(t, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-KEY"), "FX-ACCESS-KEY must be set with this exact casing")
-		require.NotEmpty(t, transform.HeaderValuesByExactName(req.Header, "X-Mixed-Case-Header"), "X-Mixed-Case-Header must be set with this exact casing")
+		require.NotEmpty(t, headers.Values(req.Header, "FX-ACCESS-KEY"), "FX-ACCESS-KEY must be set with this exact casing")
+		require.NotEmpty(t, headers.Values(req.Header, "X-Mixed-Case-Header"), "X-Mixed-Case-Header must be set with this exact casing")
 	})
 
 	t.Run("body still readable downstream", func(t *testing.T) {
@@ -301,8 +302,8 @@ rules:
 		require.NoError(t, err)
 		_, err = h.TransformRequest(context.Background(), newContext(), req2)
 		require.NoError(t, err)
-		sig1 := transform.HeaderValuesByExactName(req1.Header, "FX-ACCESS-SIGN")
-		sig2 := transform.HeaderValuesByExactName(req2.Header, "FX-ACCESS-SIGN")
+		sig1 := headers.Values(req1.Header, "FX-ACCESS-SIGN")
+		sig2 := headers.Values(req2.Header, "FX-ACCESS-SIGN")
 		require.NotEmpty(t, sig1)
 		require.NotEmpty(t, sig2)
 		require.NotEqual(t, sig1, sig2)
@@ -324,7 +325,7 @@ rules:
 		require.NoError(t, err)
 		require.Equal(t, transform.ActionReject, res.Action)
 		require.Equal(t, http.StatusRequestEntityTooLarge, res.Response.StatusCode)
-		require.Empty(t, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-SIGN"), "must not sign a truncated body")
+		require.Empty(t, headers.Values(req.Header, "FX-ACCESS-SIGN"), "must not sign a truncated body")
 		require.Equal(t, "body_truncated", tctx.DrainAnnotations()["rejected"])
 	})
 
@@ -360,7 +361,7 @@ rules:
 		res, err := h.TransformRequest(context.Background(), newContext(), req)
 		require.NoError(t, err)
 		require.Equal(t, transform.ActionContinue, res.Action)
-		require.NotEmpty(t, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-SIGN"))
+		require.NotEmpty(t, headers.Values(req.Header, "FX-ACCESS-SIGN"))
 	})
 
 	t.Run("credential unavailable rejects with 502", func(t *testing.T) {
@@ -563,6 +564,6 @@ rules: [{host: "api.falconx.io"}]
 	res, err := tr.TransformRequest(context.Background(), newContext(), req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionContinue, res.Action)
-	require.Equal(t, []string{"the-api-key"}, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-KEY"))
-	require.NotEmpty(t, transform.HeaderValuesByExactName(req.Header, "FX-ACCESS-SIGN"))
+	require.Equal(t, []string{"the-api-key"}, headers.Values(req.Header, "FX-ACCESS-KEY"))
+	require.NotEmpty(t, headers.Values(req.Header, "FX-ACCESS-SIGN"))
 }
