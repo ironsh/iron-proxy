@@ -1,0 +1,23 @@
+listen: "127.0.0.1:0"
+metrics_listen: "127.0.0.1:0"
+bearer_auth_env: TEST_BROKER_BEARER
+
+log:
+  level: info
+  format: json
+
+defaults:
+  early_refresh_slack: "1s"
+  early_refresh_fraction: 0.1
+  max_refresh_interval: "10m"
+  refresh_timeout: "5s"
+
+credentials:
+  - id: openai-codex
+    token_endpoint: "{{.TokenEndpoint}}"
+    client_id:
+      type: env
+      var: TEST_OAUTH_CLIENT_ID
+    store:
+      type: file
+      path: "{{.BlobPath}}"

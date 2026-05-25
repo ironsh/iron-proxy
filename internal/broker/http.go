@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,7 +60,16 @@ func newHTTPServer(opts httpOptions) *httpServer {
 func (s *httpServer) Addr() string { return s.listenAddr }
 
 func (s *httpServer) ListenAndServe() error {
-	return s.server.ListenAndServe()
+	ln, err := net.Listen("tcp", s.server.Addr)
+	if err != nil {
+		return err
+	}
+	s.listenAddr = ln.Addr().String()
+	s.log.Info("broker HTTP API starting",
+		slog.String("addr", s.listenAddr),
+		slog.Int("credentials", len(s.creds)),
+	)
+	return s.server.Serve(ln)
 }
 
 func (s *httpServer) Shutdown(ctx context.Context) error {

@@ -169,6 +169,54 @@ func proxyBinary(t *testing.T) string {
 	return binary
 }
 
+// brokerBinary returns the path to the pre-built iron-token-broker binary at
+// the repo root. It fails the test immediately if the binary does not exist.
+func brokerBinary(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(repoRoot(t), "iron-token-broker")
+	_, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal("iron-token-broker binary not found at repo root; build it first with: go build -o iron-token-broker ./cmd/iron-token-broker")
+	}
+	return binary
+}
+
+// startBroker compiles (if needed) and starts the iron-token-broker binary with
+// the given config and environment. It scans the JSON log output to discover
+// the bound HTTP API address (supports :0). The broker is killed when the
+// test completes. Reuses proxyInstance because the address-discovery flow is
+// identical to the proxy — only the binary, flag name, and starting-log
+// message differ.
+func startBroker(t *testing.T, binary, cfgPath string, env []string) *proxyInstance {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stderrR, stderrW := io.Pipe()
+
+	cmd := exec.CommandContext(ctx, binary, "--config", cfgPath)
+	cmd.Dir = repoRoot(t)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = stderrW
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+		_ = stderrW.Close()
+	})
+
+	p := &proxyInstance{
+		cmd:        cmd,
+		addrs:      make(map[string]string),
+		namedAddrs: make(map[string]string),
+	}
+
+	go scanLogs(stderrR, p)
+
+	p.HTTPAddr = p.AddrFor(t, "broker HTTP API starting")
+	return p
+}
+
 // repoRoot walks up from the current directory to find the go.mod file.
 func repoRoot(t *testing.T) string {
 	t.Helper()

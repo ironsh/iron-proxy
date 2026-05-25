@@ -147,6 +147,7 @@ func defaultRegistry(logger *slog.Logger) sourceBuilderRegistry {
 		"aws_ssm":           newAWSSSMBuilder(logger),
 		"1password":         newOPBuilder(logger),
 		"1password_connect": newOPConnectBuilder(logger),
+		"token_broker":      newTokenBrokerBuilder(logger),
 	}
 }
 

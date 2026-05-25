@@ -452,6 +452,14 @@ Secret sources:
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN` by
   default; override with `host_env` and `token_env`. Optional `ttl` and
   `failure_ttl` are supported.
+- **`token_broker`:** fetches a current OAuth access token for `credential_id`
+  from an `iron-token-broker` deployment. The broker URL is read from
+  `IRON_BROKER_URL` and the bearer API key from `IRON_BROKER_TOKEN`. Optional
+  `ttl` (defaults to `1m`; must be less than the remaining lifetime the broker
+  reports for each token) and `failure_ttl` are supported. Use this for OAuth
+  credentials shared across multiple iron-proxy instances; see
+  [README.iron-token-broker.md](README.iron-token-broker.md) for the broker
+  itself.
 
 Every source also accepts an optional `json_key`. When set, the resolved value
 is parsed as a JSON object and the single top-level string field at that key is
