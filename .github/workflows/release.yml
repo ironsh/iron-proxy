@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "iron-token-broker/v*"
   pull_request:
     branches: [main]
 
@@ -34,22 +35,41 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to Docker Hub
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
+        if: (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/iron-token-broker/v')) && !contains(github.ref, '-')
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Run GoReleaser
+      - name: Run GoReleaser (iron-proxy)
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
         uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
+          distribution: goreleaser-pro
           version: latest
           args: >-
             release
+            --config .goreleaser.yml
             ${{ !startsWith(github.ref, 'refs/tags/v') && '--snapshot' || '' }}
             --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+      - name: Run GoReleaser (iron-token-broker)
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/iron-token-broker/v')
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
+        with:
+          distribution: goreleaser-pro
+          version: latest
+          args: >-
+            release
+            --config .goreleaser.iron-token-broker.yml
+            ${{ !startsWith(github.ref, 'refs/tags/iron-token-broker/v') && '--snapshot' || '' }}
+            --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
       - uses: ironsh/iron-proxy-action/summary@fa1fd82ec32396d044deba7040a6db576bec927a # v0.1.4
         if: always()
