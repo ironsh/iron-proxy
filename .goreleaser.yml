@@ -2,6 +2,10 @@ version: 2
 
 dist: dist/iron-proxy
 
+git:
+  ignore_tags:
+    - "^iron-token-broker/"
+
 builds:
   - id: iron-proxy
     main: ./cmd/iron-proxy
