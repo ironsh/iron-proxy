@@ -27,22 +27,15 @@ func staticOPClient(value string, err error) *mockOPClient {
 
 func newTestOPBuilder(client opClient) *opBuilder {
 	return &opBuilder{
-		clientFor: func(_ context.Context, _ string) (opClient, error) {
+		clientFor: func(_ context.Context) (opClient, error) {
 			return client, nil
 		},
 		logger: slog.Default(),
 	}
 }
 
-func TestOPBuilder_HappyPath_DefaultTokenEnv(t *testing.T) {
-	var gotEnv string
-	r := &opBuilder{
-		clientFor: func(_ context.Context, tokenEnv string) (opClient, error) {
-			gotEnv = tokenEnv
-			return staticOPClient("real-secret", nil), nil
-		},
-		logger: slog.Default(),
-	}
+func TestOPBuilder_HappyPath(t *testing.T) {
+	r := newTestOPBuilder(staticOPClient("real-secret", nil))
 
 	node := yamlNode(t, map[string]string{
 		"type":       "1password",
@@ -55,31 +48,6 @@ func TestOPBuilder_HappyPath_DefaultTokenEnv(t *testing.T) {
 	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-secret", val)
-	require.Equal(t, "OP_SERVICE_ACCOUNT_TOKEN", gotEnv)
-}
-
-func TestOPBuilder_HappyPath_CustomTokenEnv(t *testing.T) {
-	var gotEnv string
-	r := &opBuilder{
-		clientFor: func(_ context.Context, tokenEnv string) (opClient, error) {
-			gotEnv = tokenEnv
-			return staticOPClient("custom-token-secret", nil), nil
-		},
-		logger: slog.Default(),
-	}
-
-	node := yamlNode(t, map[string]string{
-		"type":       "1password",
-		"secret_ref": "op://Engineering/OpenAI/credential",
-		"token_env":  "CUSTOM_OP_TOKEN",
-	})
-	result, err := r.Build(node)
-	require.NoError(t, err)
-
-	val, err := result.Get(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "custom-token-secret", val)
-	require.Equal(t, "CUSTOM_OP_TOKEN", gotEnv)
 }
 
 func TestOPBuilder_TTLReturnsCachedValue(t *testing.T) {
@@ -182,9 +150,8 @@ func TestOPBuilder_Errors(t *testing.T) {
 func TestOPClientCache_ReadsTokenFromEnv(t *testing.T) {
 	var gotToken string
 	cache := &opClientCache{
-		clients: make(map[string]opClient),
 		getenv: func(key string) string {
-			if key == "MY_OP_TOKEN" {
+			if key == opTokenEnv {
 				return "ops_secret_value"
 			}
 			return ""
@@ -195,55 +162,48 @@ func TestOPClientCache_ReadsTokenFromEnv(t *testing.T) {
 		},
 	}
 
-	_, err := cache.get(context.Background(), "MY_OP_TOKEN")
+	_, err := cache.get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "ops_secret_value", gotToken)
 }
 
 func TestOPClientCache_ErrorOnMissingEnvVar(t *testing.T) {
 	cache := &opClientCache{
-		clients:   make(map[string]opClient),
 		getenv:    func(string) string { return "" },
 		newClient: func(_ context.Context, _ string) (opClient, error) { return nil, nil },
 	}
 
-	_, err := cache.get(context.Background(), "MISSING_OP_TOKEN")
+	_, err := cache.get(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "not set or empty")
+	require.Contains(t, err.Error(), "\"OP_SERVICE_ACCOUNT_TOKEN\" is not set or empty")
 }
 
-func TestOPClientCache_ReusesClientPerTokenEnv(t *testing.T) {
+func TestOPClientCache_ReusesClient(t *testing.T) {
 	calls := 0
 	cache := &opClientCache{
-		clients: make(map[string]opClient),
-		getenv:  func(string) string { return "tok" },
+		getenv: func(string) string { return "tok" },
 		newClient: func(_ context.Context, _ string) (opClient, error) {
 			calls++
 			return staticOPClient("v", nil), nil
 		},
 	}
 
-	_, err := cache.get(context.Background(), "ENV1")
+	_, err := cache.get(context.Background())
 	require.NoError(t, err)
-	_, err = cache.get(context.Background(), "ENV1")
+	_, err = cache.get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, calls, "second get on the same token_env should reuse the cached client")
-
-	_, err = cache.get(context.Background(), "ENV2")
-	require.NoError(t, err)
-	require.Equal(t, 2, calls, "different token_env should create a new client")
+	require.Equal(t, 1, calls, "repeated calls should reuse the cached client")
 }
 
 func TestOPClientCache_PropagatesNewClientError(t *testing.T) {
 	cache := &opClientCache{
-		clients: make(map[string]opClient),
-		getenv:  func(string) string { return "tok" },
+		getenv: func(string) string { return "tok" },
 		newClient: func(_ context.Context, _ string) (opClient, error) {
 			return nil, fmt.Errorf("sdk init failed")
 		},
 	}
 
-	_, err := cache.get(context.Background(), "ENV")
+	_, err := cache.get(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sdk init failed")
 }

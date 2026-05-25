@@ -202,12 +202,11 @@ transforms:
         #     - host: "api.example.com"
 
         # Replace mode with 1Password (service account token auth). The token
-        # is read from the OP_SERVICE_ACCOUNT_TOKEN env var by default; override
-        # with token_env. secret_ref uses 1Password's secret reference syntax.
+        # is read from the OP_SERVICE_ACCOUNT_TOKEN env var. secret_ref uses
+        # 1Password's secret reference syntax.
         # - source:
         #     type: 1password
         #     secret_ref: "op://Engineering/OpenAI/credential"
-        #     token_env: OP_SERVICE_ACCOUNT_TOKEN  # optional; this is the default
         #     ttl: "15m"                            # optional, re-fetch interval; 0 = no refresh
         #   replace:
         #     proxy_value: "proxy-token-1p"

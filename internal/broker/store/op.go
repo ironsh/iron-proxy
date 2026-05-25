@@ -15,18 +15,15 @@ import (
 	"github.com/ironsh/iron-proxy/internal/version"
 )
 
-// defaultOPTokenEnv mirrors the constant used by the read-side resolver in
-// internal/transform/secrets so operators don't have to maintain two
-// environment variables when they use 1Password for both the broker store
-// and other secrets.
-const defaultOPTokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
+// opTokenEnv mirrors the constant used by the read-side resolver in
+// internal/transform/secrets.
+const opTokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
 
 type opBuilder struct{}
 
 type opConfig struct {
 	Type      string `yaml:"type"`
 	SecretRef string `yaml:"secret_ref"`
-	TokenEnv  string `yaml:"token_env,omitempty"`
 }
 
 func (opBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error) {
@@ -51,14 +48,10 @@ func (opBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error) {
 	if !looksLikeUUID(ref.Item) {
 		return nil, fmt.Errorf("1password store secret_ref %q: item segment must be a UUID (use the SDK \"Copy Item UUID\" action)", cfg.SecretRef)
 	}
-	if cfg.TokenEnv == "" {
-		cfg.TokenEnv = defaultOPTokenEnv
-	}
 	return &opHandle{
-		ref:      ref,
-		secret:   cfg.SecretRef,
-		tokenEnv: cfg.TokenEnv,
-		logger:   logger,
+		ref:    ref,
+		secret: cfg.SecretRef,
+		logger: logger,
 	}, nil
 }
 
@@ -72,10 +65,9 @@ type opSDKItemsAPI interface {
 // opHandle persists the credential blob as the value of a single field on
 // a 1Password item.
 type opHandle struct {
-	ref      secrets.OPRef
-	secret   string // original secret_ref string for log/Name output
-	tokenEnv string
-	logger   *slog.Logger
+	ref    secrets.OPRef
+	secret string // original secret_ref string for log/Name output
+	logger *slog.Logger
 
 	mu    sync.Mutex
 	items opSDKItemsAPI
@@ -142,9 +134,9 @@ func (h *opHandle) getItems(ctx context.Context) (opSDKItemsAPI, error) {
 	if h.items != nil {
 		return h.items, nil
 	}
-	token := os.Getenv(h.tokenEnv)
+	token := os.Getenv(opTokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("1password store %q: env var %q is not set or empty", h.secret, h.tokenEnv)
+		return nil, fmt.Errorf("1password store %q: env var %q is not set or empty", h.secret, opTokenEnv)
 	}
 	client, err := onepassword.NewClient(ctx,
 		onepassword.WithServiceAccountToken(token),

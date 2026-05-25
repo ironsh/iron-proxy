@@ -14,9 +14,9 @@ import (
 	"github.com/ironsh/iron-proxy/internal/version"
 )
 
-// defaultOPTokenEnv is the conventional environment variable for 1Password
+// opTokenEnv is the conventional environment variable for 1Password
 // service account tokens, matching the SDK's own examples.
-const defaultOPTokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
+const opTokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
 
 // opClient is the subset of the 1Password SDK used by opBuilder, narrowed for testability.
 type opClient interface {
@@ -25,22 +25,20 @@ type opClient interface {
 
 // opBuilder reads secrets from 1Password using a service account token.
 type opBuilder struct {
-	clientFor func(ctx context.Context, tokenEnv string) (opClient, error)
+	clientFor func(ctx context.Context) (opClient, error)
 	logger    *slog.Logger
 }
 
 type opConfig struct {
 	Type       string `yaml:"type"`
 	SecretRef  string `yaml:"secret_ref"`
-	TokenEnv   string `yaml:"token_env,omitempty"`
 	TTL        string `yaml:"ttl,omitempty"`
 	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
 func newOPBuilder(logger *slog.Logger) *opBuilder {
 	cache := &opClientCache{
-		clients: make(map[string]opClient),
-		getenv:  os.Getenv,
+		getenv: os.Getenv,
 		newClient: func(ctx context.Context, token string) (opClient, error) {
 			c, err := onepassword.NewClient(ctx,
 				onepassword.WithServiceAccountToken(token),
@@ -66,16 +64,13 @@ func (r *opBuilder) Build(raw yaml.Node) (secretSource, error) {
 	if !strings.HasPrefix(cfg.SecretRef, "op://") {
 		return nil, fmt.Errorf("1password secret_ref %q must start with \"op://\"", cfg.SecretRef)
 	}
-	if cfg.TokenEnv == "" {
-		cfg.TokenEnv = defaultOPTokenEnv
-	}
 	return buildLazySource(cfg.SecretRef, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
 	})
 }
 
 func (r *opBuilder) fetchSecret(ctx context.Context, cfg opConfig) (string, error) {
-	client, err := r.clientFor(ctx, cfg.TokenEnv)
+	client, err := r.clientFor(ctx)
 	if err != nil {
 		return "", fmt.Errorf("creating 1password client: %w", err)
 	}
@@ -89,32 +84,32 @@ func (r *opBuilder) fetchSecret(ctx context.Context, cfg opConfig) (string, erro
 	return val, nil
 }
 
-// opClientCache caches one SDK client per token-env-name. The 1P SDK loads a
+// opClientCache lazily constructs a single SDK client. The 1P SDK loads a
 // Wasm module on NewClient, so reusing the client across multiple secret
 // entries is significantly cheaper than creating one per entry.
 type opClientCache struct {
 	mu        sync.Mutex
-	clients   map[string]opClient
+	client    opClient
 	getenv    func(string) string
 	newClient func(ctx context.Context, token string) (opClient, error)
 }
 
-func (c *opClientCache) get(ctx context.Context, tokenEnv string) (opClient, error) {
+func (c *opClientCache) get(ctx context.Context) (opClient, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if client, ok := c.clients[tokenEnv]; ok {
-		return client, nil
+	if c.client != nil {
+		return c.client, nil
 	}
-	token := c.getenv(tokenEnv)
+	token := c.getenv(opTokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("env var %q is not set or empty", tokenEnv)
+		return nil, fmt.Errorf("env var %q is not set or empty", opTokenEnv)
 	}
 	client, err := c.newClient(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	c.clients[tokenEnv] = client
-	return client, nil
+	c.client = client
+	return c.client, nil
 }
 
 // opSDKClient adapts the 1Password SDK *Client to the opClient interface.

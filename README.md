@@ -445,8 +445,7 @@ Secret sources:
   `SecureString` parameters.
 - **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
   reference) using a 1Password service account token. The token is read from
-  `OP_SERVICE_ACCOUNT_TOKEN` by default; override with `token_env`. Optional
-  `ttl` and `failure_ttl` are supported.
+  `OP_SERVICE_ACCOUNT_TOKEN`. Optional `ttl` and `failure_ttl` are supported.
 - **`1password_connect`:** resolves the same `op://vault/item/[section/]field`
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
