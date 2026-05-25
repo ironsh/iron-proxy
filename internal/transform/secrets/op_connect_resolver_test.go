@@ -34,7 +34,7 @@ func staticOPConnectClient(vault *onepassword.Vault, item *onepassword.Item) *mo
 
 func newTestOPConnectBuilder(client opConnectClient) *opConnectBuilder {
 	return &opConnectBuilder{
-		clientFor: func(_ context.Context, _, _ string) (opConnectClient, error) {
+		clientFor: func(_ context.Context) (opConnectClient, error) {
 			return client, nil
 		},
 		logger: slog.Default(),
@@ -61,16 +61,8 @@ func sampleVault() *onepassword.Vault {
 	return &onepassword.Vault{ID: "vault-uuid", Name: "Engineering"}
 }
 
-func TestOPConnectBuilder_HappyPath_DefaultEnvs(t *testing.T) {
-	var gotHostEnv, gotTokenEnv string
-	r := &opConnectBuilder{
-		clientFor: func(_ context.Context, hostEnv, tokenEnv string) (opConnectClient, error) {
-			gotHostEnv = hostEnv
-			gotTokenEnv = tokenEnv
-			return staticOPConnectClient(sampleVault(), sampleItem()), nil
-		},
-		logger: slog.Default(),
-	}
+func TestOPConnectBuilder_HappyPath(t *testing.T) {
+	r := newTestOPConnectBuilder(staticOPConnectClient(sampleVault(), sampleItem()))
 
 	node := yamlNode(t, map[string]string{
 		"type":       "1password_connect",
@@ -83,34 +75,6 @@ func TestOPConnectBuilder_HappyPath_DefaultEnvs(t *testing.T) {
 	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-secret", val)
-	require.Equal(t, "OP_CONNECT_HOST", gotHostEnv)
-	require.Equal(t, "OP_CONNECT_TOKEN", gotTokenEnv)
-}
-
-func TestOPConnectBuilder_HappyPath_CustomEnvs(t *testing.T) {
-	var gotHostEnv, gotTokenEnv string
-	r := &opConnectBuilder{
-		clientFor: func(_ context.Context, hostEnv, tokenEnv string) (opConnectClient, error) {
-			gotHostEnv = hostEnv
-			gotTokenEnv = tokenEnv
-			return staticOPConnectClient(sampleVault(), sampleItem()), nil
-		},
-		logger: slog.Default(),
-	}
-
-	node := yamlNode(t, map[string]string{
-		"type":       "1password_connect",
-		"secret_ref": "op://Engineering/OpenAI/credential",
-		"host_env":   "MY_CONNECT_HOST",
-		"token_env":  "MY_CONNECT_TOKEN",
-	})
-	result, err := r.Build(node)
-	require.NoError(t, err)
-
-	_, err = result.Get(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "MY_CONNECT_HOST", gotHostEnv)
-	require.Equal(t, "MY_CONNECT_TOKEN", gotTokenEnv)
 }
 
 func TestOPConnectBuilder_PassesParsedRefToClient(t *testing.T) {
@@ -398,12 +362,11 @@ func TestSelectConnectField(t *testing.T) {
 func TestOPConnectClientCache_ReadsHostAndTokenFromEnv(t *testing.T) {
 	var gotHost, gotToken string
 	cache := &opConnectClientCache{
-		clients: make(map[string]opConnectClient),
 		getenv: func(key string) string {
 			switch key {
-			case "MY_HOST":
+			case opConnectHostEnv:
 				return "https://connect.internal"
-			case "MY_TOKEN":
+			case opConnectTokenEnv:
 				return "tok"
 			}
 			return ""
@@ -414,7 +377,7 @@ func TestOPConnectClientCache_ReadsHostAndTokenFromEnv(t *testing.T) {
 		},
 	}
 
-	_, err := cache.get(context.Background(), "MY_HOST", "MY_TOKEN")
+	_, err := cache.get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "https://connect.internal", gotHost)
 	require.Equal(t, "tok", gotToken)
@@ -422,58 +385,47 @@ func TestOPConnectClientCache_ReadsHostAndTokenFromEnv(t *testing.T) {
 
 func TestOPConnectClientCache_ErrorOnMissingHost(t *testing.T) {
 	cache := &opConnectClientCache{
-		clients: make(map[string]opConnectClient),
 		getenv: func(key string) string {
-			if key == "TOK" {
+			if key == opConnectTokenEnv {
 				return "tok"
 			}
 			return ""
 		},
 		newClient: func(string, string) opConnectClient { return nil },
 	}
-	_, err := cache.get(context.Background(), "MISSING_HOST", "TOK")
+	_, err := cache.get(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "\"MISSING_HOST\" is not set or empty")
+	require.Contains(t, err.Error(), "\"OP_CONNECT_HOST\" is not set or empty")
 }
 
 func TestOPConnectClientCache_ErrorOnMissingToken(t *testing.T) {
 	cache := &opConnectClientCache{
-		clients: make(map[string]opConnectClient),
 		getenv: func(key string) string {
-			if key == "HOST" {
+			if key == opConnectHostEnv {
 				return "https://connect.internal"
 			}
 			return ""
 		},
 		newClient: func(string, string) opConnectClient { return nil },
 	}
-	_, err := cache.get(context.Background(), "HOST", "MISSING_TOKEN")
+	_, err := cache.get(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "\"MISSING_TOKEN\" is not set or empty")
+	require.Contains(t, err.Error(), "\"OP_CONNECT_TOKEN\" is not set or empty")
 }
 
-func TestOPConnectClientCache_ReusesPerEnvPair(t *testing.T) {
+func TestOPConnectClientCache_ReusesClient(t *testing.T) {
 	calls := 0
 	cache := &opConnectClientCache{
-		clients: make(map[string]opConnectClient),
-		getenv:  func(string) string { return "x" },
+		getenv: func(string) string { return "x" },
 		newClient: func(string, string) opConnectClient {
 			calls++
 			return staticOPConnectClient(sampleVault(), sampleItem())
 		},
 	}
 
-	_, err := cache.get(context.Background(), "H1", "T1")
+	_, err := cache.get(context.Background())
 	require.NoError(t, err)
-	_, err = cache.get(context.Background(), "H1", "T1")
+	_, err = cache.get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, calls, "same host/token env pair should reuse the client")
-
-	_, err = cache.get(context.Background(), "H1", "T2")
-	require.NoError(t, err)
-	require.Equal(t, 2, calls, "different token env should create a new client")
-
-	_, err = cache.get(context.Background(), "H2", "T1")
-	require.NoError(t, err)
-	require.Equal(t, 3, calls, "different host env should create a new client")
+	require.Equal(t, 1, calls, "repeated calls should reuse the cached client")
 }

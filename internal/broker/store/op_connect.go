@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	defaultOPConnectHostEnv  = "OP_CONNECT_HOST"
-	defaultOPConnectTokenEnv = "OP_CONNECT_TOKEN"
+	opConnectHostEnv  = "OP_CONNECT_HOST"
+	opConnectTokenEnv = "OP_CONNECT_TOKEN"
 )
 
 type opConnectBuilder struct{}
@@ -26,8 +26,6 @@ type opConnectBuilder struct{}
 type opConnectConfig struct {
 	Type      string `yaml:"type"`
 	SecretRef string `yaml:"secret_ref"`
-	HostEnv   string `yaml:"host_env,omitempty"`
-	TokenEnv  string `yaml:"token_env,omitempty"`
 }
 
 func (opConnectBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error) {
@@ -42,18 +40,10 @@ func (opConnectBuilder) Build(raw yaml.Node, logger *slog.Logger) (Handle, error
 	if err != nil {
 		return nil, fmt.Errorf("1password_connect store: %w", err)
 	}
-	if cfg.HostEnv == "" {
-		cfg.HostEnv = defaultOPConnectHostEnv
-	}
-	if cfg.TokenEnv == "" {
-		cfg.TokenEnv = defaultOPConnectTokenEnv
-	}
 	return &opConnectHandle{
-		ref:      ref,
-		secret:   cfg.SecretRef,
-		hostEnv:  cfg.HostEnv,
-		tokenEnv: cfg.TokenEnv,
-		logger:   logger,
+		ref:    ref,
+		secret: cfg.SecretRef,
+		logger: logger,
 	}, nil
 }
 
@@ -69,11 +59,9 @@ type opConnectClient interface {
 // opConnectHandle persists the credential blob via a 1Password Connect
 // server.
 type opConnectHandle struct {
-	ref      secrets.OPRef
-	secret   string
-	hostEnv  string
-	tokenEnv string
-	logger   *slog.Logger
+	ref    secrets.OPRef
+	secret string
+	logger *slog.Logger
 
 	mu     sync.Mutex
 	client opConnectClient
@@ -149,13 +137,13 @@ func (h *opConnectHandle) getClient() (opConnectClient, error) {
 	if h.client != nil {
 		return h.client, nil
 	}
-	host := os.Getenv(h.hostEnv)
+	host := os.Getenv(opConnectHostEnv)
 	if host == "" {
-		return nil, fmt.Errorf("1password_connect store %q: env var %q is not set or empty", h.secret, h.hostEnv)
+		return nil, fmt.Errorf("1password_connect store %q: env var %q is not set or empty", h.secret, opConnectHostEnv)
 	}
-	token := os.Getenv(h.tokenEnv)
+	token := os.Getenv(opConnectTokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("1password_connect store %q: env var %q is not set or empty", h.secret, h.tokenEnv)
+		return nil, fmt.Errorf("1password_connect store %q: env var %q is not set or empty", h.secret, opConnectTokenEnv)
 	}
 	h.client = connect.NewClientWithUserAgent(host, token, "iron-token-broker/"+version.Version)
 	return h.client, nil

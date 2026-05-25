@@ -143,12 +143,11 @@ store:
   token_env: OP_SERVICE_ACCOUNT_TOKEN   # default
 
 # 1Password via Connect server. Accepts UUIDs or human titles (Connect
-# resolves them server-side).
+# resolves them server-side). Reads OP_CONNECT_HOST and OP_CONNECT_TOKEN
+# from the environment.
 store:
   type: 1password_connect
   secret_ref: "op://Engineering/openai-codex/credential_blob"
-  host_env: OP_CONNECT_HOST             # default
-  token_env: OP_CONNECT_TOKEN           # default
 
 # AWS Secrets Manager.
 store:

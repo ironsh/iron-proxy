@@ -449,9 +449,8 @@ Secret sources:
   `ttl` and `failure_ttl` are supported.
 - **`1password_connect`:** resolves the same `op://vault/item/[section/]field`
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
-  is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN` by
-  default; override with `host_env` and `token_env`. Optional `ttl` and
-  `failure_ttl` are supported.
+  is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
+  Optional `ttl` and `failure_ttl` are supported.
 - **`token_broker`:** fetches a current OAuth access token for `credential_id`
   from an `iron-token-broker` deployment. The broker URL is read from
   `IRON_BROKER_URL` and the bearer API key from `IRON_BROKER_TOKEN`. Optional

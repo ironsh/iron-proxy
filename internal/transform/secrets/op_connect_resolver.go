@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	defaultOPConnectHostEnv  = "OP_CONNECT_HOST"
-	defaultOPConnectTokenEnv = "OP_CONNECT_TOKEN"
+	opConnectHostEnv  = "OP_CONNECT_HOST"
+	opConnectTokenEnv = "OP_CONNECT_TOKEN"
 )
 
 // opConnectClient is the subset of the Connect SDK client used by
@@ -29,23 +29,20 @@ type opConnectClient interface {
 
 // opConnectBuilder reads secrets from a 1Password Connect server.
 type opConnectBuilder struct {
-	clientFor func(ctx context.Context, hostEnv, tokenEnv string) (opConnectClient, error)
+	clientFor func(ctx context.Context) (opConnectClient, error)
 	logger    *slog.Logger
 }
 
 type opConnectConfig struct {
 	Type       string `yaml:"type"`
 	SecretRef  string `yaml:"secret_ref"`
-	HostEnv    string `yaml:"host_env,omitempty"`
-	TokenEnv   string `yaml:"token_env,omitempty"`
 	TTL        string `yaml:"ttl,omitempty"`
 	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
 func newOPConnectBuilder(logger *slog.Logger) *opConnectBuilder {
 	cache := &opConnectClientCache{
-		clients: make(map[string]opConnectClient),
-		getenv:  os.Getenv,
+		getenv: os.Getenv,
 		newClient: func(host, token string) opConnectClient {
 			return opConnectSDKClient{c: connect.NewClientWithUserAgent(host, token, "iron-proxy/"+version.Version)}
 		},
@@ -65,19 +62,13 @@ func (r *opConnectBuilder) Build(raw yaml.Node) (secretSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("1password_connect: %w", err)
 	}
-	if cfg.HostEnv == "" {
-		cfg.HostEnv = defaultOPConnectHostEnv
-	}
-	if cfg.TokenEnv == "" {
-		cfg.TokenEnv = defaultOPConnectTokenEnv
-	}
 	return buildLazySource(cfg.SecretRef, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg, ref)
 	})
 }
 
 func (r *opConnectBuilder) fetchSecret(ctx context.Context, cfg opConnectConfig, ref OPRef) (string, error) {
-	client, err := r.clientFor(ctx, cfg.HostEnv, cfg.TokenEnv)
+	client, err := r.clientFor(ctx)
 	if err != nil {
 		return "", fmt.Errorf("creating 1password_connect client: %w", err)
 	}
@@ -163,33 +154,31 @@ func SelectConnectField(item *onepassword.Item, ref OPRef) (string, error) {
 	return "", fmt.Errorf("field %q not found on item", ref.Field)
 }
 
-// opConnectClientCache caches one Connect client per (hostEnv, tokenEnv)
-// pair. Reusing a client pools the underlying HTTP transport.
+// opConnectClientCache lazily constructs a single Connect client. Reusing
+// it pools the underlying HTTP transport.
 type opConnectClientCache struct {
 	mu        sync.Mutex
-	clients   map[string]opConnectClient
+	client    opConnectClient
 	getenv    func(string) string
 	newClient func(host, token string) opConnectClient
 }
 
-func (c *opConnectClientCache) get(_ context.Context, hostEnv, tokenEnv string) (opConnectClient, error) {
+func (c *opConnectClientCache) get(_ context.Context) (opConnectClient, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := hostEnv + "|" + tokenEnv
-	if client, ok := c.clients[key]; ok {
-		return client, nil
+	if c.client != nil {
+		return c.client, nil
 	}
-	host := c.getenv(hostEnv)
+	host := c.getenv(opConnectHostEnv)
 	if host == "" {
-		return nil, fmt.Errorf("env var %q is not set or empty", hostEnv)
+		return nil, fmt.Errorf("env var %q is not set or empty", opConnectHostEnv)
 	}
-	token := c.getenv(tokenEnv)
+	token := c.getenv(opConnectTokenEnv)
 	if token == "" {
-		return nil, fmt.Errorf("env var %q is not set or empty", tokenEnv)
+		return nil, fmt.Errorf("env var %q is not set or empty", opConnectTokenEnv)
 	}
-	client := c.newClient(host, token)
-	c.clients[key] = client
-	return client, nil
+	c.client = c.newClient(host, token)
+	return c.client, nil
 }
 
 // opConnectSDKClient adapts a connect.Client to the opConnectClient interface.

@@ -218,12 +218,10 @@ transforms:
         # Replace mode with 1Password Connect (self-hosted Connect server).
         # secret_ref uses the same op:// syntax as the 1password source. The
         # Connect server URL is read from OP_CONNECT_HOST and the API token
-        # from OP_CONNECT_TOKEN by default; override with host_env / token_env.
+        # from OP_CONNECT_TOKEN.
         # - source:
         #     type: 1password_connect
         #     secret_ref: "op://Engineering/OpenAI/credential"
-        #     host_env: OP_CONNECT_HOST    # optional; this is the default
-        #     token_env: OP_CONNECT_TOKEN  # optional; this is the default
         #     ttl: "15m"                   # optional, re-fetch interval; 0 = no refresh
         #   replace:
         #     proxy_value: "proxy-token-1pc"
