@@ -1,23 +1,11 @@
 version: 2
 
+dist: dist/iron-proxy
+
 builds:
   - id: iron-proxy
     main: ./cmd/iron-proxy
     binary: iron-proxy
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X github.com/ironsh/iron-proxy/internal/version.Version={{.Version}}
-
-  - id: iron-token-broker
-    main: ./cmd/iron-token-broker
-    binary: iron-token-broker
     env:
       - CGO_ENABLED=0
     goos:
@@ -36,12 +24,6 @@ archives:
     formats: ["tar.gz"]
     name_template: "iron-proxy_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
-  - id: iron-token-broker
-    ids:
-      - iron-token-broker
-    formats: ["tar.gz"]
-    name_template: "iron-token-broker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-
 dockers_v2:
   - id: iron-proxy
     ids:
@@ -52,16 +34,6 @@ dockers_v2:
       - "{{ .Version }}"
       - "latest"
     dockerfile: Dockerfile.release
-
-  - id: iron-token-broker
-    ids:
-      - iron-token-broker
-    images:
-      - "ironsh/iron-token-broker"
-    tags:
-      - "{{ .Version }}"
-      - "latest"
-    dockerfile: Dockerfile.broker.release
 
 checksum:
   name_template: "checksums.txt"
