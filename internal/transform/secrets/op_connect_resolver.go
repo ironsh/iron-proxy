@@ -61,7 +61,7 @@ func (r *opConnectBuilder) Build(raw yaml.Node) (secretSource, error) {
 	if cfg.SecretRef == "" {
 		return nil, fmt.Errorf("1password_connect source requires \"secret_ref\" field")
 	}
-	ref, err := parseOPRef(cfg.SecretRef)
+	ref, err := ParseOPRef(cfg.SecretRef)
 	if err != nil {
 		return nil, fmt.Errorf("1password_connect: %w", err)
 	}
@@ -76,20 +76,20 @@ func (r *opConnectBuilder) Build(raw yaml.Node) (secretSource, error) {
 	})
 }
 
-func (r *opConnectBuilder) fetchSecret(ctx context.Context, cfg opConnectConfig, ref opRef) (string, error) {
+func (r *opConnectBuilder) fetchSecret(ctx context.Context, cfg opConnectConfig, ref OPRef) (string, error) {
 	client, err := r.clientFor(ctx, cfg.HostEnv, cfg.TokenEnv)
 	if err != nil {
 		return "", fmt.Errorf("creating 1password_connect client: %w", err)
 	}
-	vault, err := client.GetVault(ref.vault)
+	vault, err := client.GetVault(ref.Vault)
 	if err != nil {
-		return "", fmt.Errorf("resolving 1password_connect secret %q: looking up vault %q: %w", cfg.SecretRef, ref.vault, err)
+		return "", fmt.Errorf("resolving 1password_connect secret %q: looking up vault %q: %w", cfg.SecretRef, ref.Vault, err)
 	}
-	item, err := client.GetItem(ref.item, vault.ID)
+	item, err := client.GetItem(ref.Item, vault.ID)
 	if err != nil {
-		return "", fmt.Errorf("resolving 1password_connect secret %q: looking up item %q: %w", cfg.SecretRef, ref.item, err)
+		return "", fmt.Errorf("resolving 1password_connect secret %q: looking up item %q: %w", cfg.SecretRef, ref.Item, err)
 	}
-	val, err := selectField(item, ref)
+	val, err := SelectConnectField(item, ref)
 	if err != nil {
 		return "", fmt.Errorf("resolving 1password_connect secret %q: %w", cfg.SecretRef, err)
 	}
@@ -99,66 +99,68 @@ func (r *opConnectBuilder) fetchSecret(ctx context.Context, cfg opConnectConfig,
 	return val, nil
 }
 
-// opRef is a parsed op:// secret reference.
-type opRef struct {
-	vault   string
-	item    string
-	section string // optional
-	field   string
+// OPRef is a parsed op://vault/item/[section/]field reference. Exported so
+// other packages (notably internal/broker/store) can share the parser and
+// the Connect-side field selector without re-implementing them.
+type OPRef struct {
+	Vault   string
+	Item    string
+	Section string // optional
+	Field   string
 }
 
-// parseOPRef parses an "op://vault/item/[section/]field" reference.
+// ParseOPRef parses an "op://vault/item/[section/]field" reference.
 // vault, item, section, and field may be UUIDs or human titles. Empty
 // segments and lengths outside [3, 4] are rejected.
-func parseOPRef(ref string) (opRef, error) {
+func ParseOPRef(ref string) (OPRef, error) {
 	rest, ok := strings.CutPrefix(ref, "op://")
 	if !ok {
-		return opRef{}, fmt.Errorf("secret_ref %q must start with \"op://\"", ref)
+		return OPRef{}, fmt.Errorf("secret_ref %q must start with \"op://\"", ref)
 	}
 	parts := strings.Split(rest, "/")
 	if len(parts) < 3 || len(parts) > 4 {
-		return opRef{}, fmt.Errorf("secret_ref %q must have 3 or 4 path segments (op://vault/item/[section/]field)", ref)
+		return OPRef{}, fmt.Errorf("secret_ref %q must have 3 or 4 path segments (op://vault/item/[section/]field)", ref)
 	}
 	for _, p := range parts {
 		if p == "" {
-			return opRef{}, fmt.Errorf("secret_ref %q has an empty path segment", ref)
+			return OPRef{}, fmt.Errorf("secret_ref %q has an empty path segment", ref)
 		}
 	}
-	out := opRef{vault: parts[0], item: parts[1]}
+	out := OPRef{Vault: parts[0], Item: parts[1]}
 	if len(parts) == 3 {
-		out.field = parts[2]
+		out.Field = parts[2]
 	} else {
-		out.section = parts[2]
-		out.field = parts[3]
+		out.Section = parts[2]
+		out.Field = parts[3]
 	}
 	return out, nil
 }
 
-// selectField returns the value of the field identified by ref on item.
-// Field is matched by ID or Label. When a section is specified in ref, the
-// field's Section must also match by ID or Label.
-func selectField(item *onepassword.Item, ref opRef) (string, error) {
+// SelectConnectField returns the value of the field identified by ref on
+// a 1Password Connect item. Field is matched by ID or Label. When ref has
+// a section, the field's Section must also match by ID or Label.
+func SelectConnectField(item *onepassword.Item, ref OPRef) (string, error) {
 	for _, f := range item.Fields {
 		if f == nil {
 			continue
 		}
-		if f.ID != ref.field && f.Label != ref.field {
+		if f.ID != ref.Field && f.Label != ref.Field {
 			continue
 		}
-		if ref.section != "" {
+		if ref.Section != "" {
 			if f.Section == nil {
 				continue
 			}
-			if f.Section.ID != ref.section && f.Section.Label != ref.section {
+			if f.Section.ID != ref.Section && f.Section.Label != ref.Section {
 				continue
 			}
 		}
 		return f.Value, nil
 	}
-	if ref.section != "" {
-		return "", fmt.Errorf("field %q in section %q not found on item", ref.field, ref.section)
+	if ref.Section != "" {
+		return "", fmt.Errorf("field %q in section %q not found on item", ref.Field, ref.Section)
 	}
-	return "", fmt.Errorf("field %q not found on item", ref.field)
+	return "", fmt.Errorf("field %q not found on item", ref.Field)
 }
 
 // opConnectClientCache caches one Connect client per (hostEnv, tokenEnv)
