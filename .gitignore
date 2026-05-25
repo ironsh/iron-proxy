@@ -3,6 +3,9 @@
 /iron-token-broker
 *.exe
 
+# GoReleaser
+/dist/
+
 # IDE
 .idea/
 .vscode/

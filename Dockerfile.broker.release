@@ -1,0 +1,5 @@
+FROM alpine:latest
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates openssl
+COPY linux/${TARGETARCH}/iron-token-broker /usr/local/bin/iron-token-broker
+ENTRYPOINT ["iron-token-broker"]
