@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,60 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// echoHeadersUpstream starts an httptest.Server that copies each named request
+// header into a response header of the same name with "Got-" inserted after
+// the leading "X-" (so "X-Foo-Secret" is echoed back as "X-Got-Foo-Secret").
+// Returns the upstream's host:port. The server is closed on test cleanup.
+func echoHeadersUpstream(t *testing.T, headers ...string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, h := range headers {
+			w.Header().Set(echoedHeaderName(h), r.Header.Get(h))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
+// echoedHeaderName returns the response header name used by echoHeadersUpstream
+// for a given request header: "X-Foo" -> "X-Got-Foo".
+func echoedHeaderName(h string) string {
+	if rest, ok := strings.CutPrefix(h, "X-"); ok {
+		return "X-Got-" + rest
+	}
+	return "X-Got-" + h
+}
+
+// proxyGet sends a GET through proxyAddr with Host=upstreamHost and the given
+// request headers, drains the body, and returns the status code and response
+// headers. Fails the test on transport errors.
+func proxyGet(t *testing.T, proxyAddr, upstreamHost string, reqHeaders map[string]string) (int, http.Header) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/", nil)
+	require.NoError(t, err)
+	req.Host = upstreamHost
+	for k, v := range reqHeaders {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, err = io.Copy(io.Discard, resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, resp.Header
+}
+
+// requireEnv returns the value of envVar, calling t.Skip if it is empty.
+func requireEnv(t *testing.T, envVar string) string {
+	t.Helper()
+	v := os.Getenv(envVar)
+	if v == "" {
+		t.Skipf("%s not set; skipping", envVar)
+	}
+	return v
+}
 
 // generateServiceAccountKeyPEM returns a freshly-minted RSA private key in
 // PEM (PKCS#8) form, suitable for embedding in a service-account JSON keyfile.

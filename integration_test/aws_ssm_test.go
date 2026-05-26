@@ -1,10 +1,7 @@
 package integration_test
 
 import (
-	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,50 +10,27 @@ import (
 // TestAWSSystemsManagerParameterStore boots the proxy with real AWS SSM
 // Parameter Store parameters and verifies proxy token replacement.
 func TestAWSSystemsManagerParameterStore(t *testing.T) {
-	tmpDir := t.TempDir()
-	binary := proxyBinary(t)
+	cases := []struct {
+		name, header, sent, want string
+	}{
+		{"raw_parameter", "X-Raw-Param", "proxy-raw-param", "example_raw_value"},
+		{"json_parameter", "X-JSON-Param", "proxy-json-param", "example_value"},
+	}
 
-	// Upstream: echoes back the parameter headers so we can verify the swap.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Got-Raw-Param", r.Header.Get("X-Raw-Param"))
-		w.Header().Set("X-Got-JSON-Param", r.Header.Get("X-JSON-Param"))
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
+	headers := make([]string, len(cases))
+	for i, tc := range cases {
+		headers[i] = tc.header
+	}
+	upstreamHost := echoHeadersUpstream(t, headers...)
 
-	cfgPath := renderConfig(t, tmpDir, "aws_ssm.yaml", nil)
-	proxy := startProxy(t, binary, cfgPath, nil)
-	upstreamHost := upstream.Listener.Addr().String()
+	cfgPath := renderConfig(t, t.TempDir(), "aws_ssm.yaml", nil)
+	proxy := startProxy(t, proxyBinary(t), cfgPath, nil)
 
-	t.Run("raw_parameter", func(t *testing.T) {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/", proxy.HTTPAddr), nil)
-		require.NoError(t, err)
-		req.Host = upstreamHost
-		req.Header.Set("X-Raw-Param", "proxy-raw-param")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		_, err = io.Copy(io.Discard, resp.Body)
-		require.NoError(t, err)
-
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Equal(t, "example_raw_value", resp.Header.Get("X-Got-Raw-Param"))
-	})
-
-	t.Run("json_parameter", func(t *testing.T) {
-		req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/", proxy.HTTPAddr), nil)
-		require.NoError(t, err)
-		req.Host = upstreamHost
-		req.Header.Set("X-JSON-Param", "proxy-json-param")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		_, err = io.Copy(io.Discard, resp.Body)
-		require.NoError(t, err)
-
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Equal(t, "example_value", resp.Header.Get("X-Got-JSON-Param"))
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, hdr := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{tc.header: tc.sent})
+			require.Equal(t, http.StatusOK, status)
+			require.Equal(t, tc.want, hdr.Get(echoedHeaderName(tc.header)))
+		})
+	}
 }

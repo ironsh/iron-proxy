@@ -5,7 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,12 +34,11 @@ func TestManagementReload(t *testing.T) {
 	t.Setenv("IRON_RELOAD_ITEST_API_KEY", apiKey)
 
 	// Upstream: echoes back the secret header so we can verify the swap.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Got-Reload-Secret", r.Header.Get("X-Reload-Secret"))
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-	upstreamPort := upstream.Listener.Addr().(*net.TCPAddr).Port
+	upstreamHost := echoHeadersUpstream(t, "X-Reload-Secret")
+	_, port, err := net.SplitHostPort(upstreamHost)
+	require.NoError(t, err)
+	upstreamPort, err := strconv.Atoi(port)
+	require.NoError(t, err)
 
 	// In-process DNS server that resolves host-a.test and host-b.test to
 	// 127.0.0.1. The proxy's upstream_resolver is pointed at this so the
@@ -57,14 +56,16 @@ func TestManagementReload(t *testing.T) {
 	hostA := fmt.Sprintf("host-a.test:%d", upstreamPort)
 	hostB := fmt.Sprintf("host-b.test:%d", upstreamPort)
 
+	reloadHeaders := map[string]string{"X-Reload-Secret": "proxy-reload-token"}
+
 	t.Run("config_a_active", func(t *testing.T) {
 		// host-a.test is allowed and its secret is swapped.
-		got, status := doSecretRequest(t, proxy.HTTPAddr, hostA)
+		status, hdr := proxyGet(t, proxy.HTTPAddr, hostA, reloadHeaders)
 		require.Equal(t, http.StatusOK, status)
-		require.Equal(t, secretValueA, got)
+		require.Equal(t, secretValueA, hdr.Get("X-Got-Reload-Secret"))
 
 		// host-b.test is rejected by config A's allowlist.
-		_, status = doSecretRequest(t, proxy.HTTPAddr, hostB)
+		status, _ = proxyGet(t, proxy.HTTPAddr, hostB, reloadHeaders)
 		require.Equal(t, http.StatusForbidden, status)
 	})
 
@@ -86,34 +87,16 @@ func TestManagementReload(t *testing.T) {
 
 	t.Run("config_b_active", func(t *testing.T) {
 		// host-b.test is now allowed and its secret is swapped.
-		got, status := doSecretRequest(t, proxy.HTTPAddr, hostB)
+		status, hdr := proxyGet(t, proxy.HTTPAddr, hostB, reloadHeaders)
+		got := hdr.Get("X-Got-Reload-Secret")
 		require.Equal(t, http.StatusOK, status)
 		require.Equal(t, secretValueB, got)
 		require.NotEqual(t, secretValueA, got)
 
 		// host-a.test is now rejected by config B's allowlist.
-		_, status = doSecretRequest(t, proxy.HTTPAddr, hostA)
+		status, _ = proxyGet(t, proxy.HTTPAddr, hostA, reloadHeaders)
 		require.Equal(t, http.StatusForbidden, status)
 	})
-}
-
-// doSecretRequest sends a request through the proxy with the proxy-token in
-// the X-Reload-Secret header and returns the value the upstream observed
-// (echoed back via X-Got-Reload-Secret) along with the response status.
-// When the request is rejected by the proxy, the value will be empty.
-func doSecretRequest(t *testing.T, proxyAddr, hostHeader string) (string, int) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/", proxyAddr), nil)
-	require.NoError(t, err)
-	req.Host = hostHeader
-	req.Header.Set("X-Reload-Secret", "proxy-reload-token")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	_, err = io.Copy(io.Discard, resp.Body)
-	require.NoError(t, err)
-	return resp.Header.Get("X-Got-Reload-Secret"), resp.StatusCode
 }
 
 // startTestDNSResolver starts a tiny UDP DNS server on a random port that

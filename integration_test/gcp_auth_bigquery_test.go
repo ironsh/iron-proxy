@@ -31,10 +31,7 @@ import (
 // Requires a BigQuery table at test_dataset.test_table with a test_field
 // column readable by the configured service account.
 func TestGCPAuthBigQuery(t *testing.T) {
-	keyfilePath := os.Getenv("GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE")
-	if keyfilePath == "" {
-		t.Skip("GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE not set")
-	}
+	keyfilePath := requireEnv(t, "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE")
 	keyJSON, err := os.ReadFile(keyfilePath)
 	require.NoError(t, err, "reading GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE")
 
