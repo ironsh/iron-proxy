@@ -34,10 +34,7 @@ import (
 // test_dataset.test_table with a test_field column readable by the configured
 // service account.
 func TestGCPAuthBigQueryGcloudCLI(t *testing.T) {
-	keyfilePath := os.Getenv("GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE")
-	if keyfilePath == "" {
-		t.Skip("GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE not set")
-	}
+	keyfilePath := requireEnv(t, "GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_FILE")
 	gcloudBin, err := exec.LookPath("gcloud")
 	if err != nil {
 		t.Skip("gcloud CLI not found on PATH")

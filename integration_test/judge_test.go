@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -94,10 +93,7 @@ type judgeFixture struct {
 // envVarName is unset so local runs without the secret pass cleanly.
 func setupJudgeFixture(t *testing.T, configTemplate, envVarName string) *judgeFixture {
 	t.Helper()
-	apiKey := os.Getenv(envVarName)
-	if apiKey == "" {
-		t.Skipf("%s not set; skipping real-LLM judge integration test", envVarName)
-	}
+	apiKey := requireEnv(t, envVarName)
 
 	hits := make(chan upstreamHit, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
