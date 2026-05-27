@@ -777,6 +777,39 @@ func TestHTTPProxy_RejectsDotSegmentPaths(t *testing.T) {
 	require.False(t, upstreamHit, "upstream must not be reached for dot-segment paths")
 }
 
+// TestHTTPProxy_PreservesEscapedSlashes verifies that %2F in the request
+// path is forwarded to the upstream as %2F rather than being decoded to /.
+// Some APIs (e.g. GCS object names under /o/<object>) treat encoded vs
+// decoded slashes as distinct path segments. See issue #155.
+func TestHTTPProxy_PreservesEscapedSlashes(t *testing.T) {
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, httpAddr, _, _ := startProxy(t)
+
+	// Send via raw TCP to keep the Go client from normalizing %2F.
+	conn, err := net.DialTimeout("tcp", httpAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	const rawPath = "/download/storage/v1/b/bkt/o/dir%2Fsub%2Ffile.gz?alt=media"
+	rawReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\n\r\n",
+		rawPath, upstream.Listener.Addr().String())
+	_, err = conn.Write([]byte(rawReq))
+	require.NoError(t, err)
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 4096)
+	_, err = conn.Read(buf)
+	require.NoError(t, err)
+
+	require.Equal(t, rawPath, gotRequestURI)
+}
+
 func TestContainsDotSegments(t *testing.T) {
 	cases := []struct {
 		path string

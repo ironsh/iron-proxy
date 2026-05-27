@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,12 +377,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 
 	// Build upstream request. Use r.URL (which transforms may have modified)
-	// rather than r.RequestURI (which is immutable).
-	path := r.URL.Path
-	if r.URL.RawQuery != "" {
-		path = path + "?" + r.URL.RawQuery
-	}
-	upstreamURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
+	// rather than r.RequestURI (which is immutable). Preserve RawPath so
+	// percent-encoded reserved characters like %2F survive to the upstream —
+	// some APIs (e.g. GCS object names) treat decoded vs encoded slashes as
+	// distinct path segments.
+	upstreamURL := (&url.URL{
+		Scheme:   scheme,
+		Host:     host,
+		Path:     r.URL.Path,
+		RawPath:  r.URL.RawPath,
+		RawQuery: r.URL.RawQuery,
+	}).String()
 
 	reqBody := transform.RequireBufferedBody(r.Body)
 	// Check Len() before StreamingReader(), which clears the original reader.
