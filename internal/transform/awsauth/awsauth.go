@@ -221,6 +221,16 @@ func buildAllowSet(items []string) map[string]struct{} {
 func (a *AWSAuth) Name() string { return "aws_auth" }
 
 func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	// The proxy replays request transforms against a synthetic CONNECT request
+	// to make tunnel-level policy decisions before MITM (see proxy.tunnelTransformCheck).
+	// A CONNECT carries no SigV4 signature — the signed request only becomes
+	// visible after the tunnel is established and TLS is terminated. Rejecting
+	// it here would kill the tunnel before the real request is ever seen, so let
+	// CONNECT pass; signing happens on the post-MITM request that follows.
+	if req.Method == http.MethodConnect {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+
 	if !hostmatch.MatchAnyRule(a.rules, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}

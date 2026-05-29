@@ -392,6 +392,21 @@ rules:
 		require.Equal(t, http.StatusBadRequest, res.Response.StatusCode)
 	})
 
+	t.Run("lets a CONNECT through even for a matched host (signs the post-MITM request)", func(t *testing.T) {
+		a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
+		// The proxy replays transforms against a synthetic CONNECT to make
+		// tunnel-level policy decisions before MITM. A CONNECT carries no SigV4
+		// signature, so aws_auth must not reject it — the signed request only
+		// appears after the tunnel is established and TLS is terminated.
+		req, err := http.NewRequest(http.MethodConnect, "https://bedrock-runtime.us-east-1.amazonaws.com:443", nil)
+		require.NoError(t, err)
+
+		res, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionContinue, res.Action)
+		require.Empty(t, req.Header.Get("Authorization"))
+	})
+
 	t.Run("allowed_services gates which services this entry will sign for", func(t *testing.T) {
 		a := buildTransformWith(t, `
 access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
