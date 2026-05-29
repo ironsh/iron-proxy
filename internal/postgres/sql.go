@@ -41,9 +41,6 @@ const (
 	OpResetRole
 	// OpResetSessionAuthorization is the same for session_authorization.
 	OpResetSessionAuthorization
-	// OpMulti indicates the input contains more than one top-level statement.
-	// Rejected to keep the policy decidable.
-	OpMulti
 	// OpEmpty indicates a whitespace/comment-only input or no statements.
 	OpEmpty
 	// OpDoBlock is a DO $$ ... $$ block. The plpgsql body is opaque to our
@@ -109,31 +106,44 @@ func classifyUncached(sql string) Op {
 	if len(stmts) == 0 {
 		return Op{Kind: OpEmpty}
 	}
-	if len(stmts) > 1 {
-		return Op{Kind: OpMulti}
-	}
 
-	root := stmts[0].GetStmt()
-	if root == nil {
-		return Op{Kind: OpEmpty}
+	// Multi-statement Simple Queries are permitted as long as every statement
+	// passes the role policy. We classify each statement and reject the whole
+	// batch on the first one that mutates the role or is an (opaque) DO block.
+	// The relay forwards the batch unchanged when all statements are allowed;
+	// the upstream runs it as one implicit transaction.
+	for _, s := range stmts {
+		root := s.GetStmt()
+		if root == nil {
+			continue
+		}
+		if kind := classifyStmt(root); kind != OpOther {
+			return Op{Kind: kind}
+		}
 	}
+	return Op{Kind: OpOther}
+}
 
+// classifyStmt classifies a single statement's root node, returning the OpKind
+// of any role-mutating or otherwise-rejectable construct it finds, or OpOther
+// when the statement is allowed.
+func classifyStmt(root *pg_query.Node) OpKind {
 	// Top-level shape gives us a fast path for the common DDL/DML cases.
 	switch root.Node.(type) {
 	case *pg_query.Node_TransactionStmt:
 		// BEGIN / COMMIT / ROLLBACK / SAVEPOINT etc. — no role mutation.
-		return Op{Kind: OpOther}
+		return OpOther
 	case *pg_query.Node_DoStmt:
-		return Op{Kind: OpDoBlock}
+		return OpDoBlock
 	}
 
 	// Generic scan: any role-affecting node anywhere in the tree triggers a
 	// rejection. Covers SELECT set_config(...), PREPARE ... AS SET ROLE,
 	// CTEs, subqueries, INSERT...SELECT, function arguments, etc.
 	if kind := scanForRoleChange(root); kind != 0 {
-		return Op{Kind: kind}
+		return kind
 	}
-	return Op{Kind: OpOther}
+	return OpOther
 }
 
 // scanForRoleChange walks the AST rooted at node and returns the OpKind of
