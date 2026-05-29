@@ -17,9 +17,10 @@
 // While the relay is running the proxy is mostly transparent: it rejects only
 // client-issued role-changing statements (`SET ROLE`, `RESET ROLE`,
 // `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`), the function-
-// call equivalents (`set_config('role', ...)`), DO blocks, and multi-statement
-// Simple Queries. Extended Query, COPY, and prepared statements pass through
-// unchanged.
+// call equivalents (`set_config('role', ...)`), and DO blocks. Multi-statement
+// Simple Queries are allowed as long as every statement passes the role policy;
+// a batch is rejected if any statement mutates the role or is a DO block.
+// Extended Query, COPY, and prepared statements pass through unchanged.
 //
 // Multiple servers are supported: the top-level postgres: key is a list, so
 // one proxy process can front several databases (each with its own listen

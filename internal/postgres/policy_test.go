@@ -27,8 +27,12 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set session authorization rejected", sql: "SET SESSION AUTHORIZATION admin", reason: RejectClientRoleChange},
 		{name: "reset session authorization rejected", sql: "RESET SESSION AUTHORIZATION", reason: RejectClientRoleChange},
 
-		{name: "multi statement rejected", sql: "SELECT 1; SELECT 2", reason: RejectMultiStatement},
-		{name: "multi statement with set role rejected as multi", sql: "SET ROLE x; SELECT 1", reason: RejectMultiStatement},
+		// Multi-statement batches are allowed when every statement passes the
+		// role policy, and rejected per-statement otherwise.
+		{name: "clean multi statement allowed", sql: "SELECT 1; SELECT 2", allowed: true},
+		{name: "multi statement with set role rejected", sql: "SET ROLE x; SELECT 1", reason: RejectClientRoleChange},
+		{name: "multi statement with trailing set role rejected", sql: "SELECT 1; SET ROLE x", reason: RejectClientRoleChange},
+		{name: "multi statement with do block rejected", sql: "SELECT 1; DO $$ BEGIN END $$", reason: RejectDoBlock},
 
 		// SET of other GUCs is fine — only role-changing statements are rejected.
 		{name: "set search_path allowed", sql: "SET search_path = public", allowed: true},

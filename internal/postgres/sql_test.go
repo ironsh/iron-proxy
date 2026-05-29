@@ -46,9 +46,14 @@ func TestClassify(t *testing.T) {
 		{name: "start transaction", sql: "START TRANSACTION", want: OpOther},
 		{name: "savepoint", sql: "SAVEPOINT a", want: OpOther},
 
-		// Multi-statement
-		{name: "multi set then select", sql: "SET ROLE tenant; SELECT 1", want: OpMulti},
-		{name: "multi select then select", sql: "SELECT 1; SELECT 2", want: OpMulti},
+		// Multi-statement — classified per statement; the batch takes the
+		// verdict of its first rejectable statement, else OpOther.
+		{name: "multi set then select rejects on set role", sql: "SET ROLE tenant; SELECT 1", want: OpSetRole},
+		{name: "multi select then select allowed", sql: "SELECT 1; SELECT 2", want: OpOther},
+		{name: "multi benign then set role", sql: "SELECT 1; SET ROLE tenant", want: OpSetRole},
+		{name: "multi benign then do block", sql: "SELECT 1; DO $$ BEGIN END $$", want: OpDoBlock},
+		{name: "multi benign then set_config role", sql: "SELECT 1; SELECT set_config('role', 'admin', false)", want: OpSetRole},
+		{name: "multi non-role sets allowed", sql: "SET search_path = public; SELECT 1", want: OpOther},
 		// Trailing semicolon alone is *not* multi (pg_query collapses it).
 		{name: "trailing semicolon not multi", sql: "SET ROLE tenant;", want: OpSetRole},
 

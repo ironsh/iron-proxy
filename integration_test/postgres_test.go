@@ -265,13 +265,23 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Contains(t, pgErr.Message, "managed by the proxy")
 	})
 
-	t.Run("multi statement is rejected", func(t *testing.T) {
+	t.Run("clean multi statement is allowed", func(t *testing.T) {
 		conn := dial(t, pgClientPassword)
 		err := exec(t, conn, "SELECT 1; SELECT 2")
+		require.NoError(t, err)
+		// Role policy still holds after a batch executes.
+		require.Equal(t, pgRole, currentRole(t, conn))
+	})
+
+	t.Run("multi statement with role change is rejected", func(t *testing.T) {
+		conn := dial(t, pgClientPassword)
+		err := exec(t, conn, "SELECT 1; SET ROLE other_role")
 		require.Error(t, err)
 		var pgErr *pgconn.PgError
 		require.True(t, errors.As(err, &pgErr))
-		require.Contains(t, pgErr.Message, "multi-statement")
+		require.Contains(t, pgErr.Message, "managed by the proxy")
+		// The batch was rejected before forwarding, so nothing took effect.
+		require.Equal(t, pgRole, currentRole(t, conn))
 	})
 
 	t.Run("set_config function call bypass is rejected", func(t *testing.T) {

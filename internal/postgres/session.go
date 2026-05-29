@@ -174,7 +174,7 @@ func completeClientHandshake(backend *pgproto3.Backend, hj *pgconn.HijackedConn)
 // after the role has been set on the upstream session.
 //
 // Two goroutines do socket I/O: c2s reads client messages and rejects
-// role-changing or multi-statement queries before forwarding everything else;
+// role-changing statements (and DO blocks) before forwarding everything else;
 // s2c is a pure passthrough.
 //
 // Writes to the client serialize through clientWriteMu since both goroutines
@@ -234,8 +234,7 @@ func (r *relay) run() {
 }
 
 // clientToServer reads frontend messages from the client and forwards them
-// upstream, rejecting only role-changing statements and multi-statement
-// Simple Queries.
+// upstream, rejecting only role-changing statements and DO blocks.
 func (r *relay) clientToServer() {
 	for {
 		msg, err := r.backend.Receive()
@@ -332,12 +331,6 @@ func (r *relay) writeClient(msgs ...pgproto3.BackendMessage) {
 // rejectError builds the ErrorResponse synthesized for a policy denial.
 func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 	switch reason {
-	case RejectMultiStatement:
-		return &pgproto3.ErrorResponse{
-			Severity: "ERROR",
-			Code:     "42601",
-			Message:  "blocked by iron-proxy policy: multi-statement queries not permitted",
-		}
 	case RejectDoBlock:
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",
