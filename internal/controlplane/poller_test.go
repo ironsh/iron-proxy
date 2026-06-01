@@ -26,8 +26,7 @@ func TestPollerInitialSync(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, testLogger())
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", testLogger())
 
 	var updateCalled atomic.Int32
 	poller := NewPoller(client, "", func(u SyncUpdate) error {
@@ -56,8 +55,7 @@ func TestPollerInitialSyncDeliversMCP(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, testLogger())
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", testLogger())
 
 	var got SyncUpdate
 	var called atomic.Int32
@@ -85,8 +83,7 @@ func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	var updateCalled atomic.Int32
 	poller := NewPoller(client, "sha256:same", func(u SyncUpdate) error {
@@ -109,8 +106,7 @@ func TestPollerStopsOnRevocation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	poller := NewPoller(client, "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -136,8 +132,7 @@ func TestPollerContinuesOnTransientError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	poller := NewPoller(client, "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -158,8 +153,7 @@ func TestPollerGracefulShutdown(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	client.SetCredential(&Credential{ProxyID: "irnp_test", Secret: []byte("s")})
+	client := NewClient(server.URL, "irpt_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	poller := NewPoller(client, "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 

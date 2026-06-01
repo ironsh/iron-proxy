@@ -144,6 +144,7 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 func defaultRegistry(logger *slog.Logger) sourceBuilderRegistry {
 	return sourceBuilderRegistry{
 		"env":               newEnvBuilder(logger),
+		"control_plane":     newControlPlaneBuilder(logger),
 		"aws_sm":            newAWSSMBuilder(logger),
 		"aws_ssm":           newAWSSSMBuilder(logger),
 		"1password":         newOPBuilder(logger),

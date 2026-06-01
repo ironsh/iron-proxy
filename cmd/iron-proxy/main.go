@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -49,9 +48,6 @@ func main() {
 		case "generate-ca":
 			runGenerateCA(os.Args[2:])
 			return
-		case "init":
-			runInit(os.Args[2:])
-			return
 		case "version", "--version", "-v":
 			fmt.Println(version.Version)
 			return
@@ -59,7 +55,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
-	enrollmentTokenFlag := flag.String("enrollment-token", "", "enrollment token for control plane registration")
+	tokenFlag := flag.String("token", "", "control plane bearer token (managed mode)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,24 +75,13 @@ func main() {
 	}
 
 	// CLI flag takes precedence over environment variable.
-	enrollmentToken := *enrollmentTokenFlag
-	if enrollmentToken == "" {
-		enrollmentToken = os.Getenv("IRON_ENROLLMENT_TOKEN")
+	proxyToken := *tokenFlag
+	if proxyToken == "" {
+		proxyToken = os.Getenv("IRON_PROXY_TOKEN")
 	}
 
-	// Managed mode is determined by the presence of an enrollment token or
-	// an existing credential from a prior registration.
-	stateStore, err := stateStorePath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	cred, credErr := controlplane.LoadCredential(stateStore)
-	if credErr != nil && !errors.Is(credErr, os.ErrNotExist) {
-		logger.Error("loading credential", slog.String("error", credErr.Error()))
-		os.Exit(1)
-	}
-	managed := enrollmentToken != "" || cred != nil
+	// Managed mode is determined by the presence of a control plane token.
+	managed := proxyToken != ""
 
 	if cfg.Management.Listen != "" {
 		if managed {
@@ -126,7 +111,7 @@ func main() {
 
 	if managed {
 		var ingestToken string
-		holder, mcpHolder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, stateStore, enrollmentToken, cred, logger)
+		holder, mcpHolder, ingestToken = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -316,46 +301,18 @@ func main() {
 //
 // Initial MCP policy preference: control-plane-supplied mcp block first, then
 // fall back to cfg.MCP from the YAML if the sync did not include one.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, stateStore, enrollmentToken string, cred *controlplane.Credential, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string) {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
-	client := controlplane.NewClient(cpURL, logger)
-
-	// Register if we don't have a credential yet.
-	if cred == nil {
-		logger.Info("registering with control plane")
-		var regErr error
-		cred, regErr = client.Register(ctx, enrollmentToken, controlplane.RegisterMetadata{
-			Version: version.Version,
-		})
-		if regErr != nil {
-			logger.Error("registration failed", slog.String("error", regErr.Error()))
-			os.Exit(1)
-		}
-		logger.Info("registered successfully", slog.String("proxy_id", cred.ProxyID))
-
-		if err := ensureStateStoreDir(stateStore); err != nil {
-			logger.Error("creating state store directory", slog.String("error", err.Error()))
-			os.Exit(1)
-		}
-		if err := controlplane.SaveCredential(stateStore, cred); err != nil {
-			logger.Error("saving credential", slog.String("error", err.Error()))
-			os.Exit(1)
-		}
-	} else {
-		logger.Info("loaded existing credential", slog.String("proxy_id", cred.ProxyID))
-	}
-
-	client.SetCredential(cred)
+	client := controlplane.NewClient(cpURL, proxyToken, logger)
 
 	// Initial sync.
 	syncResp, err := client.Sync(ctx, "")
 	if err != nil {
 		var apiErr *controlplane.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == controlplane.ErrProxyRevoked {
-			logger.Error("proxy has been revoked, deleting credential and exiting")
-			_ = controlplane.DeleteCredential(stateStore)
+			logger.Error("proxy has been revoked, exiting")
 			os.Exit(1)
 		}
 		logger.Warn("initial sync failed, will retry in background", slog.String("error", err.Error()))
@@ -455,27 +412,6 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 		logger.Info("mcp policy enabled")
 	}
 	return transform.NewPipelineHolder(pipeline), mcp.NewPolicyHolder(mcpPolicy)
-}
-
-// stateStorePath returns the state store path without creating any directories.
-// It honors IRON_STATE_STORE and falls back to the XDG config directory.
-func stateStorePath() (string, error) {
-	if v := os.Getenv("IRON_STATE_STORE"); v != "" {
-		return v, nil
-	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("determining config directory: %w", err)
-	}
-	return filepath.Join(configDir, "iron-proxy", "state"), nil
-}
-
-// ensureStateStoreDir creates the parent directory for the state store path.
-func ensureStateStoreDir(stateStore string) error {
-	if err := os.MkdirAll(filepath.Dir(stateStore), 0o700); err != nil {
-		return fmt.Errorf("creating state store directory: %w", err)
-	}
-	return nil
 }
 
 // applyPipelineSync builds a new pipeline from a sync payload and atomically
