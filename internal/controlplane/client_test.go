@@ -26,7 +26,7 @@ func apiError(code, message string) map[string]any {
 
 func TestSyncSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/proxy/sync", r.URL.Path)
+		require.Equal(t, "/api/v1/proxy/sync", r.URL.Path)
 		require.Equal(t, http.MethodPost, r.Method)
 
 		// Verify the bearer token is sent.

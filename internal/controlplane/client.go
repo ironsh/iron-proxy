@@ -60,7 +60,7 @@ func (c *Client) sync(ctx context.Context, configHash string) (*SyncResponse, er
 		return nil, fmt.Errorf("marshaling sync request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/proxy/sync", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/proxy/sync", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("building sync request: %w", err)
 	}

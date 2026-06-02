@@ -26,7 +26,7 @@ func TestBearerTransport(t *testing.T) {
 	}
 
 	body := []byte(`{"config_hash":"sha256:abc"}`)
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/proxy/sync", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/proxy/sync", bytes.NewReader(body))
 	require.NoError(t, err)
 
 	resp, err := transport.RoundTrip(req)
