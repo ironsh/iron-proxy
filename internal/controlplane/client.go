@@ -16,6 +16,7 @@ type SyncResponse struct {
 	Rules       json.RawMessage `json:"rules"`
 	Secrets     json.RawMessage `json:"secrets"`
 	MCP         json.RawMessage `json:"mcp"`
+	Postgres    json.RawMessage `json:"postgres"`
 	IngestToken string          `json:"ingest_token"`
 }
 

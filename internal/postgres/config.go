@@ -211,6 +211,39 @@ func compileOne(c ServerConfig, idx int, logger *slog.Logger, buildSource Source
 	}, nil
 }
 
+// NewManagedPolicy builds a Policy for a control-plane-synced listener. The
+// upstream DSN source and optional role come from the control plane; the listen
+// address and client credentials come from the proxy's environment. Unlike the
+// YAML path, clientPassword is the literal password value, not the name of an
+// env var — managed mode has no second level of indirection. All fields except
+// role are required.
+func NewManagedPolicy(name, listen string, dsn secrets.Source, clientUser, clientPassword, role string) (*Policy, error) {
+	if name == "" {
+		return nil, fmt.Errorf("postgres: managed policy name is required")
+	}
+	ctx := fmt.Sprintf("postgres[%q]", name)
+	if listen == "" {
+		return nil, fmt.Errorf("%s: listen is required", ctx)
+	}
+	if dsn == nil {
+		return nil, fmt.Errorf("%s: dsn source is required", ctx)
+	}
+	if clientUser == "" {
+		return nil, fmt.Errorf("%s: client user is required", ctx)
+	}
+	if clientPassword == "" {
+		return nil, fmt.Errorf("%s: client password is required", ctx)
+	}
+	return &Policy{
+		name:           name,
+		listen:         listen,
+		role:           role,
+		upstreamDSN:    dsn,
+		clientUser:     clientUser,
+		clientPassword: clientPassword,
+	}, nil
+}
+
 // QuoteIdent returns s formatted as a Postgres double-quoted identifier,
 // suitable for safe interpolation into SQL like `SET ROLE "<ident>"`.
 // Embedded `"` characters are doubled per Postgres lexical rules.

@@ -3,8 +3,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
 // TransformsFromSync builds a []Transform from the control plane's sync
@@ -57,6 +60,68 @@ func MCPFromSync(raw json.RawMessage) (node yaml.Node, present bool, err error) 
 		return yaml.Node{}, false, fmt.Errorf("parsing mcp: %w", err)
 	}
 	return node, true, nil
+}
+
+// PostgresSyncEntry is one control-plane-synced postgres upstream. The DSN and
+// optional role come from the control plane; the listener and client knobs are
+// supplied separately via environment variables keyed off ForeignID (see the
+// managed-mode env convention in cmd/iron-proxy).
+type PostgresSyncEntry struct {
+	ForeignID string
+	DSN       secrets.Source
+	Role      string
+}
+
+// PostgresFromSync parses the top-level postgres: array from the control
+// plane's sync payload into PostgresSyncEntry values, building each entry's DSN
+// source through the same secrets.BuildSource path the YAML config uses. A nil
+// or JSON-null payload returns (nil, nil); individual null array elements are
+// skipped. Source construction is lazy, so an entry whose DSN points at an
+// unset env var still parses without error here.
+func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncEntry, error) {
+	if !isNonNullJSON(raw) {
+		return nil, nil
+	}
+
+	var rawEntries []json.RawMessage
+	if err := json.Unmarshal(raw, &rawEntries); err != nil {
+		return nil, fmt.Errorf("parsing postgres: %w", err)
+	}
+
+	entries := make([]PostgresSyncEntry, 0, len(rawEntries))
+	for i, re := range rawEntries {
+		if !isNonNullJSON(re) {
+			continue
+		}
+		var e struct {
+			ForeignID string          `json:"foreign_id"`
+			DSN       json.RawMessage `json:"dsn"`
+			Role      string          `json:"role"`
+		}
+		if err := json.Unmarshal(re, &e); err != nil {
+			return nil, fmt.Errorf("parsing postgres[%d]: %w", i, err)
+		}
+		if e.ForeignID == "" {
+			return nil, fmt.Errorf("postgres[%d]: foreign_id is required", i)
+		}
+		if !isNonNullJSON(e.DSN) {
+			return nil, fmt.Errorf("postgres[%q]: dsn is required", e.ForeignID)
+		}
+		node, err := yamlNodeFromRawJSON(e.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("postgres[%q]: parsing dsn: %w", e.ForeignID, err)
+		}
+		src, err := secrets.BuildSource(node, logger)
+		if err != nil {
+			return nil, fmt.Errorf("postgres[%q]: building dsn source: %w", e.ForeignID, err)
+		}
+		entries = append(entries, PostgresSyncEntry{
+			ForeignID: e.ForeignID,
+			DSN:       src,
+			Role:      e.Role,
+		})
+	}
+	return entries, nil
 }
 
 // yamlNodeFromRawJSON parses raw JSON bytes as a yaml.Node. JSON is valid YAML,

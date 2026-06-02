@@ -63,6 +63,35 @@ func TestClassifyClientStatement(t *testing.T) {
 	}
 }
 
+func TestNewManagedPolicy(t *testing.T) {
+	dsn := staticDSN{name: "dsn", value: "host=db"}
+
+	p, err := NewManagedPolicy("pg-analytics", "127.0.0.1:6432", dsn, "app", "pw", "readonly")
+	require.NoError(t, err)
+	require.Equal(t, "pg-analytics", p.Name())
+	require.Equal(t, "127.0.0.1:6432", p.Listen())
+	require.Equal(t, "readonly", p.Role())
+	require.True(t, p.VerifyClient("app", "pw"))
+	require.False(t, p.VerifyClient("app", "wrong"))
+
+	// Absent role is allowed (no SET ROLE issued).
+	p, err = NewManagedPolicy("pg-main", "127.0.0.1:6433", dsn, "app", "pw", "")
+	require.NoError(t, err)
+	require.Empty(t, p.Role())
+
+	// Required fields.
+	_, err = NewManagedPolicy("", "127.0.0.1:0", dsn, "app", "pw", "")
+	require.ErrorContains(t, err, "name is required")
+	_, err = NewManagedPolicy("n", "", dsn, "app", "pw", "")
+	require.ErrorContains(t, err, "listen is required")
+	_, err = NewManagedPolicy("n", "127.0.0.1:0", nil, "app", "pw", "")
+	require.ErrorContains(t, err, "dsn source is required")
+	_, err = NewManagedPolicy("n", "127.0.0.1:0", dsn, "", "pw", "")
+	require.ErrorContains(t, err, "client user is required")
+	_, err = NewManagedPolicy("n", "127.0.0.1:0", dsn, "app", "", "")
+	require.ErrorContains(t, err, "client password is required")
+}
+
 func TestQuoteIdent(t *testing.T) {
 	cases := []struct {
 		in, out string
