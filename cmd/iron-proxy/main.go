@@ -329,15 +329,16 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 
 	configHash := ""
 	ingestToken := ""
-	var initialRules, initialSecrets, initialMCP, initialPostgres json.RawMessage
+	var initialRules, initialSecrets, initialTransformsRaw, initialMCP, initialPostgres json.RawMessage
 	if syncResp != nil {
 		configHash = syncResp.ConfigHash
 		initialRules = syncResp.Rules
 		initialSecrets = syncResp.Secrets
+		initialTransformsRaw = syncResp.Transforms
 		initialMCP = syncResp.MCP
 		initialPostgres = syncResp.Postgres
 		ingestToken = syncResp.IngestToken
-		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 || len(syncResp.MCP) > 0 {
+		if len(syncResp.Rules) > 0 || len(syncResp.Secrets) > 0 || len(syncResp.Transforms) > 0 || len(syncResp.MCP) > 0 {
 			logger.Info("received initial config from control plane",
 				slog.String("config_hash", syncResp.ConfigHash),
 			)
@@ -345,7 +346,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	}
 
 	// Build initial pipeline from sync response.
-	initialTransforms, err := config.TransformsFromSync(initialRules, initialSecrets)
+	initialTransforms, err := config.TransformsFromSync(initialRules, initialSecrets, initialTransformsRaw)
 	if err != nil {
 		logger.Error("parsing initial config", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -377,8 +378,8 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 
 	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(u controlplane.SyncUpdate) error {
-		if u.Rules != nil || u.Secrets != nil {
-			applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets)
+		if u.Rules != nil || u.Secrets != nil || u.Transforms != nil {
+			applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms)
 		}
 		if u.MCP != nil {
 			applyMCPSync(mcpHolder, logger, u.MCP)
@@ -439,8 +440,8 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 // swaps it in. If parsing or pipeline construction fails, the existing pipeline
 // is preserved and an error is logged: an invalid push from the control plane
 // must not take down the proxy.
-func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets json.RawMessage) {
-	newTransforms, err := config.TransformsFromSync(rules, secrets)
+func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets, transforms json.RawMessage) {
+	newTransforms, err := config.TransformsFromSync(rules, secrets, transforms)
 	if err != nil {
 		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
 		return

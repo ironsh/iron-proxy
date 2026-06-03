@@ -16,10 +16,11 @@ const PollInterval = 5 * time.Second
 // callback. Fields are nil or JSON null when the control plane did not include
 // them in this sync.
 type SyncUpdate struct {
-	Rules    json.RawMessage
-	Secrets  json.RawMessage
-	MCP      json.RawMessage
-	Postgres json.RawMessage
+	Rules      json.RawMessage
+	Secrets    json.RawMessage
+	Transforms json.RawMessage
+	MCP        json.RawMessage
+	Postgres   json.RawMessage
 }
 
 // Poller periodically calls Sync and applies config updates.
@@ -80,23 +81,26 @@ func (p *Poller) sync(ctx context.Context) error {
 
 	hasRules := isNonNullJSON(resp.Rules)
 	hasSecrets := isNonNullJSON(resp.Secrets)
+	hasTransforms := isNonNullJSON(resp.Transforms)
 	hasMCP := isNonNullJSON(resp.MCP)
 	hasPostgres := isNonNullJSON(resp.Postgres)
 
-	if hasRules || hasSecrets || hasMCP || hasPostgres {
+	if hasRules || hasSecrets || hasTransforms || hasMCP || hasPostgres {
 		p.logger.Info("config update received from control plane",
 			slog.String("config_hash", resp.ConfigHash),
 			slog.Bool("has_rules", hasRules),
 			slog.Bool("has_secrets", hasSecrets),
+			slog.Bool("has_transforms", hasTransforms),
 			slog.Bool("has_mcp", hasMCP),
 			slog.Bool("has_postgres", hasPostgres),
 		)
 		if p.onUpdate != nil {
 			if err := p.onUpdate(SyncUpdate{
-				Rules:    resp.Rules,
-				Secrets:  resp.Secrets,
-				MCP:      resp.MCP,
-				Postgres: resp.Postgres,
+				Rules:      resp.Rules,
+				Secrets:    resp.Secrets,
+				Transforms: resp.Transforms,
+				MCP:        resp.MCP,
+				Postgres:   resp.Postgres,
 			}); err != nil {
 				p.logger.Error("applying config update", slog.String("error", err.Error()))
 			}

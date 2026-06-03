@@ -11,12 +11,20 @@ import (
 )
 
 // TransformsFromSync builds a []Transform from the control plane's sync
-// payload. Each payload field is a JSON array that gets wrapped to match the
-// corresponding transform's config shape: rules → {"rules": [...]} for the
-// allowlist transform, secrets → {"secrets": [...]} for the secrets transform.
-// Pipeline order is allowlist first, then secrets. Fields that are nil or JSON
-// null are skipped.
-func TransformsFromSync(rules, secrets json.RawMessage) ([]Transform, error) {
+// payload. The rules and secrets fields are JSON arrays that get wrapped to
+// match the corresponding transform's config shape: rules → {"rules": [...]}
+// for the allowlist transform, secrets → {"secrets": [...]} for the secrets
+// transform. The transforms field is the control plane's already-shaped
+// transform array — each element a {name, config} object bundling the
+// gcp_auth, hmac_sign, and oauth_token transforms granted to the proxy's
+// principal.
+//
+// Pipeline order is allowlist, then secrets, then the control-plane transforms
+// in delivered order. Secrets runs before the transforms so a body-mutating
+// secret swap lands before hmac_sign signs the body, matching the canonical
+// ordering in iron-proxy.example.yaml. Fields that are nil or JSON null are
+// skipped.
+func TransformsFromSync(rules, secrets, transformsRaw json.RawMessage) ([]Transform, error) {
 	var transforms []Transform
 
 	if isNonNullJSON(rules) {
@@ -41,7 +49,56 @@ func TransformsFromSync(rules, secrets json.RawMessage) ([]Transform, error) {
 		})
 	}
 
+	extra, err := transformsFromArray(transformsRaw)
+	if err != nil {
+		return nil, err
+	}
+	transforms = append(transforms, extra...)
+
 	return transforms, nil
+}
+
+// transformsFromArray parses the control plane's top-level transforms array
+// into Transform values. Each element is a {name, config} object whose shape
+// matches the YAML transforms list, so config is carried through verbatim as a
+// yaml.Node for the named transform's factory to decode. A nil or JSON-null
+// payload yields no transforms; null array elements are skipped.
+func transformsFromArray(raw json.RawMessage) ([]Transform, error) {
+	if !isNonNullJSON(raw) {
+		return nil, nil
+	}
+
+	var rawEntries []json.RawMessage
+	if err := json.Unmarshal(raw, &rawEntries); err != nil {
+		return nil, fmt.Errorf("parsing transforms: %w", err)
+	}
+
+	out := make([]Transform, 0, len(rawEntries))
+	for i, re := range rawEntries {
+		if !isNonNullJSON(re) {
+			continue
+		}
+		var e struct {
+			Name   string          `json:"name"`
+			Config json.RawMessage `json:"config"`
+		}
+		if err := json.Unmarshal(re, &e); err != nil {
+			return nil, fmt.Errorf("parsing transforms[%d]: %w", i, err)
+		}
+		if e.Name == "" {
+			return nil, fmt.Errorf("transforms[%d]: name is required", i)
+		}
+		var node yaml.Node
+		if isNonNullJSON(e.Config) {
+			n, err := yamlNodeFromRawJSON(e.Config)
+			if err != nil {
+				return nil, fmt.Errorf("transforms[%d] (%s): parsing config: %w", i, e.Name, err)
+			}
+			node = n
+		}
+		out = append(out, Transform{Name: e.Name, Config: node})
+	}
+	return out, nil
 }
 
 // MCPFromSync converts a JSON document for the top-level mcp: block into a

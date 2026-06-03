@@ -76,6 +76,38 @@ func TestPollerInitialSyncDeliversMCP(t *testing.T) {
 	require.False(t, isNonNullJSON(got.Secrets))
 }
 
+func TestPollerInitialSyncDeliversTransforms(t *testing.T) {
+	transformsRaw := `[{"name":"oauth_token","config":{"tokens":[]}}]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SyncResponse{
+			ConfigHash: "sha256:transforms",
+			Transforms: json.RawMessage(transformsRaw),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+
+	var got SyncUpdate
+	var called atomic.Int32
+	poller := NewPoller(client, "", func(u SyncUpdate) error {
+		called.Add(1)
+		got = u
+		return nil
+	}, testLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := poller.Run(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, called.Load(), int32(1))
+	require.JSONEq(t, transformsRaw, string(got.Transforms))
+	require.False(t, isNonNullJSON(got.Rules))
+	require.False(t, isNonNullJSON(got.Secrets))
+}
+
 func TestPollerNoUpdateOnNullRulesSecrets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

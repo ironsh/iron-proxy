@@ -84,38 +84,38 @@ func TestPostgresFromSync_InvalidJSON(t *testing.T) {
 func TestTransformsFromSync_RulesPresent(t *testing.T) {
 	rules := json.RawMessage(`[{"host":"example.com","methods":["GET"],"paths":["/api/*"]}]`)
 
-	transforms, err := TransformsFromSync(rules, nil)
+	transforms, err := TransformsFromSync(rules, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 	require.Equal(t, "allowlist", transforms[0].Name)
 }
 
 func TestTransformsFromSync_Nil(t *testing.T) {
-	transforms, err := TransformsFromSync(nil, nil)
+	transforms, err := TransformsFromSync(nil, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, transforms)
 }
 
 func TestTransformsFromSync_NullJSON(t *testing.T) {
-	transforms, err := TransformsFromSync(json.RawMessage("null"), json.RawMessage("null"))
+	transforms, err := TransformsFromSync(json.RawMessage("null"), json.RawMessage("null"), json.RawMessage("null"))
 	require.NoError(t, err)
 	require.Empty(t, transforms)
 }
 
 func TestTransformsFromSync_InvalidRules(t *testing.T) {
-	_, err := TransformsFromSync(json.RawMessage(`{bad json`), nil)
+	_, err := TransformsFromSync(json.RawMessage(`{bad json`), nil, nil)
 	require.ErrorContains(t, err, "parsing rules")
 }
 
 func TestTransformsFromSync_InvalidSecrets(t *testing.T) {
-	_, err := TransformsFromSync(nil, json.RawMessage(`{bad json`))
+	_, err := TransformsFromSync(nil, json.RawMessage(`{bad json`), nil)
 	require.ErrorContains(t, err, "parsing secrets")
 }
 
 func TestTransformsFromSync_RoundTrip(t *testing.T) {
 	rules := json.RawMessage(`[{"host":"*.example.com","methods":["GET","POST"],"paths":["/api/*"]},{"host":"api.test.io","methods":["*"],"paths":["*"]}]`)
 
-	transforms, err := TransformsFromSync(rules, nil)
+	transforms, err := TransformsFromSync(rules, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 
@@ -137,7 +137,7 @@ func TestTransformsFromSync_RoundTrip(t *testing.T) {
 func TestTransformsFromSync_EmptyRules(t *testing.T) {
 	rules := json.RawMessage(`[]`)
 
-	transforms, err := TransformsFromSync(rules, nil)
+	transforms, err := TransformsFromSync(rules, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 
@@ -153,7 +153,7 @@ func TestTransformsFromSync_EmptyRules(t *testing.T) {
 func TestTransformsFromSync_SecretsPresent(t *testing.T) {
 	secrets := json.RawMessage(`[{"source":{"type":"env","var":"OPENAI_API_KEY"},"inject":{"header":"Authorization","formatter":"Bearer {{ .Value }}"},"rules":[{"host":"api.openai.com"}]}]`)
 
-	transforms, err := TransformsFromSync(nil, secrets)
+	transforms, err := TransformsFromSync(nil, secrets, nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 	require.Equal(t, "secrets", transforms[0].Name)
@@ -186,7 +186,7 @@ func TestTransformsFromSync_RulesAndSecretsOrder(t *testing.T) {
 	rules := json.RawMessage(`[{"host":"example.com"}]`)
 	secrets := json.RawMessage(`[{"source":{"type":"env","var":"X"},"inject":{"header":"Authorization"},"rules":[{"host":"example.com"}]}]`)
 
-	transforms, err := TransformsFromSync(rules, secrets)
+	transforms, err := TransformsFromSync(rules, secrets, nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 2)
 	require.Equal(t, "allowlist", transforms[0].Name)
@@ -194,10 +194,110 @@ func TestTransformsFromSync_RulesAndSecretsOrder(t *testing.T) {
 }
 
 func TestTransformsFromSync_EmptySecrets(t *testing.T) {
-	transforms, err := TransformsFromSync(nil, json.RawMessage(`[]`))
+	transforms, err := TransformsFromSync(nil, json.RawMessage(`[]`), nil)
 	require.NoError(t, err)
 	require.Len(t, transforms, 1)
 	require.Equal(t, "secrets", transforms[0].Name)
+}
+
+func TestTransformsFromSync_OAuthTokenTransform(t *testing.T) {
+	// The control plane bundles every granted OAuth token secret into a single
+	// oauth_token transform delivered in the transforms array.
+	transformsRaw := json.RawMessage(`[
+		{
+			"name": "oauth_token",
+			"config": {
+				"tokens": [
+					{
+						"grant": "refresh_token",
+						"token_endpoint": "https://slack.com/api/oauth.v2.access",
+						"client_id": {"type": "env", "var": "SLACK_CLIENT_ID"},
+						"refresh_token": {"type": "control_plane", "value": "xoxe-1-..."},
+						"scopes": ["chat:write"],
+						"header": "Authorization",
+						"value_prefix": "Bearer",
+						"rules": [{"host": "slack.com", "methods": ["POST"], "paths": ["/api/*"]}]
+					}
+				]
+			}
+		}
+	]`)
+
+	transforms, err := TransformsFromSync(nil, nil, transformsRaw)
+	require.NoError(t, err)
+	require.Len(t, transforms, 1)
+	require.Equal(t, "oauth_token", transforms[0].Name)
+
+	var decoded struct {
+		Tokens []struct {
+			Grant         string `yaml:"grant"`
+			TokenEndpoint string `yaml:"token_endpoint"`
+			ClientID      struct {
+				Type string `yaml:"type"`
+				Var  string `yaml:"var"`
+			} `yaml:"client_id"`
+			Scopes []string `yaml:"scopes"`
+			Rules  []struct {
+				Host string `yaml:"host"`
+			} `yaml:"rules"`
+		} `yaml:"tokens"`
+	}
+	require.NoError(t, transforms[0].Config.Decode(&decoded))
+	require.Len(t, decoded.Tokens, 1)
+	require.Equal(t, "refresh_token", decoded.Tokens[0].Grant)
+	require.Equal(t, "https://slack.com/api/oauth.v2.access", decoded.Tokens[0].TokenEndpoint)
+	require.Equal(t, "env", decoded.Tokens[0].ClientID.Type)
+	require.Equal(t, "SLACK_CLIENT_ID", decoded.Tokens[0].ClientID.Var)
+	require.Equal(t, []string{"chat:write"}, decoded.Tokens[0].Scopes)
+	require.Equal(t, "slack.com", decoded.Tokens[0].Rules[0].Host)
+}
+
+func TestTransformsFromSync_TransformsAfterSecrets(t *testing.T) {
+	// allowlist, then secrets, then the control-plane transforms in delivered
+	// order — so a body-mutating secret swap runs before hmac_sign signs.
+	rules := json.RawMessage(`[{"host":"example.com"}]`)
+	secrets := json.RawMessage(`[{"source":{"type":"env","var":"X"},"inject":{"header":"Authorization"},"rules":[{"host":"example.com"}]}]`)
+	transformsRaw := json.RawMessage(`[
+		{"name":"hmac_sign","config":{"credentials":{"secret":{"type":"env","var":"K"}}}},
+		{"name":"oauth_token","config":{"tokens":[]}}
+	]`)
+
+	transforms, err := TransformsFromSync(rules, secrets, transformsRaw)
+	require.NoError(t, err)
+	require.Len(t, transforms, 4)
+	require.Equal(t, "allowlist", transforms[0].Name)
+	require.Equal(t, "secrets", transforms[1].Name)
+	require.Equal(t, "hmac_sign", transforms[2].Name)
+	require.Equal(t, "oauth_token", transforms[3].Name)
+}
+
+func TestTransformsFromSync_TransformsNilAndNull(t *testing.T) {
+	transforms, err := TransformsFromSync(nil, nil, nil)
+	require.NoError(t, err)
+	require.Empty(t, transforms)
+
+	transforms, err = TransformsFromSync(nil, nil, json.RawMessage("null"))
+	require.NoError(t, err)
+	require.Empty(t, transforms)
+}
+
+func TestTransformsFromSync_TransformsSkipsNullElements(t *testing.T) {
+	transformsRaw := json.RawMessage(`[null,{"name":"oauth_token","config":{"tokens":[]}},null]`)
+	transforms, err := TransformsFromSync(nil, nil, transformsRaw)
+	require.NoError(t, err)
+	require.Len(t, transforms, 1)
+	require.Equal(t, "oauth_token", transforms[0].Name)
+}
+
+func TestTransformsFromSync_TransformsMissingName(t *testing.T) {
+	transformsRaw := json.RawMessage(`[{"config":{"tokens":[]}}]`)
+	_, err := TransformsFromSync(nil, nil, transformsRaw)
+	require.ErrorContains(t, err, "name is required")
+}
+
+func TestTransformsFromSync_TransformsInvalidJSON(t *testing.T) {
+	_, err := TransformsFromSync(nil, nil, json.RawMessage(`{not an array`))
+	require.ErrorContains(t, err, "parsing transforms")
 }
 
 func TestMCPFromSync_Nil(t *testing.T) {

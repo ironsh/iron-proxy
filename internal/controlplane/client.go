@@ -12,9 +12,14 @@ import (
 
 // SyncResponse is the parsed response from the sync endpoint.
 type SyncResponse struct {
-	ConfigHash  string          `json:"config_hash"`
-	Rules       json.RawMessage `json:"rules"`
-	Secrets     json.RawMessage `json:"secrets"`
+	ConfigHash string          `json:"config_hash"`
+	Rules      json.RawMessage `json:"rules"`
+	Secrets    json.RawMessage `json:"secrets"`
+	// Transforms is the control plane's pre-shaped transform array, bundling
+	// the gcp_auth, hmac_sign, and oauth_token transforms granted to the
+	// proxy's principal. Unlike rules/secrets it is already in {name, config}
+	// form.
+	Transforms  json.RawMessage `json:"transforms"`
 	MCP         json.RawMessage `json:"mcp"`
 	Postgres    json.RawMessage `json:"postgres"`
 	IngestToken string          `json:"ingest_token"`
