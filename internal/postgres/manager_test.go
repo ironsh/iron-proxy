@@ -21,14 +21,14 @@ func (s staticDSN) Get(context.Context) (string, error) { return s.value, nil }
 
 func testListener(listen string) *Listener {
 	return &Listener{
-		name:   listenerName,
-		listen: listen,
+		name:           listenerName,
+		listen:         listen,
+		clientUser:     "u",
+		clientPassword: "p",
 		upstreams: map[string]*Upstream{
 			"appdb": {
-				database:       "appdb",
-				dsn:            staticDSN{name: "test", value: "host=127.0.0.1"},
-				clientUser:     "u",
-				clientPassword: "p",
+				database: "appdb",
+				dsn:      staticDSN{name: "test", value: "host=127.0.0.1"},
 			},
 		},
 	}

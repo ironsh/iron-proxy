@@ -482,22 +482,27 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 	}
 }
 
-// pgListenEnv is the environment variable carrying the bind address for the
-// postgres listener in managed mode, used when the local YAML config does not
-// supply a listen address of its own.
-const pgListenEnv = "IRON_PROXY_PG_LISTEN"
+// Environment variables that configure the managed postgres listener when the
+// proxy has no local YAML postgres block to source these from. They configure
+// the single listener, not individual upstreams.
+const (
+	pgListenEnv         = "IRON_PROXY_PG_LISTEN"
+	pgClientUserEnv     = "IRON_PROXY_PG_CLIENT_USER"
+	pgClientPasswordEnv = "IRON_PROXY_PG_CLIENT_PASSWORD"
+)
 
-// postgresListenerFromSync builds the single postgres listener for managed mode:
-// the local YAML upstreams (if any) plus control-plane-synced upstreams layered
-// on from the sync payload. The bind address is the local listener's address
-// when the YAML config supplies one, otherwise IRON_PROXY_PG_LISTEN. Each synced
-// entry becomes an upstream keyed by its database, carrying the database, DSN,
-// client credentials, and role the control plane delivered — managed mode needs
-// no per-upstream proxy configuration. A synced upstream whose database collides
-// with a local upstream or another synced upstream is dropped (logged). When no
-// bind address is available or no upstreams resolve, no listener is returned.
-// Returns ok=false only when the sync payload itself is invalid, signaling the
-// caller to keep the current listener.
+// postgresListenerFromSync builds the single postgres listener for managed mode.
+// Each synced entry becomes an upstream keyed by its database, carrying the
+// database, DSN, and role the control plane delivered.
+//
+// When a local YAML postgres block is present, the synced upstreams are layered
+// onto it, reusing its bind address and client credential; a synced upstream
+// whose database collides with a local one is dropped (logged). Otherwise the
+// listener is built from the environment: IRON_PROXY_PG_LISTEN plus the shared
+// IRON_PROXY_PG_CLIENT_USER / IRON_PROXY_PG_CLIENT_PASSWORD. When no bind address
+// or client credential is available, or no upstreams resolve, no listener is
+// returned. Returns ok=false only when the sync payload itself is invalid,
+// signaling the caller to keep the current listener.
 func postgresListenerFromSync(local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) (*postgres.Listener, bool) {
 	entries, err := config.PostgresFromSync(raw, logger)
 	if err != nil {
@@ -505,42 +510,10 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 		return nil, false
 	}
 
-	// Start from the local upstreams; synced upstreams are layered on, and local
-	// wins on a database collision.
-	seenDatabases := make(map[string]bool)
-	upstreams := make([]*postgres.Upstream, 0, len(entries))
-	listen := ""
-	if local != nil {
-		listen = local.Listen()
-		for _, u := range local.Upstreams() {
-			seenDatabases[u.Database()] = true
-			upstreams = append(upstreams, u)
-		}
-	}
-	if listen == "" {
-		listen = getenv(pgListenEnv)
-	}
-
-	// listen is empty only when there is no local listener (a compiled local
-	// listener always carries a bind address) and IRON_PROXY_PG_LISTEN is unset.
-	// Without an address there is nothing to bind, so drop the synced upstreams.
-	if listen == "" {
-		if len(entries) > 0 {
-			logger.Info("skipping control-plane postgres upstreams: no listen address (set IRON_PROXY_PG_LISTEN)",
-				slog.Int("upstream_count", len(entries)))
-		}
-		return nil, true
-	}
-
+	synced := make([]*postgres.Upstream, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if seenDatabases[e.Database] {
-			logger.Warn("skipping synced postgres upstream: duplicate database",
-				slog.String("foreign_id", e.ForeignID),
-				slog.String("database", e.Database),
-			)
-			continue
-		}
-		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.ClientUser, e.ClientPassword, e.Role)
+		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.Role)
 		if err != nil {
 			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),
@@ -548,15 +521,46 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 			)
 			continue
 		}
-		seenDatabases[e.Database] = true
-		upstreams = append(upstreams, u)
+		if seen[u.Database()] {
+			logger.Warn("skipping synced postgres upstream: duplicate database",
+				slog.String("foreign_id", e.ForeignID),
+				slog.String("database", u.Database()),
+			)
+			continue
+		}
+		seen[u.Database()] = true
+		synced = append(synced, u)
 	}
 
-	if len(upstreams) == 0 {
+	// With a local listener, layer the synced upstreams on top, reusing its
+	// address and client credential. Local wins on a database collision.
+	if local != nil {
+		merged, dropped := local.WithUpstreams(synced)
+		for _, db := range dropped {
+			logger.Warn("skipping synced postgres upstream: duplicate database",
+				slog.String("database", db))
+		}
+		return merged, true
+	}
+
+	// No local listener: source the listener knobs from the environment.
+	if len(synced) == 0 {
+		return nil, true
+	}
+	listen := getenv(pgListenEnv)
+	clientUser := getenv(pgClientUserEnv)
+	clientPassword := getenv(pgClientPasswordEnv)
+	if listen == "" || clientUser == "" || clientPassword == "" {
+		logger.Info("skipping control-plane postgres upstreams: listener env not fully set",
+			slog.Bool("has_listen", listen != ""),
+			slog.Bool("has_client_user", clientUser != ""),
+			slog.Bool("has_client_password", clientPassword != ""),
+			slog.Int("upstream_count", len(synced)),
+		)
 		return nil, true
 	}
 
-	listener, err := postgres.NewListener(listen, upstreams)
+	listener, err := postgres.NewListener(listen, clientUser, clientPassword, synced)
 	if err != nil {
 		logger.Error("skipping postgres listener: invalid listener", slog.String("error", err.Error()))
 		return nil, true

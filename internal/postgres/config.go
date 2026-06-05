@@ -49,11 +49,17 @@ type SourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 // logs. The proxy runs at most one listener, so the name is not configurable.
 const listenerName = "postgres"
 
-// ListenerConfig is the top-level postgres: block — a single bind address
-// fronting a set of database-keyed upstreams.
+// ListenerConfig is the top-level postgres: block — a single bind address and
+// one shared client credential fronting a set of database-keyed upstreams.
 type ListenerConfig struct {
 	// Listen is the proxy's bind address for client connections, e.g. ":5432".
 	Listen string `yaml:"listen"`
+
+	// Client describes the single credential clients present to the proxy. It is
+	// shared across every upstream on the listener: routing is by database, so
+	// per-database credentials add nothing. The proxy verifies one user/password
+	// pair; per-user credentials are not supported.
+	Client ClientConfig `yaml:"client"`
 
 	// Upstreams is the set of upstream databases this listener fronts. An
 	// upstream is selected by the database name the client sends in its startup
@@ -80,11 +86,6 @@ type UpstreamConfig struct {
 	// accepted.
 	DSN yaml.Node `yaml:"dsn"`
 
-	// Client describes the credentials clients must present to use this
-	// upstream. The proxy verifies a single shared user/password pair per
-	// upstream — per-user credentials are not supported.
-	Client ClientConfig `yaml:"client"`
-
 	// Role is the Postgres role the proxy SETs at session start for this
 	// upstream. When set, every query the client subsequently issues runs as
 	// this role on the upstream database. Optional: when empty, the proxy issues
@@ -99,10 +100,15 @@ type ClientConfig struct {
 }
 
 // Listener is the compiled, runtime form of a single ListenerConfig: a bind
-// address and the database-keyed upstreams reachable through it.
+// address, the shared client credential, and the database-keyed upstreams
+// reachable through it.
 type Listener struct {
-	name      string
-	listen    string
+	name   string
+	listen string
+
+	clientUser     string
+	clientPassword string
+
 	upstreams map[string]*Upstream
 }
 
@@ -125,16 +131,47 @@ func (l *Listener) Upstreams() []*Upstream {
 	return out
 }
 
+// ClientUser returns the user clients must present to the listener.
+func (l *Listener) ClientUser() string { return l.clientUser }
+
+// VerifyClient returns whether the given (user, password) pair matches the
+// listener's shared client credential.
+func (l *Listener) VerifyClient(user, password string) bool {
+	return user == l.clientUser && password == l.clientPassword
+}
+
+// WithUpstreams returns a copy of the listener with extra upstreams added,
+// keeping the listener's address and client credential. An extra upstream whose
+// database already exists is skipped (the existing one wins); its database is
+// returned in dropped so the caller can log it.
+func (l *Listener) WithUpstreams(extra []*Upstream) (listener *Listener, dropped []string) {
+	m := make(map[string]*Upstream, len(l.upstreams)+len(extra))
+	for db, u := range l.upstreams {
+		m[db] = u
+	}
+	for _, u := range extra {
+		if _, ok := m[u.database]; ok {
+			dropped = append(dropped, u.database)
+			continue
+		}
+		m[u.database] = u
+	}
+	return &Listener{
+		name:           l.name,
+		listen:         l.listen,
+		clientUser:     l.clientUser,
+		clientPassword: l.clientPassword,
+		upstreams:      m,
+	}, dropped
+}
+
 // Upstream is the compiled, runtime form of a single UpstreamConfig: one
-// upstream database with its own credentials and optional injected role.
+// upstream database with its DSN and optional injected role.
 type Upstream struct {
 	database string
 	role     string
 
 	dsn secrets.Source
-
-	clientUser     string
-	clientPassword string
 }
 
 // Database returns the upstream's routing key — the database name a client
@@ -151,15 +188,6 @@ func (u *Upstream) Role() string { return u.role }
 func (u *Upstream) DSN(ctx context.Context) (string, error) {
 	return u.dsn.Get(ctx)
 }
-
-// VerifyClient returns whether the given (user, password) pair matches the
-// upstream's configured client credentials.
-func (u *Upstream) VerifyClient(user, password string) bool {
-	return user == u.clientUser && password == u.clientPassword
-}
-
-// ClientUser returns the user clients must present to use this upstream.
-func (u *Upstream) ClientUser() string { return u.clientUser }
 
 // LoadFromNode decodes the raw postgres: yaml.Node into a ListenerConfig and
 // compiles it into a Listener. An empty node (the postgres: key absent from the
@@ -181,14 +209,25 @@ func LoadFromNode(node yaml.Node, logger *slog.Logger) (*Listener, error) {
 // (nil, nil) when the block is empty (no listen and no upstreams) so callers can
 // treat "not configured" as a no-op without a sentinel error.
 func Compile(c ListenerConfig, logger *slog.Logger, buildSource SourceBuilder) (*Listener, error) {
-	if c.Listen == "" && len(c.Upstreams) == 0 {
+	if c.Listen == "" && len(c.Upstreams) == 0 && c.Client.User == "" && c.Client.PasswordEnv == "" {
 		return nil, nil
 	}
 	if c.Listen == "" {
 		return nil, fmt.Errorf("postgres: listen is required")
 	}
+	if c.Client.User == "" {
+		return nil, fmt.Errorf("postgres: client.user is required")
+	}
+	if c.Client.PasswordEnv == "" {
+		return nil, fmt.Errorf("postgres: client.password_env is required")
+	}
 	if len(c.Upstreams) == 0 {
 		return nil, fmt.Errorf("postgres: at least one upstream is required")
+	}
+
+	clientPassword := os.Getenv(c.Client.PasswordEnv)
+	if clientPassword == "" {
+		return nil, fmt.Errorf("postgres: client.password_env %q is not set in the environment", c.Client.PasswordEnv)
 	}
 
 	upstreams := make(map[string]*Upstream, len(c.Upstreams))
@@ -204,12 +243,6 @@ func Compile(c ListenerConfig, logger *slog.Logger, buildSource SourceBuilder) (
 		if uc.DSN.Kind == 0 {
 			return nil, fmt.Errorf("%s: dsn is required", uctx)
 		}
-		if uc.Client.User == "" {
-			return nil, fmt.Errorf("%s: client.user is required", uctx)
-		}
-		if uc.Client.PasswordEnv == "" {
-			return nil, fmt.Errorf("%s: client.password_env is required", uctx)
-		}
 		if _, ok := upstreams[uc.Database]; ok {
 			return nil, fmt.Errorf("postgres: duplicate upstream database %q", uc.Database)
 		}
@@ -219,35 +252,37 @@ func Compile(c ListenerConfig, logger *slog.Logger, buildSource SourceBuilder) (
 			return nil, fmt.Errorf("%s: building dsn source: %w", uctx, err)
 		}
 
-		clientPassword := os.Getenv(uc.Client.PasswordEnv)
-		if clientPassword == "" {
-			return nil, fmt.Errorf("%s: client.password_env %q is not set in the environment", uctx, uc.Client.PasswordEnv)
-		}
-
 		upstreams[uc.Database] = &Upstream{
-			database:       uc.Database,
-			role:           uc.Role,
-			dsn:            dsnSource,
-			clientUser:     uc.Client.User,
-			clientPassword: clientPassword,
+			database: uc.Database,
+			role:     uc.Role,
+			dsn:      dsnSource,
 		}
 	}
 
 	return &Listener{
-		name:      listenerName,
-		listen:    c.Listen,
-		upstreams: upstreams,
+		name:           listenerName,
+		listen:         c.Listen,
+		clientUser:     c.Client.User,
+		clientPassword: clientPassword,
+		upstreams:      upstreams,
 	}, nil
 }
 
-// NewListener builds the postgres listener from a bind address and a set of
-// upstreams. It is the construction path for control-plane-synced listeners,
-// whose upstreams are built one at a time via NewManagedUpstream. The listen
-// address is required, and at least one upstream must be supplied; an upstream
-// whose Database collides with an earlier one is an error.
-func NewListener(listen string, upstreams []*Upstream) (*Listener, error) {
+// NewListener builds the postgres listener from a bind address, the shared
+// client credential, and a set of upstreams. It is the construction path for
+// control-plane-synced listeners, whose upstreams are built one at a time via
+// NewManagedUpstream. The listen address and client credential are required,
+// and at least one upstream must be supplied; an upstream whose Database
+// collides with an earlier one is an error.
+func NewListener(listen, clientUser, clientPassword string, upstreams []*Upstream) (*Listener, error) {
 	if listen == "" {
 		return nil, fmt.Errorf("postgres: listen is required")
+	}
+	if clientUser == "" {
+		return nil, fmt.Errorf("postgres: client user is required")
+	}
+	if clientPassword == "" {
+		return nil, fmt.Errorf("postgres: client password is required")
 	}
 	if len(upstreams) == 0 {
 		return nil, fmt.Errorf("postgres: at least one upstream is required")
@@ -259,35 +294,29 @@ func NewListener(listen string, upstreams []*Upstream) (*Listener, error) {
 		}
 		m[u.database] = u
 	}
-	return &Listener{name: listenerName, listen: listen, upstreams: m}, nil
+	return &Listener{
+		name:           listenerName,
+		listen:         listen,
+		clientUser:     clientUser,
+		clientPassword: clientPassword,
+		upstreams:      m,
+	}, nil
 }
 
 // NewManagedUpstream builds an Upstream for a control-plane-synced listener. The
-// DSN source and optional role come from the control plane; the client
-// credentials come from the proxy's environment. Unlike the YAML path,
-// clientPassword is the literal password value, not the name of an env var —
-// managed mode has no second level of indirection. All fields except role are
-// required.
-func NewManagedUpstream(database string, dsn secrets.Source, clientUser, clientPassword, role string) (*Upstream, error) {
+// DSN source and optional role come from the control plane. Database is the
+// routing key and is required; role is optional.
+func NewManagedUpstream(database string, dsn secrets.Source, role string) (*Upstream, error) {
 	if database == "" {
 		return nil, fmt.Errorf("postgres: managed upstream database is required")
 	}
-	ctx := fmt.Sprintf("postgres upstream[%q]", database)
 	if dsn == nil {
-		return nil, fmt.Errorf("%s: dsn source is required", ctx)
-	}
-	if clientUser == "" {
-		return nil, fmt.Errorf("%s: client user is required", ctx)
-	}
-	if clientPassword == "" {
-		return nil, fmt.Errorf("%s: client password is required", ctx)
+		return nil, fmt.Errorf("postgres upstream[%q]: dsn source is required", database)
 	}
 	return &Upstream{
-		database:       database,
-		role:           role,
-		dsn:            dsn,
-		clientUser:     clientUser,
-		clientPassword: clientPassword,
+		database: database,
+		role:     role,
+		dsn:      dsn,
 	}, nil
 }
 

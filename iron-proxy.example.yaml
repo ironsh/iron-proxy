@@ -662,6 +662,12 @@ transforms:
 # rejects the connection.
 # postgres:
 #   listen: ":5432"
+#   # The single credential clients present to the proxy, shared across every
+#   # upstream below. Routing is by database, so per-database credentials add
+#   # nothing.
+#   client:
+#     user: app_user
+#     password_env: PG_PROXY_PASSWORD
 #   upstreams:
 #     # Clients connect with dbname=appdb to reach this upstream.
 #     - database: appdb
@@ -670,10 +676,6 @@ transforms:
 #       dsn:
 #         type: env
 #         var: PG_APPDB_DSN
-#       client:
-#         # The user/password clients must present for this upstream.
-#         user: app_user
-#         password_env: PG_APPDB_PROXY_PASSWORD
 #       # The Postgres role the proxy SETs at session start. Every query the
 #       # client issues runs as this role on the upstream database.
 #       role: tenant_role
@@ -682,9 +684,6 @@ transforms:
 #       dsn:
 #         type: env
 #         var: PG_ANALYTICS_DSN
-#       client:
-#         user: analytics_user
-#         password_env: PG_ANALYTICS_PROXY_PASSWORD
 #       role: analytics_role
 
 # Optional management API. When `listen` is empty (default), the management

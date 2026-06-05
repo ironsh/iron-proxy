@@ -13,6 +13,9 @@ tls:
 
 postgres:
   listen: "127.0.0.1:0"
+  client:
+    user: app_user
+    password_env: PG_PROXY_PASSWORD
   upstreams:
     # Two upstreams routing to two distinct databases, each injecting its own
     # role. Each upstream's database must match the database its DSN connects to.
@@ -20,18 +23,12 @@ postgres:
       dsn:
         type: env
         var: PG_UPSTREAM_DSN
-      client:
-        user: app_user
-        password_env: PG_PROXY_PASSWORD
       role: tenant_role
 
     - database: otherdb
       dsn:
         type: env
         var: PG_OTHER_DSN
-      client:
-        user: app_user
-        password_env: PG_PROXY_PASSWORD
       role: other_role
 
     # Deliberately misconfigured: the routing database "mismatch" does not match
@@ -41,9 +38,6 @@ postgres:
       dsn:
         type: env
         var: PG_UPSTREAM_DSN
-      client:
-        user: app_user
-        password_env: PG_PROXY_PASSWORD
       role: tenant_role
 
 metrics:

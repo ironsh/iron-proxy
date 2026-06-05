@@ -66,52 +66,72 @@ func TestClassifyClientStatement(t *testing.T) {
 func TestNewManagedUpstream(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 
-	u, err := NewManagedUpstream("analytics", dsn, "app", "pw", "readonly")
+	u, err := NewManagedUpstream("analytics", dsn, "readonly")
 	require.NoError(t, err)
 	require.Equal(t, "analytics", u.Database())
 	require.Equal(t, "readonly", u.Role())
-	require.True(t, u.VerifyClient("app", "pw"))
-	require.False(t, u.VerifyClient("app", "wrong"))
 
 	// Absent role is allowed (no SET ROLE issued).
-	u, err = NewManagedUpstream("main", dsn, "app", "pw", "")
+	u, err = NewManagedUpstream("main", dsn, "")
 	require.NoError(t, err)
 	require.Empty(t, u.Role())
 
 	// Required fields.
-	_, err = NewManagedUpstream("", dsn, "app", "pw", "")
+	_, err = NewManagedUpstream("", dsn, "")
 	require.ErrorContains(t, err, "database is required")
-	_, err = NewManagedUpstream("d", nil, "app", "pw", "")
+	_, err = NewManagedUpstream("d", nil, "")
 	require.ErrorContains(t, err, "dsn source is required")
-	_, err = NewManagedUpstream("d", dsn, "", "pw", "")
-	require.ErrorContains(t, err, "client user is required")
-	_, err = NewManagedUpstream("d", dsn, "app", "", "")
-	require.ErrorContains(t, err, "client password is required")
 }
 
 func TestNewListener(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 	mustUpstream := func(database string) *Upstream {
-		u, err := NewManagedUpstream(database, dsn, "app", "pw", "")
+		u, err := NewManagedUpstream(database, dsn, "")
 		require.NoError(t, err)
 		return u
 	}
 
-	l, err := NewListener("127.0.0.1:0", []*Upstream{mustUpstream("a"), mustUpstream("b")})
+	l, err := NewListener("127.0.0.1:0", "app", "pw", []*Upstream{mustUpstream("a"), mustUpstream("b")})
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:0", l.Listen())
 	require.Equal(t, "a", l.Upstream("a").Database())
 	require.Equal(t, "b", l.Upstream("b").Database())
 	require.Nil(t, l.Upstream("missing"))
 	require.Len(t, l.Upstreams(), 2)
+	// The client credential is on the listener, shared across upstreams.
+	require.True(t, l.VerifyClient("app", "pw"))
 
 	// Required fields and duplicate-database guard.
-	_, err = NewListener("", []*Upstream{mustUpstream("a")})
+	_, err = NewListener("", "app", "pw", []*Upstream{mustUpstream("a")})
 	require.ErrorContains(t, err, "listen is required")
-	_, err = NewListener("127.0.0.1:0", nil)
+	_, err = NewListener("127.0.0.1:0", "", "pw", []*Upstream{mustUpstream("a")})
+	require.ErrorContains(t, err, "client user is required")
+	_, err = NewListener("127.0.0.1:0", "app", "", []*Upstream{mustUpstream("a")})
+	require.ErrorContains(t, err, "client password is required")
+	_, err = NewListener("127.0.0.1:0", "app", "pw", nil)
 	require.ErrorContains(t, err, "at least one upstream is required")
-	_, err = NewListener("127.0.0.1:0", []*Upstream{mustUpstream("a"), mustUpstream("a")})
+	_, err = NewListener("127.0.0.1:0", "app", "pw", []*Upstream{mustUpstream("a"), mustUpstream("a")})
 	require.ErrorContains(t, err, `duplicate upstream database "a"`)
+}
+
+func TestListenerWithUpstreams(t *testing.T) {
+	dsn := staticDSN{name: "dsn", value: "host=db"}
+	mustUpstream := func(database string) *Upstream {
+		u, err := NewManagedUpstream(database, dsn, "")
+		require.NoError(t, err)
+		return u
+	}
+
+	base, err := NewListener("127.0.0.1:0", "app", "pw", []*Upstream{mustUpstream("a")})
+	require.NoError(t, err)
+
+	merged, dropped := base.WithUpstreams([]*Upstream{mustUpstream("b"), mustUpstream("a")})
+	require.Equal(t, []string{"a"}, dropped, "existing database wins")
+	require.Len(t, merged.Upstreams(), 2)
+	require.NotNil(t, merged.Upstream("a"))
+	require.NotNil(t, merged.Upstream("b"))
+	require.Equal(t, "127.0.0.1:0", merged.Listen())
+	require.True(t, merged.VerifyClient("app", "pw"), "client credential is carried over")
 }
 
 func TestQuoteIdent(t *testing.T) {

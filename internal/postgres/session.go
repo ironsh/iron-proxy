@@ -58,7 +58,7 @@ func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, lo
 		return
 	}
 
-	if err := authenticateClient(backend, startup, upstream); err != nil {
+	if err := authenticateClient(backend, startup, listener); err != nil {
 		logger.Info("postgres: client auth failed",
 			slog.String("error", err.Error()),
 			slog.String("remote", clientConn.RemoteAddr().String()),

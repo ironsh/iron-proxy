@@ -29,8 +29,8 @@ func TestPostgresFromSync_ParsesEntries(t *testing.T) {
 	t.Setenv("PG_MAIN_DSN", "host=main")
 
 	raw := json.RawMessage(`[
-		{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"client_user":"app","client_password":"s3cret","role":"readonly"},
-		{"id":"pgs_2","foreign_id":"pg-main","database":"maindb","dsn":{"type":"env","var":"PG_MAIN_DSN"},"client_user":"app2","client_password":"pw2"}
+		{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"role":"readonly"},
+		{"id":"pgs_2","foreign_id":"pg-main","database":"maindb","dsn":{"type":"env","var":"PG_MAIN_DSN"}}
 	]`)
 
 	entries, err := PostgresFromSync(raw, syncTestLogger())
@@ -39,8 +39,6 @@ func TestPostgresFromSync_ParsesEntries(t *testing.T) {
 
 	require.Equal(t, "pg-analytics", entries[0].ForeignID)
 	require.Equal(t, "analytics", entries[0].Database)
-	require.Equal(t, "app", entries[0].ClientUser)
-	require.Equal(t, "s3cret", entries[0].ClientPassword)
 	require.Equal(t, "readonly", entries[0].Role)
 	require.NotNil(t, entries[0].DSN)
 	got, err := entries[0].DSN.Get(context.Background())
@@ -49,14 +47,12 @@ func TestPostgresFromSync_ParsesEntries(t *testing.T) {
 
 	require.Equal(t, "pg-main", entries[1].ForeignID)
 	require.Equal(t, "maindb", entries[1].Database)
-	require.Equal(t, "app2", entries[1].ClientUser)
-	require.Equal(t, "pw2", entries[1].ClientPassword)
 	require.Empty(t, entries[1].Role)
 }
 
 func TestPostgresFromSync_DatabaseDistinctFromForeignID(t *testing.T) {
 	t.Setenv("PG_DSN", "host=x")
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
 
 	entries, err := PostgresFromSync(raw, syncTestLogger())
 	require.NoError(t, err)
@@ -66,26 +62,14 @@ func TestPostgresFromSync_DatabaseDistinctFromForeignID(t *testing.T) {
 }
 
 func TestPostgresFromSync_MissingDatabase(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","dsn":{"type":"env","var":"PG_DSN"}}]`)
 	_, err := PostgresFromSync(raw, syncTestLogger())
 	require.ErrorContains(t, err, "database is required")
 }
 
-func TestPostgresFromSync_MissingClientUser(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"env","var":"PG_DSN"},"client_password":"pw"}]`)
-	_, err := PostgresFromSync(raw, syncTestLogger())
-	require.ErrorContains(t, err, "client_user is required")
-}
-
-func TestPostgresFromSync_MissingClientPassword(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app"}]`)
-	_, err := PostgresFromSync(raw, syncTestLogger())
-	require.ErrorContains(t, err, "client_password is required")
-}
-
 func TestPostgresFromSync_SkipsNullElements(t *testing.T) {
 	t.Setenv("PG_DSN", "host=x")
-	raw := json.RawMessage(`[null,{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"},null]`)
+	raw := json.RawMessage(`[null,{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"env","var":"PG_DSN"}},null]`)
 
 	entries, err := PostgresFromSync(raw, syncTestLogger())
 	require.NoError(t, err)
@@ -106,7 +90,7 @@ func TestPostgresFromSync_MissingDSN(t *testing.T) {
 }
 
 func TestPostgresFromSync_UnknownSourceType(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"bogus"},"client_user":"app","client_password":"pw"}]`)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-x","database":"xdb","dsn":{"type":"bogus"}}]`)
 	_, err := PostgresFromSync(raw, syncTestLogger())
 	require.ErrorContains(t, err, "building dsn source")
 }
