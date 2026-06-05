@@ -11,8 +11,8 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
-// dsnNode builds a non-zero yaml.Node so the upstream.dsn presence check
-// (Kind != 0) passes. The stub buildSource ignores its contents.
+// dsnNode builds a non-zero yaml.Node so the dsn presence check (Kind != 0)
+// passes. The stub buildSource ignores its contents.
 func dsnNode(t *testing.T) yaml.Node {
 	t.Helper()
 	var n yaml.Node
@@ -32,27 +32,27 @@ func TestCompile(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	t.Setenv("PG_PW", "secret")
 
-	route := func(database string) RouteConfig {
-		return RouteConfig{
+	upstream := func(database string) UpstreamConfig {
+		return UpstreamConfig{
 			Database: database,
-			Upstream: UpstreamConfig{DSN: dsnNode(t)},
+			DSN:      dsnNode(t),
 			Client:   ClientConfig{User: "u", PasswordEnv: "PG_PW"},
 			Role:     "r",
 		}
 	}
 
-	t.Run("valid single listener many routes", func(t *testing.T) {
+	t.Run("valid single listener many upstreams", func(t *testing.T) {
 		l, err := Compile(ListenerConfig{
-			Listen: "127.0.0.1:0",
-			Routes: []RouteConfig{route("analytics"), route("reporting")},
+			Listen:    "127.0.0.1:0",
+			Upstreams: []UpstreamConfig{upstream("analytics"), upstream("reporting")},
 		}, logger, stubSource)
 		require.NoError(t, err)
 		require.NotNil(t, l)
 		require.Equal(t, "127.0.0.1:0", l.Listen())
-		require.Equal(t, "analytics", l.Route("analytics").Database())
-		require.Equal(t, "reporting", l.Route("reporting").Database())
-		require.Nil(t, l.Route("missing"))
-		require.True(t, l.Route("analytics").VerifyClient("u", "secret"))
+		require.Equal(t, "analytics", l.Upstream("analytics").Database())
+		require.Equal(t, "reporting", l.Upstream("reporting").Database())
+		require.Nil(t, l.Upstream("missing"))
+		require.True(t, l.Upstream("analytics").VerifyClient("u", "secret"))
 	})
 
 	t.Run("empty block is a no-op", func(t *testing.T) {
@@ -62,54 +62,54 @@ func TestCompile(t *testing.T) {
 	})
 
 	t.Run("listen is required", func(t *testing.T) {
-		_, err := Compile(ListenerConfig{Routes: []RouteConfig{route("a")}}, logger, stubSource)
+		_, err := Compile(ListenerConfig{Upstreams: []UpstreamConfig{upstream("a")}}, logger, stubSource)
 		require.ErrorContains(t, err, "listen is required")
 	})
 
-	t.Run("at least one route is required", func(t *testing.T) {
+	t.Run("at least one upstream is required", func(t *testing.T) {
 		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0"}, logger, stubSource)
-		require.ErrorContains(t, err, "at least one route is required")
+		require.ErrorContains(t, err, "at least one upstream is required")
 	})
 
-	t.Run("duplicate route database rejected", func(t *testing.T) {
+	t.Run("duplicate upstream database rejected", func(t *testing.T) {
 		_, err := Compile(ListenerConfig{
-			Listen: "127.0.0.1:0",
-			Routes: []RouteConfig{route("dup"), route("dup")},
+			Listen:    "127.0.0.1:0",
+			Upstreams: []UpstreamConfig{upstream("dup"), upstream("dup")},
 		}, logger, stubSource)
-		require.ErrorContains(t, err, `duplicate route database "dup"`)
+		require.ErrorContains(t, err, `duplicate upstream database "dup"`)
 	})
 
-	t.Run("route database is required", func(t *testing.T) {
+	t.Run("upstream database is required", func(t *testing.T) {
 		_, err := Compile(ListenerConfig{
-			Listen: "127.0.0.1:0",
-			Routes: []RouteConfig{route("")},
+			Listen:    "127.0.0.1:0",
+			Upstreams: []UpstreamConfig{upstream("")},
 		}, logger, stubSource)
 		require.ErrorContains(t, err, "database is required")
 	})
 
-	t.Run("route upstream dsn is required", func(t *testing.T) {
-		r := route("a")
-		r.Upstream.DSN = yaml.Node{}
-		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Routes: []RouteConfig{r}}, logger, stubSource)
-		require.ErrorContains(t, err, "upstream.dsn is required")
+	t.Run("upstream dsn is required", func(t *testing.T) {
+		u := upstream("a")
+		u.DSN = yaml.Node{}
+		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Upstreams: []UpstreamConfig{u}}, logger, stubSource)
+		require.ErrorContains(t, err, "dsn is required")
 	})
 
-	t.Run("route client fields required", func(t *testing.T) {
-		r := route("a")
-		r.Client.User = ""
-		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Routes: []RouteConfig{r}}, logger, stubSource)
+	t.Run("upstream client fields required", func(t *testing.T) {
+		u := upstream("a")
+		u.Client.User = ""
+		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Upstreams: []UpstreamConfig{u}}, logger, stubSource)
 		require.ErrorContains(t, err, "client.user is required")
 
-		r = route("a")
-		r.Client.PasswordEnv = ""
-		_, err = Compile(ListenerConfig{Listen: "127.0.0.1:0", Routes: []RouteConfig{r}}, logger, stubSource)
+		u = upstream("a")
+		u.Client.PasswordEnv = ""
+		_, err = Compile(ListenerConfig{Listen: "127.0.0.1:0", Upstreams: []UpstreamConfig{u}}, logger, stubSource)
 		require.ErrorContains(t, err, "client.password_env is required")
 	})
 
 	t.Run("unset password env rejected", func(t *testing.T) {
-		r := route("a")
-		r.Client.PasswordEnv = "PG_PW_UNSET"
-		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Routes: []RouteConfig{r}}, logger, stubSource)
+		u := upstream("a")
+		u.Client.PasswordEnv = "PG_PW_UNSET"
+		_, err := Compile(ListenerConfig{Listen: "127.0.0.1:0", Upstreams: []UpstreamConfig{u}}, logger, stubSource)
 		require.ErrorContains(t, err, "is not set in the environment")
 	})
 }

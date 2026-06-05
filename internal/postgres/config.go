@@ -22,13 +22,12 @@
 // a batch is rejected if any statement mutates the role or is a DO block.
 // Extended Query, COPY, and prepared statements pass through unchanged.
 //
-// A single listener fronts multiple upstream databases: the top-level
-// postgres: key is a list of listeners, and each listener holds a list of
-// routes. A route is selected by the database name the client supplies in its
-// startup message; each route has its own upstream DSN, client credentials,
-// and optional injected role. One listen address therefore serves many
-// databases. The proxy runs a single postgres listener: the top-level
-// postgres: block is one object with a listen address and a list of routes.
+// The proxy runs a single postgres listener fronting multiple upstream
+// databases: the top-level postgres: block is one object with a listen address
+// and a list of upstreams. An upstream is selected by the database name the
+// client supplies in its startup message; each upstream has its own DSN, client
+// credentials, and optional injected role. One listen address therefore serves
+// many databases.
 package postgres
 
 import (
@@ -51,49 +50,43 @@ type SourceBuilder func(yaml.Node, *slog.Logger) (secrets.Source, error)
 const listenerName = "postgres"
 
 // ListenerConfig is the top-level postgres: block — a single bind address
-// fronting a set of database-keyed routes.
+// fronting a set of database-keyed upstreams.
 type ListenerConfig struct {
 	// Listen is the proxy's bind address for client connections, e.g. ":5432".
 	Listen string `yaml:"listen"`
 
-	// Routes is the set of upstream databases this listener fronts. A route is
-	// selected by the database name the client sends in its startup message.
-	// At least one route is required.
-	Routes []RouteConfig `yaml:"routes"`
+	// Upstreams is the set of upstream databases this listener fronts. An
+	// upstream is selected by the database name the client sends in its startup
+	// message. At least one upstream is required.
+	Upstreams []UpstreamConfig `yaml:"upstreams"`
 }
 
-// RouteConfig describes one upstream database reachable through a listener. The
-// client selects it by sending its Database value as the startup "database"
+// UpstreamConfig describes one upstream database reachable through the listener.
+// The client selects it by sending its Database value as the startup "database"
 // parameter.
-type RouteConfig struct {
+type UpstreamConfig struct {
 	// Database is the routing key: the database name a client must request to
-	// reach this upstream. Required and must be unique within a listener.
+	// reach this upstream. Required and must be unique across upstreams.
 	Database string `yaml:"database"`
 
-	// Upstream is the database the proxy connects to on behalf of clients
-	// routed here.
-	Upstream UpstreamConfig `yaml:"upstream"`
+	// DSN is the upstream connection string, loaded from any registered secret
+	// source (env, aws_sm, aws_ssm, 1password, 1password_connect) and passed
+	// verbatim to pgconn.ParseConfig — both URL-style
+	// (postgres://user:pw@host:port/db?sslmode=...) and keyword/value strings
+	// (host=... port=... user=... password=... dbname=... sslmode=...) are
+	// accepted.
+	DSN yaml.Node `yaml:"dsn"`
 
-	// Client describes the credentials clients must present to use this route.
-	// The proxy verifies a single shared user/password pair per route —
-	// per-user credentials are not supported.
+	// Client describes the credentials clients must present to use this
+	// upstream. The proxy verifies a single shared user/password pair per
+	// upstream — per-user credentials are not supported.
 	Client ClientConfig `yaml:"client"`
 
-	// Role is the Postgres role the proxy SETs at session start for this route.
-	// When set, every query the client subsequently issues runs as this role on
-	// the upstream database. Optional: when empty, the proxy issues no SET ROLE
-	// and the upstream session runs as the connecting user.
+	// Role is the Postgres role the proxy SETs at session start for this
+	// upstream. When set, every query the client subsequently issues runs as
+	// this role on the upstream database. Optional: when empty, the proxy issues
+	// no SET ROLE and the upstream session runs as the connecting user.
 	Role string `yaml:"role,omitempty"`
-}
-
-// UpstreamConfig describes the database the proxy forwards to. The DSN is
-// loaded from any registered secret source (env, aws_sm, aws_ssm, 1password,
-// 1password_connect) and is passed verbatim to pgconn.ParseConfig — both
-// URL-style (postgres://user:pw@host:port/db?sslmode=...) and keyword/value
-// strings (host=... port=... user=... password=... dbname=... sslmode=...)
-// are accepted.
-type UpstreamConfig struct {
-	DSN yaml.Node `yaml:"dsn"`
 }
 
 // ClientConfig describes the credentials the proxy demands from clients.
@@ -103,11 +96,11 @@ type ClientConfig struct {
 }
 
 // Listener is the compiled, runtime form of a single ListenerConfig: a bind
-// address and the database-keyed routes reachable through it.
+// address and the database-keyed upstreams reachable through it.
 type Listener struct {
-	name   string
-	listen string
-	routes map[string]*Route
+	name      string
+	listen    string
+	upstreams map[string]*Upstream
 }
 
 // Name returns the listener's name (a fixed identifier surfaced in logs).
@@ -116,60 +109,60 @@ func (l *Listener) Name() string { return l.name }
 // Listen returns the bind address.
 func (l *Listener) Listen() string { return l.listen }
 
-// Route returns the route for the given database name, or nil if no route on
-// this listener serves it.
-func (l *Listener) Route(database string) *Route { return l.routes[database] }
+// Upstream returns the upstream for the given database name, or nil if no
+// upstream on this listener serves it.
+func (l *Listener) Upstream(database string) *Upstream { return l.upstreams[database] }
 
-// Routes returns all of the listener's routes. The order is unspecified.
-func (l *Listener) Routes() []*Route {
-	out := make([]*Route, 0, len(l.routes))
-	for _, r := range l.routes {
-		out = append(out, r)
+// Upstreams returns all of the listener's upstreams. The order is unspecified.
+func (l *Listener) Upstreams() []*Upstream {
+	out := make([]*Upstream, 0, len(l.upstreams))
+	for _, u := range l.upstreams {
+		out = append(out, u)
 	}
 	return out
 }
 
-// Route is the compiled, runtime form of a single RouteConfig: one upstream
-// database with its own credentials and optional injected role.
-type Route struct {
+// Upstream is the compiled, runtime form of a single UpstreamConfig: one
+// upstream database with its own credentials and optional injected role.
+type Upstream struct {
 	database string
 	role     string
 
-	upstreamDSN secrets.Source
+	dsn secrets.Source
 
 	clientUser     string
 	clientPassword string
 }
 
-// Database returns the route's routing key — the database name a client
-// requests to reach this upstream.
-func (r *Route) Database() string { return r.database }
+// Database returns the upstream's routing key — the database name a client
+// requests to reach it.
+func (u *Upstream) Database() string { return u.database }
 
 // Role returns the role the proxy SETs upstream at session start. Empty
 // means no role is set (the upstream session runs as the connecting user).
-func (r *Route) Role() string { return r.role }
+func (u *Upstream) Role() string { return u.role }
 
-// UpstreamDSN returns the upstream connection string, fetched from the
-// configured secret source. The result is cached by the source; repeated
-// calls do not necessarily round-trip to the backend.
-func (r *Route) UpstreamDSN(ctx context.Context) (string, error) {
-	return r.upstreamDSN.Get(ctx)
+// DSN returns the upstream connection string, fetched from the configured
+// secret source. The result is cached by the source; repeated calls do not
+// necessarily round-trip to the backend.
+func (u *Upstream) DSN(ctx context.Context) (string, error) {
+	return u.dsn.Get(ctx)
 }
 
 // VerifyClient returns whether the given (user, password) pair matches the
-// route's configured client credentials.
-func (r *Route) VerifyClient(user, password string) bool {
-	return user == r.clientUser && password == r.clientPassword
+// upstream's configured client credentials.
+func (u *Upstream) VerifyClient(user, password string) bool {
+	return user == u.clientUser && password == u.clientPassword
 }
 
-// ClientUser returns the user clients must present to use this route.
-func (r *Route) ClientUser() string { return r.clientUser }
+// ClientUser returns the user clients must present to use this upstream.
+func (u *Upstream) ClientUser() string { return u.clientUser }
 
 // LoadFromNode decodes the raw postgres: yaml.Node into a ListenerConfig and
 // compiles it into a Listener. An empty node (the postgres: key absent from the
 // source document) returns (nil, nil) so callers can treat "no postgres
-// listener" as a normal case. An empty block (no listen and no routes) returns
-// the same.
+// listener" as a normal case. An empty block (no listen and no upstreams)
+// returns the same.
 func LoadFromNode(node yaml.Node, logger *slog.Logger) (*Listener, error) {
 	if node.Kind == 0 {
 		return nil, nil
@@ -182,101 +175,101 @@ func LoadFromNode(node yaml.Node, logger *slog.Logger) (*Listener, error) {
 }
 
 // Compile validates and compiles a ListenerConfig into a Listener. Returns
-// (nil, nil) when the block is empty (no listen and no routes) so callers can
+// (nil, nil) when the block is empty (no listen and no upstreams) so callers can
 // treat "not configured" as a no-op without a sentinel error.
 func Compile(c ListenerConfig, logger *slog.Logger, buildSource SourceBuilder) (*Listener, error) {
-	if c.Listen == "" && len(c.Routes) == 0 {
+	if c.Listen == "" && len(c.Upstreams) == 0 {
 		return nil, nil
 	}
 	if c.Listen == "" {
 		return nil, fmt.Errorf("postgres: listen is required")
 	}
-	if len(c.Routes) == 0 {
-		return nil, fmt.Errorf("postgres: at least one route is required")
+	if len(c.Upstreams) == 0 {
+		return nil, fmt.Errorf("postgres: at least one upstream is required")
 	}
 
-	routes := make(map[string]*Route, len(c.Routes))
-	for j, rc := range c.Routes {
-		rctx := fmt.Sprintf("postgres.routes[%d]", j)
-		if rc.Database != "" {
-			rctx = fmt.Sprintf("postgres.routes[%q]", rc.Database)
+	upstreams := make(map[string]*Upstream, len(c.Upstreams))
+	for j, uc := range c.Upstreams {
+		uctx := fmt.Sprintf("postgres.upstreams[%d]", j)
+		if uc.Database != "" {
+			uctx = fmt.Sprintf("postgres.upstreams[%q]", uc.Database)
 		}
 
-		if rc.Database == "" {
-			return nil, fmt.Errorf("%s: database is required", rctx)
+		if uc.Database == "" {
+			return nil, fmt.Errorf("%s: database is required", uctx)
 		}
-		if rc.Upstream.DSN.Kind == 0 {
-			return nil, fmt.Errorf("%s: upstream.dsn is required", rctx)
+		if uc.DSN.Kind == 0 {
+			return nil, fmt.Errorf("%s: dsn is required", uctx)
 		}
-		if rc.Client.User == "" {
-			return nil, fmt.Errorf("%s: client.user is required", rctx)
+		if uc.Client.User == "" {
+			return nil, fmt.Errorf("%s: client.user is required", uctx)
 		}
-		if rc.Client.PasswordEnv == "" {
-			return nil, fmt.Errorf("%s: client.password_env is required", rctx)
+		if uc.Client.PasswordEnv == "" {
+			return nil, fmt.Errorf("%s: client.password_env is required", uctx)
 		}
-		if _, ok := routes[rc.Database]; ok {
-			return nil, fmt.Errorf("postgres: duplicate route database %q", rc.Database)
+		if _, ok := upstreams[uc.Database]; ok {
+			return nil, fmt.Errorf("postgres: duplicate upstream database %q", uc.Database)
 		}
 
-		dsnSource, err := buildSource(rc.Upstream.DSN, logger)
+		dsnSource, err := buildSource(uc.DSN, logger)
 		if err != nil {
-			return nil, fmt.Errorf("%s: building upstream.dsn source: %w", rctx, err)
+			return nil, fmt.Errorf("%s: building dsn source: %w", uctx, err)
 		}
 
-		clientPassword := os.Getenv(rc.Client.PasswordEnv)
+		clientPassword := os.Getenv(uc.Client.PasswordEnv)
 		if clientPassword == "" {
-			return nil, fmt.Errorf("%s: client.password_env %q is not set in the environment", rctx, rc.Client.PasswordEnv)
+			return nil, fmt.Errorf("%s: client.password_env %q is not set in the environment", uctx, uc.Client.PasswordEnv)
 		}
 
-		routes[rc.Database] = &Route{
-			database:       rc.Database,
-			role:           rc.Role,
-			upstreamDSN:    dsnSource,
-			clientUser:     rc.Client.User,
+		upstreams[uc.Database] = &Upstream{
+			database:       uc.Database,
+			role:           uc.Role,
+			dsn:            dsnSource,
+			clientUser:     uc.Client.User,
 			clientPassword: clientPassword,
 		}
 	}
 
 	return &Listener{
-		name:   listenerName,
-		listen: c.Listen,
-		routes: routes,
+		name:      listenerName,
+		listen:    c.Listen,
+		upstreams: upstreams,
 	}, nil
 }
 
 // NewListener builds the postgres listener from a bind address and a set of
-// routes. It is the construction path for control-plane-synced listeners, whose
-// routes are built one at a time via NewManagedRoute. The listen address is
-// required, and at least one route must be supplied; a route whose Database
-// collides with an earlier one is an error.
-func NewListener(listen string, routes []*Route) (*Listener, error) {
+// upstreams. It is the construction path for control-plane-synced listeners,
+// whose upstreams are built one at a time via NewManagedUpstream. The listen
+// address is required, and at least one upstream must be supplied; an upstream
+// whose Database collides with an earlier one is an error.
+func NewListener(listen string, upstreams []*Upstream) (*Listener, error) {
 	if listen == "" {
 		return nil, fmt.Errorf("postgres: listen is required")
 	}
-	if len(routes) == 0 {
-		return nil, fmt.Errorf("postgres: at least one route is required")
+	if len(upstreams) == 0 {
+		return nil, fmt.Errorf("postgres: at least one upstream is required")
 	}
-	m := make(map[string]*Route, len(routes))
-	for _, r := range routes {
-		if _, ok := m[r.database]; ok {
-			return nil, fmt.Errorf("postgres: duplicate route database %q", r.database)
+	m := make(map[string]*Upstream, len(upstreams))
+	for _, u := range upstreams {
+		if _, ok := m[u.database]; ok {
+			return nil, fmt.Errorf("postgres: duplicate upstream database %q", u.database)
 		}
-		m[r.database] = r
+		m[u.database] = u
 	}
-	return &Listener{name: listenerName, listen: listen, routes: m}, nil
+	return &Listener{name: listenerName, listen: listen, upstreams: m}, nil
 }
 
-// NewManagedRoute builds a Route for a control-plane-synced listener. The
-// upstream DSN source and optional role come from the control plane; the client
+// NewManagedUpstream builds an Upstream for a control-plane-synced listener. The
+// DSN source and optional role come from the control plane; the client
 // credentials come from the proxy's environment. Unlike the YAML path,
 // clientPassword is the literal password value, not the name of an env var —
 // managed mode has no second level of indirection. All fields except role are
 // required.
-func NewManagedRoute(database string, dsn secrets.Source, clientUser, clientPassword, role string) (*Route, error) {
+func NewManagedUpstream(database string, dsn secrets.Source, clientUser, clientPassword, role string) (*Upstream, error) {
 	if database == "" {
-		return nil, fmt.Errorf("postgres: managed route database is required")
+		return nil, fmt.Errorf("postgres: managed upstream database is required")
 	}
-	ctx := fmt.Sprintf("postgres route[%q]", database)
+	ctx := fmt.Sprintf("postgres upstream[%q]", database)
 	if dsn == nil {
 		return nil, fmt.Errorf("%s: dsn source is required", ctx)
 	}
@@ -286,10 +279,10 @@ func NewManagedRoute(database string, dsn secrets.Source, clientUser, clientPass
 	if clientPassword == "" {
 		return nil, fmt.Errorf("%s: client password is required", ctx)
 	}
-	return &Route{
+	return &Upstream{
 		database:       database,
 		role:           role,
-		upstreamDSN:    dsn,
+		dsn:            dsn,
 		clientUser:     clientUser,
 		clientPassword: clientPassword,
 	}, nil

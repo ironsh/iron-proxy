@@ -63,55 +63,55 @@ func TestClassifyClientStatement(t *testing.T) {
 	}
 }
 
-func TestNewManagedRoute(t *testing.T) {
+func TestNewManagedUpstream(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 
-	r, err := NewManagedRoute("analytics", dsn, "app", "pw", "readonly")
+	u, err := NewManagedUpstream("analytics", dsn, "app", "pw", "readonly")
 	require.NoError(t, err)
-	require.Equal(t, "analytics", r.Database())
-	require.Equal(t, "readonly", r.Role())
-	require.True(t, r.VerifyClient("app", "pw"))
-	require.False(t, r.VerifyClient("app", "wrong"))
+	require.Equal(t, "analytics", u.Database())
+	require.Equal(t, "readonly", u.Role())
+	require.True(t, u.VerifyClient("app", "pw"))
+	require.False(t, u.VerifyClient("app", "wrong"))
 
 	// Absent role is allowed (no SET ROLE issued).
-	r, err = NewManagedRoute("main", dsn, "app", "pw", "")
+	u, err = NewManagedUpstream("main", dsn, "app", "pw", "")
 	require.NoError(t, err)
-	require.Empty(t, r.Role())
+	require.Empty(t, u.Role())
 
 	// Required fields.
-	_, err = NewManagedRoute("", dsn, "app", "pw", "")
+	_, err = NewManagedUpstream("", dsn, "app", "pw", "")
 	require.ErrorContains(t, err, "database is required")
-	_, err = NewManagedRoute("d", nil, "app", "pw", "")
+	_, err = NewManagedUpstream("d", nil, "app", "pw", "")
 	require.ErrorContains(t, err, "dsn source is required")
-	_, err = NewManagedRoute("d", dsn, "", "pw", "")
+	_, err = NewManagedUpstream("d", dsn, "", "pw", "")
 	require.ErrorContains(t, err, "client user is required")
-	_, err = NewManagedRoute("d", dsn, "app", "", "")
+	_, err = NewManagedUpstream("d", dsn, "app", "", "")
 	require.ErrorContains(t, err, "client password is required")
 }
 
 func TestNewListener(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
-	mustRoute := func(database string) *Route {
-		r, err := NewManagedRoute(database, dsn, "app", "pw", "")
+	mustUpstream := func(database string) *Upstream {
+		u, err := NewManagedUpstream(database, dsn, "app", "pw", "")
 		require.NoError(t, err)
-		return r
+		return u
 	}
 
-	l, err := NewListener("127.0.0.1:0", []*Route{mustRoute("a"), mustRoute("b")})
+	l, err := NewListener("127.0.0.1:0", []*Upstream{mustUpstream("a"), mustUpstream("b")})
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:0", l.Listen())
-	require.Equal(t, "a", l.Route("a").Database())
-	require.Equal(t, "b", l.Route("b").Database())
-	require.Nil(t, l.Route("missing"))
-	require.Len(t, l.Routes(), 2)
+	require.Equal(t, "a", l.Upstream("a").Database())
+	require.Equal(t, "b", l.Upstream("b").Database())
+	require.Nil(t, l.Upstream("missing"))
+	require.Len(t, l.Upstreams(), 2)
 
 	// Required fields and duplicate-database guard.
-	_, err = NewListener("", []*Route{mustRoute("a")})
+	_, err = NewListener("", []*Upstream{mustUpstream("a")})
 	require.ErrorContains(t, err, "listen is required")
 	_, err = NewListener("127.0.0.1:0", nil)
-	require.ErrorContains(t, err, "at least one route is required")
-	_, err = NewListener("127.0.0.1:0", []*Route{mustRoute("a"), mustRoute("a")})
-	require.ErrorContains(t, err, `duplicate route database "a"`)
+	require.ErrorContains(t, err, "at least one upstream is required")
+	_, err = NewListener("127.0.0.1:0", []*Upstream{mustUpstream("a"), mustUpstream("a")})
+	require.ErrorContains(t, err, `duplicate upstream database "a"`)
 }
 
 func TestQuoteIdent(t *testing.T) {

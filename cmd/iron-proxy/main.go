@@ -508,17 +508,17 @@ func pgEnv(foreignID, suffix string) string {
 }
 
 // postgresListenerFromSync builds the single postgres listener for managed mode:
-// the local YAML routes (if any) plus control-plane-synced routes layered on
-// from the sync payload. The bind address is the local listener's address when
-// the YAML config supplies one, otherwise IRON_PROXY_PG_LISTEN. Each synced
-// entry becomes a route keyed by its database, with per-route client credentials
-// read from IRON_PROXY_PG_<FOREIGN_ID>_CLIENT_USER / _CLIENT_PASSWORD; an entry
-// missing either credential is skipped (logged) — that is how a proxy granted a
-// secret it isn't meant to serve locally simply ignores it. A synced route whose
-// database collides with a local route or another synced route is dropped
-// (logged). When no bind address is available or no routes resolve, no listener
-// is returned. Returns ok=false only when the sync payload itself is invalid,
-// signaling the caller to keep the current listener.
+// the local YAML upstreams (if any) plus control-plane-synced upstreams layered
+// on from the sync payload. The bind address is the local listener's address
+// when the YAML config supplies one, otherwise IRON_PROXY_PG_LISTEN. Each synced
+// entry becomes an upstream keyed by its database, with per-upstream client
+// credentials read from IRON_PROXY_PG_<FOREIGN_ID>_CLIENT_USER / _CLIENT_PASSWORD;
+// an entry missing either credential is skipped (logged) — that is how a proxy
+// granted a secret it isn't meant to serve locally simply ignores it. A synced
+// upstream whose database collides with a local upstream or another synced
+// upstream is dropped (logged). When no bind address is available or no upstreams
+// resolve, no listener is returned. Returns ok=false only when the sync payload
+// itself is invalid, signaling the caller to keep the current listener.
 func postgresListenerFromSync(local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) (*postgres.Listener, bool) {
 	entries, err := config.PostgresFromSync(raw, logger)
 	if err != nil {
@@ -526,16 +526,16 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 		return nil, false
 	}
 
-	// Start from the local routes; synced routes are layered on, and local wins
-	// on a database collision.
+	// Start from the local upstreams; synced upstreams are layered on, and local
+	// wins on a database collision.
 	seenDatabases := make(map[string]bool)
-	routes := make([]*postgres.Route, 0, len(entries))
+	upstreams := make([]*postgres.Upstream, 0, len(entries))
 	listen := ""
 	if local != nil {
 		listen = local.Listen()
-		for _, r := range local.Routes() {
-			seenDatabases[r.Database()] = true
-			routes = append(routes, r)
+		for _, u := range local.Upstreams() {
+			seenDatabases[u.Database()] = true
+			upstreams = append(upstreams, u)
 		}
 	}
 	if listen == "" {
@@ -544,11 +544,11 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 
 	// listen is empty only when there is no local listener (a compiled local
 	// listener always carries a bind address) and IRON_PROXY_PG_LISTEN is unset.
-	// Without an address there is nothing to bind, so drop the synced routes.
+	// Without an address there is nothing to bind, so drop the synced upstreams.
 	if listen == "" {
 		if len(entries) > 0 {
-			logger.Info("skipping control-plane postgres routes: no listen address (set IRON_PROXY_PG_LISTEN)",
-				slog.Int("route_count", len(entries)))
+			logger.Info("skipping control-plane postgres upstreams: no listen address (set IRON_PROXY_PG_LISTEN)",
+				slog.Int("upstream_count", len(entries)))
 		}
 		return nil, true
 	}
@@ -557,7 +557,7 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 		clientUser := getenv(pgEnv(e.ForeignID, "CLIENT_USER"))
 		clientPassword := getenv(pgEnv(e.ForeignID, "CLIENT_PASSWORD"))
 		if clientUser == "" || clientPassword == "" {
-			logger.Info("skipping synced postgres route: client credentials not set",
+			logger.Info("skipping synced postgres upstream: client credentials not set",
 				slog.String("foreign_id", e.ForeignID),
 				slog.Bool("has_client_user", clientUser != ""),
 				slog.Bool("has_client_password", clientPassword != ""),
@@ -565,29 +565,29 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 			continue
 		}
 		if seenDatabases[e.Database] {
-			logger.Warn("skipping synced postgres route: duplicate database",
+			logger.Warn("skipping synced postgres upstream: duplicate database",
 				slog.String("foreign_id", e.ForeignID),
 				slog.String("database", e.Database),
 			)
 			continue
 		}
-		r, err := postgres.NewManagedRoute(e.Database, e.DSN, clientUser, clientPassword, e.Role)
+		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, clientUser, clientPassword, e.Role)
 		if err != nil {
-			logger.Error("skipping synced postgres route: invalid route",
+			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),
 				slog.String("error", err.Error()),
 			)
 			continue
 		}
 		seenDatabases[e.Database] = true
-		routes = append(routes, r)
+		upstreams = append(upstreams, u)
 	}
 
-	if len(routes) == 0 {
+	if len(upstreams) == 0 {
 		return nil, true
 	}
 
-	listener, err := postgres.NewListener(listen, routes)
+	listener, err := postgres.NewListener(listen, upstreams)
 	if err != nil {
 		logger.Error("skipping postgres listener: invalid listener", slog.String("error", err.Error()))
 		return nil, true

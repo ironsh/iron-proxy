@@ -61,7 +61,7 @@ func (s *Server) ListenAndServe() error {
 	s.logger.Info("postgres proxy starting",
 		slog.String("name", s.listener.Name()),
 		slog.String("addr", ln.Addr().String()),
-		slog.Int("routes", len(s.listener.routes)),
+		slog.Int("upstreams", len(s.listener.upstreams)),
 	)
 
 	for {

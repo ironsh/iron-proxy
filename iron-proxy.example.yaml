@@ -651,26 +651,25 @@ transforms:
 # (no per-user).
 #
 # The proxy runs a single postgres listener: the postgres key is one object
-# with a bind address and a list of routes. A single listen address serves many
-# upstream databases. The client selects a route by the database name it sends
-# in its startup message (psql's `dbname=`), and the proxy authenticates that
-# connection against the route's own credentials before dialing the route's
-# upstream. The client must name a database explicitly; a database with no
-# matching route is rejected. The database name is only a routing key: the
-# upstream database is whatever the route's DSN names.
+# with a bind address and a list of upstreams. A single listen address serves
+# many upstream databases. The client selects an upstream by the database name
+# it sends in its startup message (psql's `dbname=`), and the proxy
+# authenticates that connection against the upstream's own credentials before
+# dialing it. The client must name a database explicitly; a database with no
+# matching upstream is rejected. The database name is only a routing key: the
+# upstream database is whatever the upstream's DSN names.
 # postgres:
 #   listen: ":5432"
-#   routes:
+#   upstreams:
 #     # Clients connect with dbname=appdb to reach this upstream.
 #     - database: appdb
-#       upstream:
-#         # The DSN is loaded from any registered secret source and passed
-#         # verbatim to pgconn. URL or keyword/value form both work.
-#         dsn:
-#           type: env
-#           var: PG_APPDB_DSN
+#       # The DSN is loaded from any registered secret source and passed
+#       # verbatim to pgconn. URL or keyword/value form both work.
+#       dsn:
+#         type: env
+#         var: PG_APPDB_DSN
 #       client:
-#         # The user/password clients must present for this route.
+#         # The user/password clients must present for this upstream.
 #         user: app_user
 #         password_env: PG_APPDB_PROXY_PASSWORD
 #       # The Postgres role the proxy SETs at session start. Every query the
@@ -678,10 +677,9 @@ transforms:
 #       role: tenant_role
 #     # Clients connect with dbname=analyticsdb to reach this upstream.
 #     - database: analyticsdb
-#       upstream:
-#         dsn:
-#           type: env
-#           var: PG_ANALYTICS_DSN
+#       dsn:
+#         type: env
+#         var: PG_ANALYTICS_DSN
 #       client:
 #         user: analytics_user
 #         password_env: PG_ANALYTICS_PROXY_PASSWORD

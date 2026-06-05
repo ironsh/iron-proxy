@@ -23,10 +23,10 @@ func testListener(listen string) *Listener {
 	return &Listener{
 		name:   listenerName,
 		listen: listen,
-		routes: map[string]*Route{
+		upstreams: map[string]*Upstream{
 			"appdb": {
 				database:       "appdb",
-				upstreamDSN:    staticDSN{name: "test", value: "host=127.0.0.1"},
+				dsn:            staticDSN{name: "test", value: "host=127.0.0.1"},
 				clientUser:     "u",
 				clientPassword: "p",
 			},

@@ -32,13 +32,13 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// localListener builds a single-route local listener for conflict/passthrough
+// localListener builds a single-upstream local listener for conflict/passthrough
 // tests.
 func localListener(t *testing.T, database string) *postgres.Listener {
 	t.Helper()
-	r, err := postgres.NewManagedRoute(database, staticSource{name: "local", value: "host=local"}, "u", "p", "")
+	u, err := postgres.NewManagedUpstream(database, staticSource{name: "local", value: "host=local"}, "u", "p", "")
 	require.NoError(t, err)
-	l, err := postgres.NewListener("127.0.0.1:0", []*postgres.Route{r})
+	l, err := postgres.NewListener("127.0.0.1:0", []*postgres.Upstream{u})
 	require.NoError(t, err)
 	return l
 }
@@ -72,10 +72,10 @@ func TestPostgresListenerFromSync_EnvPresent(t *testing.T) {
 	require.Equal(t, "127.0.0.1:0", listener.Listen())
 
 	// The foreign_id is the routing database when none is supplied.
-	route := listener.Route("pg-analytics")
-	require.NotNil(t, route)
-	require.Equal(t, "readonly", route.Role())
-	require.True(t, route.VerifyClient("app", "s3cret"))
+	upstream := listener.Upstream("pg-analytics")
+	require.NotNil(t, upstream)
+	require.Equal(t, "readonly", upstream.Role())
+	require.True(t, upstream.VerifyClient("app", "s3cret"))
 }
 
 func TestPostgresListenerFromSync_ExplicitDatabase(t *testing.T) {
@@ -90,8 +90,8 @@ func TestPostgresListenerFromSync_ExplicitDatabase(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	// Routing key is the explicit database, not the foreign_id.
-	require.NotNil(t, listener.Route("analytics"))
-	require.Nil(t, listener.Route("pg-analytics"))
+	require.NotNil(t, listener.Upstream("analytics"))
+	require.Nil(t, listener.Upstream("pg-analytics"))
 }
 
 func TestPostgresListenerFromSync_NoRole(t *testing.T) {
@@ -105,16 +105,16 @@ func TestPostgresListenerFromSync_NoRole(t *testing.T) {
 	listener, ok := postgresListenerFromSync(nil, getenv, discardLogger(), raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
-	require.Empty(t, listener.Route("pgmain").Role(), "absent role must be a no-op")
+	require.Empty(t, listener.Upstream("pgmain").Role(), "absent role must be a no-op")
 }
 
-func TestPostgresListenerFromSync_MissingCredsSkipsRoute(t *testing.T) {
+func TestPostgresListenerFromSync_MissingCredsSkipsUpstream(t *testing.T) {
 	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
 
-	// IRON_PROXY_PG_LISTEN is set but client credentials are missing: the route
-	// is skipped, and with no usable routes no listener is built.
+	// IRON_PROXY_PG_LISTEN is set but client credentials are missing: the upstream
+	// is skipped, and with no usable upstreams no listener is built.
 	getenv := mapEnv(map[string]string{
 		"IRON_PROXY_PG_LISTEN": "127.0.0.1:0",
 	})
@@ -122,16 +122,16 @@ func TestPostgresListenerFromSync_MissingCredsSkipsRoute(t *testing.T) {
 	listener, ok := postgresListenerFromSync(nil, getenv, logger, raw)
 	require.True(t, ok)
 	require.Nil(t, listener)
-	require.Contains(t, logBuf.String(), "skipping synced postgres route")
+	require.Contains(t, logBuf.String(), "skipping synced postgres upstream")
 }
 
-func TestPostgresListenerFromSync_NoListenAddressDropsRoutes(t *testing.T) {
+func TestPostgresListenerFromSync_NoListenAddressDropsUpstreams(t *testing.T) {
 	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
 
 	// Credentials present but no local listener and IRON_PROXY_PG_LISTEN unset:
-	// there is no address to bind, so the synced routes are dropped.
+	// there is no address to bind, so the synced upstreams are dropped.
 	getenv := mapEnv(map[string]string{
 		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
 		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
@@ -156,8 +156,8 @@ func TestPostgresListenerFromSync_MergesLocalAndSynced(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	require.Equal(t, local.Listen(), listener.Listen())
-	require.NotNil(t, listener.Route("appdb"), "local route preserved")
-	require.NotNil(t, listener.Route("analytics"), "synced route layered on")
+	require.NotNil(t, listener.Upstream("appdb"), "local upstream preserved")
+	require.NotNil(t, listener.Upstream("analytics"), "synced upstream layered on")
 }
 
 func TestPostgresListenerFromSync_LocalWinsOnCollision(t *testing.T) {
@@ -173,8 +173,8 @@ func TestPostgresListenerFromSync_LocalWinsOnCollision(t *testing.T) {
 	listener, ok := postgresListenerFromSync(local, getenv, logger, raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
-	// The local route (user "u") wins over the synced one (user "app").
-	require.True(t, listener.Route("shared").VerifyClient("u", "p"))
+	// The local upstream (user "u") wins over the synced one (user "app").
+	require.True(t, listener.Upstream("shared").VerifyClient("u", "p"))
 	require.Contains(t, logBuf.String(), "duplicate database")
 }
 
@@ -196,8 +196,8 @@ func TestPostgresListenerFromSync_DuplicateSyncedDatabaseDropped(t *testing.T) {
 	listener, ok := postgresListenerFromSync(nil, getenv, logger, raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
-	require.Len(t, listener.Routes(), 1)
-	require.NotNil(t, listener.Route("shared"))
+	require.Len(t, listener.Upstreams(), 1)
+	require.NotNil(t, listener.Upstream("shared"))
 	require.Contains(t, logBuf.String(), "duplicate database")
 }
 
@@ -218,7 +218,7 @@ func TestPostgresListenerFromSync_NullPayloadKeepsLocal(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	require.Equal(t, local.Listen(), listener.Listen())
-	require.NotNil(t, listener.Route("appdb"))
+	require.NotNil(t, listener.Upstream("appdb"))
 }
 
 func TestApplyPostgresSync_ReloadsListener(t *testing.T) {

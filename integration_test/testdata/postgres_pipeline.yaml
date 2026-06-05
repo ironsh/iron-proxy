@@ -13,12 +13,11 @@ tls:
 
 postgres:
   listen: "127.0.0.1:0"
-  routes:
+  upstreams:
     - database: appdb
-      upstream:
-        dsn:
-          type: env
-          var: PG_UPSTREAM_DSN
+      dsn:
+        type: env
+        var: PG_UPSTREAM_DSN
       client:
         user: app_user
         password_env: PG_PROXY_PASSWORD
