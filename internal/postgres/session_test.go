@@ -26,6 +26,20 @@ func TestDialUpstreamDatabaseMismatch(t *testing.T) {
 	require.Equal(t, "otherdb", mismatch.dsn)
 }
 
+// TestDialUpstreamMissingDatabase verifies dialUpstream refuses a DSN that does
+// not name a database. Caught before any network round-trip.
+func TestDialUpstreamMissingDatabase(t *testing.T) {
+	up, err := NewManagedUpstream("appdb",
+		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 user=app"}, "u", "p", "")
+	require.NoError(t, err)
+
+	_, err = dialUpstream(context.Background(), up)
+	require.Error(t, err)
+	var missing *missingDSNDatabaseError
+	require.True(t, errors.As(err, &missing), "want missingDSNDatabaseError, got %v", err)
+	require.Equal(t, "appdb", missing.configured)
+}
+
 // TestDialUpstreamDatabaseMatchPassesCheck verifies that a DSN whose database
 // matches the routing database clears the check. The dial still fails (nothing
 // is listening on port 1), but the failure must not be a databaseMismatchError.

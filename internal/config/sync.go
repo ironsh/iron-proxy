@@ -126,8 +126,9 @@ func MCPFromSync(raw json.RawMessage) (node yaml.Node, present bool, err error) 
 // managed-mode env convention in cmd/iron-proxy).
 type PostgresSyncEntry struct {
 	ForeignID string
-	// Database is the routing key clients use to reach this upstream. It
-	// defaults to ForeignID when the control plane omits an explicit database.
+	// Database is the routing key clients use to reach this upstream. Required:
+	// it must equal the database the DSN connects to, so the control plane must
+	// supply it explicitly.
 	Database string
 	DSN      secrets.Source
 	Role     string
@@ -169,6 +170,9 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		if !isNonNullJSON(e.DSN) {
 			return nil, fmt.Errorf("postgres[%q]: dsn is required", e.ForeignID)
 		}
+		if e.Database == "" {
+			return nil, fmt.Errorf("postgres[%q]: database is required", e.ForeignID)
+		}
 		node, err := yamlNodeFromRawJSON(e.DSN)
 		if err != nil {
 			return nil, fmt.Errorf("postgres[%q]: parsing dsn: %w", e.ForeignID, err)
@@ -177,15 +181,9 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		if err != nil {
 			return nil, fmt.Errorf("postgres[%q]: building dsn source: %w", e.ForeignID, err)
 		}
-		// The control plane may omit database; the foreign_id is the routing
-		// key in that case.
-		database := e.Database
-		if database == "" {
-			database = e.ForeignID
-		}
 		entries = append(entries, PostgresSyncEntry{
 			ForeignID: e.ForeignID,
-			Database:  database,
+			Database:  e.Database,
 			DSN:       src,
 			Role:      e.Role,
 		})
