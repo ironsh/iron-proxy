@@ -11,10 +11,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
@@ -489,36 +487,17 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 // supply a listen address of its own.
 const pgListenEnv = "IRON_PROXY_PG_LISTEN"
 
-// pgEnv returns the environment variable name carrying the given per-route
-// client credential for a control-plane-synced postgres upstream. foreignID is
-// normalized to env-safe form: uppercased, with '-', '.', and '~' mapped to '_'
-// (the full set of non-alphanumeric characters a foreign_id may contain). For
-// foreignID "pg-analytics" and suffix "CLIENT_USER" the result is
-// "IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER".
-func pgEnv(foreignID, suffix string) string {
-	norm := strings.Map(func(r rune) rune {
-		switch r {
-		case '-', '.', '~':
-			return '_'
-		default:
-			return unicode.ToUpper(r)
-		}
-	}, foreignID)
-	return "IRON_PROXY_PG_" + norm + "_" + suffix
-}
-
 // postgresListenerFromSync builds the single postgres listener for managed mode:
 // the local YAML upstreams (if any) plus control-plane-synced upstreams layered
 // on from the sync payload. The bind address is the local listener's address
 // when the YAML config supplies one, otherwise IRON_PROXY_PG_LISTEN. Each synced
-// entry becomes an upstream keyed by its database, with per-upstream client
-// credentials read from IRON_PROXY_PG_<FOREIGN_ID>_CLIENT_USER / _CLIENT_PASSWORD;
-// an entry missing either credential is skipped (logged) — that is how a proxy
-// granted a secret it isn't meant to serve locally simply ignores it. A synced
-// upstream whose database collides with a local upstream or another synced
-// upstream is dropped (logged). When no bind address is available or no upstreams
-// resolve, no listener is returned. Returns ok=false only when the sync payload
-// itself is invalid, signaling the caller to keep the current listener.
+// entry becomes an upstream keyed by its database, carrying the database, DSN,
+// client credentials, and role the control plane delivered — managed mode needs
+// no per-upstream proxy configuration. A synced upstream whose database collides
+// with a local upstream or another synced upstream is dropped (logged). When no
+// bind address is available or no upstreams resolve, no listener is returned.
+// Returns ok=false only when the sync payload itself is invalid, signaling the
+// caller to keep the current listener.
 func postgresListenerFromSync(local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) (*postgres.Listener, bool) {
 	entries, err := config.PostgresFromSync(raw, logger)
 	if err != nil {
@@ -554,16 +533,6 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 	}
 
 	for _, e := range entries {
-		clientUser := getenv(pgEnv(e.ForeignID, "CLIENT_USER"))
-		clientPassword := getenv(pgEnv(e.ForeignID, "CLIENT_PASSWORD"))
-		if clientUser == "" || clientPassword == "" {
-			logger.Info("skipping synced postgres upstream: client credentials not set",
-				slog.String("foreign_id", e.ForeignID),
-				slog.Bool("has_client_user", clientUser != ""),
-				slog.Bool("has_client_password", clientPassword != ""),
-			)
-			continue
-		}
 		if seenDatabases[e.Database] {
 			logger.Warn("skipping synced postgres upstream: duplicate database",
 				slog.String("foreign_id", e.ForeignID),
@@ -571,7 +540,7 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 			)
 			continue
 		}
-		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, clientUser, clientPassword, e.Role)
+		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.ClientUser, e.ClientPassword, e.Role)
 		if err != nil {
 			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),

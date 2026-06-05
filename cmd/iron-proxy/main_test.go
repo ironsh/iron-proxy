@@ -43,101 +43,56 @@ func localListener(t *testing.T, database string) *postgres.Listener {
 	return l
 }
 
-func TestPgEnv(t *testing.T) {
-	cases := []struct {
-		foreignID, suffix, want string
-	}{
-		{"pg-analytics", "CLIENT_USER", "IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER"},
-		{"PG.Main", "CLIENT_USER", "IRON_PROXY_PG_PG_MAIN_CLIENT_USER"},
-		{"warehouse~1", "CLIENT_PASSWORD", "IRON_PROXY_PG_WAREHOUSE_1_CLIENT_PASSWORD"},
-		{"already_snake", "CLIENT_PASSWORD", "IRON_PROXY_PG_ALREADY_SNAKE_CLIENT_PASSWORD"},
-		{"db123", "CLIENT_USER", "IRON_PROXY_PG_DB123_CLIENT_USER"},
-	}
-	for _, c := range cases {
-		require.Equalf(t, c.want, pgEnv(c.foreignID, c.suffix), "pgEnv(%q,%q)", c.foreignID, c.suffix)
-	}
-}
-
-func TestPostgresListenerFromSync_EnvPresent(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"pg-analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"role":"readonly"}]`)
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN":                       "127.0.0.1:0",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "s3cret",
-	})
+func TestPostgresListenerFromSync_Basic(t *testing.T) {
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"client_user":"app","client_password":"s3cret","role":"readonly"}]`)
+	// The single bind address is the only thing read from the environment.
+	getenv := mapEnv(map[string]string{"IRON_PROXY_PG_LISTEN": "127.0.0.1:0"})
 
 	listener, ok := postgresListenerFromSync(nil, getenv, discardLogger(), raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	require.Equal(t, "127.0.0.1:0", listener.Listen())
 
-	// Routed by the synced database (here equal to the foreign_id).
-	upstream := listener.Upstream("pg-analytics")
+	// Routed by the synced database, which is independent of the foreign_id.
+	upstream := listener.Upstream("analytics")
 	require.NotNil(t, upstream)
+	require.Nil(t, listener.Upstream("pg-analytics"))
 	require.Equal(t, "readonly", upstream.Role())
 	require.True(t, upstream.VerifyClient("app", "s3cret"))
 }
 
-func TestPostgresListenerFromSync_ExplicitDatabase(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN":                       "127.0.0.1:0",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
-	})
-
-	listener, ok := postgresListenerFromSync(nil, getenv, discardLogger(), raw)
-	require.True(t, ok)
-	require.NotNil(t, listener)
-	// Routing key is the explicit database, not the foreign_id.
-	require.NotNil(t, listener.Upstream("analytics"))
-	require.Nil(t, listener.Upstream("pg-analytics"))
-}
-
 func TestPostgresListenerFromSync_NoRole(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pgmain","database":"pgmain","dsn":{"type":"env","var":"PG_DSN"}}]`)
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN":                 "127.0.0.1:0",
-		"IRON_PROXY_PG_PGMAIN_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PGMAIN_CLIENT_PASSWORD": "pw",
-	})
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pgmain","database":"maindb","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
+	getenv := mapEnv(map[string]string{"IRON_PROXY_PG_LISTEN": "127.0.0.1:0"})
 
 	listener, ok := postgresListenerFromSync(nil, getenv, discardLogger(), raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
-	require.Empty(t, listener.Upstream("pgmain").Role(), "absent role must be a no-op")
+	require.Empty(t, listener.Upstream("maindb").Role(), "absent role must be a no-op")
 }
 
-func TestPostgresListenerFromSync_MissingCredsSkipsUpstream(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"pg-analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
+func TestPostgresListenerFromSync_MissingCredsRejectsPayload(t *testing.T) {
+	// Client credentials now come from the sync payload, so an entry missing
+	// them is an invalid payload, not a skip.
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
-
-	// IRON_PROXY_PG_LISTEN is set but client credentials are missing: the upstream
-	// is skipped, and with no usable upstreams no listener is built.
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN": "127.0.0.1:0",
-	})
+	getenv := mapEnv(map[string]string{"IRON_PROXY_PG_LISTEN": "127.0.0.1:0"})
 
 	listener, ok := postgresListenerFromSync(nil, getenv, logger, raw)
-	require.True(t, ok)
+	require.False(t, ok, "an entry missing client credentials is an invalid payload")
 	require.Nil(t, listener)
-	require.Contains(t, logBuf.String(), "skipping synced postgres upstream")
+	require.Contains(t, logBuf.String(), "rejecting invalid postgres config")
 }
 
 func TestPostgresListenerFromSync_NoListenAddressDropsUpstreams(t *testing.T) {
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"pg-analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
 
-	// Credentials present but no local listener and IRON_PROXY_PG_LISTEN unset:
-	// there is no address to bind, so the synced upstreams are dropped.
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
-	})
-
-	listener, ok := postgresListenerFromSync(nil, getenv, logger, raw)
+	// No local listener and IRON_PROXY_PG_LISTEN unset: there is no address to
+	// bind, so the synced upstreams are dropped.
+	listener, ok := postgresListenerFromSync(nil, mapEnv(nil), logger, raw)
 	require.True(t, ok)
 	require.Nil(t, listener)
 	require.Contains(t, logBuf.String(), "no listen address")
@@ -145,14 +100,9 @@ func TestPostgresListenerFromSync_NoListenAddressDropsUpstreams(t *testing.T) {
 
 func TestPostgresListenerFromSync_MergesLocalAndSynced(t *testing.T) {
 	local := localListener(t, "appdb")
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
-	getenv := mapEnv(map[string]string{
-		// No IRON_PROXY_PG_LISTEN: the bind address comes from the local listener.
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
-	})
-
-	listener, ok := postgresListenerFromSync(local, getenv, discardLogger(), raw)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
+	// No IRON_PROXY_PG_LISTEN: the bind address comes from the local listener.
+	listener, ok := postgresListenerFromSync(local, mapEnv(nil), discardLogger(), raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	require.Equal(t, local.Listen(), listener.Listen())
@@ -162,15 +112,11 @@ func TestPostgresListenerFromSync_MergesLocalAndSynced(t *testing.T) {
 
 func TestPostgresListenerFromSync_LocalWinsOnCollision(t *testing.T) {
 	local := localListener(t, "shared")
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"shared","dsn":{"type":"env","var":"PG_DSN"}}]`)
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"shared","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
-	})
 
-	listener, ok := postgresListenerFromSync(local, getenv, logger, raw)
+	listener, ok := postgresListenerFromSync(local, mapEnv(nil), logger, raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	// The local upstream (user "u") wins over the synced one (user "app").
@@ -180,18 +126,12 @@ func TestPostgresListenerFromSync_LocalWinsOnCollision(t *testing.T) {
 
 func TestPostgresListenerFromSync_DuplicateSyncedDatabaseDropped(t *testing.T) {
 	raw := json.RawMessage(`[
-		{"id":"pgs_1","foreign_id":"a","database":"shared","dsn":{"type":"env","var":"PG_DSN"}},
-		{"id":"pgs_2","foreign_id":"b","database":"shared","dsn":{"type":"env","var":"PG_DSN"}}
+		{"id":"pgs_1","foreign_id":"a","database":"shared","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"},
+		{"id":"pgs_2","foreign_id":"b","database":"shared","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}
 	]`)
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN":            "127.0.0.1:0",
-		"IRON_PROXY_PG_A_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_A_CLIENT_PASSWORD": "pw",
-		"IRON_PROXY_PG_B_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_B_CLIENT_PASSWORD": "pw",
-	})
+	getenv := mapEnv(map[string]string{"IRON_PROXY_PG_LISTEN": "127.0.0.1:0"})
 
 	listener, ok := postgresListenerFromSync(nil, getenv, logger, raw)
 	require.True(t, ok)
@@ -225,12 +165,8 @@ func TestApplyPostgresSync_ReloadsListener(t *testing.T) {
 	mgr := postgres.NewManager(discardLogger())
 	t.Cleanup(func() { _ = mgr.Shutdown(context.Background()) })
 
-	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"pg-analytics","dsn":{"type":"env","var":"PG_DSN"}}]`)
-	getenv := mapEnv(map[string]string{
-		"IRON_PROXY_PG_LISTEN":                       "127.0.0.1:0",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_USER":     "app",
-		"IRON_PROXY_PG_PG_ANALYTICS_CLIENT_PASSWORD": "pw",
-	})
+	raw := json.RawMessage(`[{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_DSN"},"client_user":"app","client_password":"pw"}]`)
+	getenv := mapEnv(map[string]string{"IRON_PROXY_PG_LISTEN": "127.0.0.1:0"})
 
 	applyPostgresSync(context.Background(), mgr, nil, getenv, discardLogger(), raw)
 	require.True(t, mgr.Running())

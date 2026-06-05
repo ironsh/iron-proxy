@@ -131,7 +131,12 @@ type PostgresSyncEntry struct {
 	// supply it explicitly.
 	Database string
 	DSN      secrets.Source
-	Role     string
+	// ClientUser and ClientPassword are the credentials clients present to the
+	// proxy for this upstream. Both required: the control plane delivers them so
+	// no per-upstream proxy configuration is needed.
+	ClientUser     string
+	ClientPassword string
+	Role           string
 }
 
 // PostgresFromSync parses the top-level postgres: array from the control
@@ -156,10 +161,12 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 			continue
 		}
 		var e struct {
-			ForeignID string          `json:"foreign_id"`
-			Database  string          `json:"database"`
-			DSN       json.RawMessage `json:"dsn"`
-			Role      string          `json:"role"`
+			ForeignID      string          `json:"foreign_id"`
+			Database       string          `json:"database"`
+			DSN            json.RawMessage `json:"dsn"`
+			ClientUser     string          `json:"client_user"`
+			ClientPassword string          `json:"client_password"`
+			Role           string          `json:"role"`
 		}
 		if err := json.Unmarshal(re, &e); err != nil {
 			return nil, fmt.Errorf("parsing postgres[%d]: %w", i, err)
@@ -173,6 +180,12 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		if e.Database == "" {
 			return nil, fmt.Errorf("postgres[%q]: database is required", e.ForeignID)
 		}
+		if e.ClientUser == "" {
+			return nil, fmt.Errorf("postgres[%q]: client_user is required", e.ForeignID)
+		}
+		if e.ClientPassword == "" {
+			return nil, fmt.Errorf("postgres[%q]: client_password is required", e.ForeignID)
+		}
 		node, err := yamlNodeFromRawJSON(e.DSN)
 		if err != nil {
 			return nil, fmt.Errorf("postgres[%q]: parsing dsn: %w", e.ForeignID, err)
@@ -182,10 +195,12 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 			return nil, fmt.Errorf("postgres[%q]: building dsn source: %w", e.ForeignID, err)
 		}
 		entries = append(entries, PostgresSyncEntry{
-			ForeignID: e.ForeignID,
-			Database:  e.Database,
-			DSN:       src,
-			Role:      e.Role,
+			ForeignID:      e.ForeignID,
+			Database:       e.Database,
+			DSN:            src,
+			ClientUser:     e.ClientUser,
+			ClientPassword: e.ClientPassword,
+			Role:           e.Role,
 		})
 	}
 	return entries, nil
