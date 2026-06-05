@@ -119,14 +119,19 @@ func MCPFromSync(raw json.RawMessage) (node yaml.Node, present bool, err error) 
 	return node, true, nil
 }
 
-// PostgresSyncEntry is one control-plane-synced postgres upstream. The DSN and
-// optional role come from the control plane; the listener and client knobs are
+// PostgresSyncEntry is one control-plane-synced postgres upstream, mapped to a
+// single route under the managed listener. The DSN, optional role, and routing
+// database come from the control plane; the per-route client credentials are
 // supplied separately via environment variables keyed off ForeignID (see the
 // managed-mode env convention in cmd/iron-proxy).
 type PostgresSyncEntry struct {
 	ForeignID string
-	DSN       secrets.Source
-	Role      string
+	// Database is the routing key clients use to reach this upstream. Required:
+	// it must equal the database the DSN connects to, so the control plane must
+	// supply it explicitly.
+	Database string
+	DSN      secrets.Source
+	Role     string
 }
 
 // PostgresFromSync parses the top-level postgres: array from the control
@@ -152,6 +157,7 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		}
 		var e struct {
 			ForeignID string          `json:"foreign_id"`
+			Database  string          `json:"database"`
 			DSN       json.RawMessage `json:"dsn"`
 			Role      string          `json:"role"`
 		}
@@ -164,6 +170,9 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		if !isNonNullJSON(e.DSN) {
 			return nil, fmt.Errorf("postgres[%q]: dsn is required", e.ForeignID)
 		}
+		if e.Database == "" {
+			return nil, fmt.Errorf("postgres[%q]: database is required", e.ForeignID)
+		}
 		node, err := yamlNodeFromRawJSON(e.DSN)
 		if err != nil {
 			return nil, fmt.Errorf("postgres[%q]: parsing dsn: %w", e.ForeignID, err)
@@ -174,6 +183,7 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		}
 		entries = append(entries, PostgresSyncEntry{
 			ForeignID: e.ForeignID,
+			Database:  e.Database,
 			DSN:       src,
 			Role:      e.Role,
 		})

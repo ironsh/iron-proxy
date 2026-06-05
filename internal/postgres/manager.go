@@ -7,84 +7,78 @@ import (
 	"sync"
 )
 
-// Manager owns the running set of postgres listener servers and supports
-// hot reload by closing the old set and starting a new one from updated
-// policies. Safe for concurrent use.
+// Manager owns the single running postgres listener server and supports hot
+// reload by closing the old one and starting a new one from an updated
+// listener. Safe for concurrent use.
 type Manager struct {
 	logger *slog.Logger
 
-	mu      sync.Mutex
-	servers []*Server
+	mu     sync.Mutex
+	server *Server
 }
 
-// NewManager returns a Manager with no running servers.
+// NewManager returns a Manager with no running server.
 func NewManager(logger *slog.Logger) *Manager {
 	return &Manager{logger: logger}
 }
 
-// Start launches a listener for each policy. A listener that exits with a
-// non-nil error sends it to errc so the calling process can treat it as
-// fatal; bind failures during a subsequent Reload are logged instead.
-func (m *Manager) Start(policies []*Policy, errc chan<- error) {
+// Start launches the listener server. A nil listener is a no-op. A server that
+// exits with a non-nil error sends it to errc so the calling process can treat
+// it as fatal; bind failures during a subsequent Reload are logged instead.
+func (m *Manager) Start(listener *Listener, errc chan<- error) {
+	if listener == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, p := range policies {
-		srv := NewServer(p, m.logger)
-		m.servers = append(m.servers, srv)
-		go m.run(srv, errc)
-	}
+	srv := NewServer(listener, m.logger)
+	m.server = srv
+	go m.run(srv, errc)
 }
 
-// Reload closes all running listeners and starts a new set from policies.
-// In-flight client sessions on the closed listeners are not interrupted, but
-// no new connections will be accepted on the old addresses. ctx bounds the
-// shutdown of the old listeners. Listener failures during reload (e.g.
-// address already in use) are logged, not fatal: the management /v1/reload
-// caller has already received a 200.
-func (m *Manager) Reload(ctx context.Context, policies []*Policy) {
+// Reload closes the running listener and starts a new one from the given
+// listener (nil means "no listener"). In-flight client sessions on the closed
+// listener are not interrupted, but no new connections will be accepted on the
+// old address. ctx bounds the shutdown of the old listener. A bind failure
+// during reload (e.g. address already in use) is logged, not fatal: the
+// management /v1/reload caller has already received a 200.
+func (m *Manager) Reload(ctx context.Context, listener *Listener) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, s := range m.servers {
-		if err := s.Shutdown(ctx); err != nil {
+	if m.server != nil {
+		if err := m.server.Shutdown(ctx); err != nil {
 			m.logger.Error("postgres listener shutdown during reload",
-				slog.String("name", s.Name()),
+				slog.String("name", m.server.Name()),
 				slog.String("error", err.Error()),
 			)
 		}
+		m.server = nil
 	}
 
-	m.servers = make([]*Server, 0, len(policies))
-	for _, p := range policies {
-		srv := NewServer(p, m.logger)
-		m.servers = append(m.servers, srv)
-		go m.run(srv, nil)
+	if listener == nil {
+		return
 	}
+	srv := NewServer(listener, m.logger)
+	m.server = srv
+	go m.run(srv, nil)
 }
 
-// Shutdown closes all running listeners. The first error from any server is
-// returned; remaining listeners are still asked to shut down.
+// Shutdown closes the running listener, if any.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var firstErr error
-	for _, s := range m.servers {
-		if err := s.Shutdown(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
+	if m.server == nil {
+		return nil
 	}
-	return firstErr
+	return m.server.Shutdown(ctx)
 }
 
-// Names returns the names of the currently running servers. Test-only.
-func (m *Manager) Names() []string {
+// Running reports whether a listener server is currently running. Test-only.
+func (m *Manager) Running() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]string, 0, len(m.servers))
-	for _, s := range m.servers {
-		out = append(out, s.Name())
-	}
-	return out
+	return m.server != nil
 }
 
 func (m *Manager) run(s *Server, errc chan<- error) {

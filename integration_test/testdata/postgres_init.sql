@@ -34,3 +34,10 @@ INSERT INTO items (owner, data) VALUES
   ('other_role',  'theirs-1'),
   ('other_role',  'theirs-2'),
   ('other_role',  'theirs-3');
+
+-- A second database so the multi-upstream test can route to two distinct
+-- databases. The proxy requires each upstream's routing database to match the
+-- database its DSN connects to, so testing more than one upstream needs more
+-- than one real database. Roles are cluster-global, so tenant_role/other_role
+-- are usable here too.
+CREATE DATABASE otherdb;

@@ -15,10 +15,11 @@ import (
 )
 
 // runSession owns a single client connection from accept through close. It
-// performs the proxy-side handshake under a deadline, opens an upstream
-// connection through pgconn, issues SET ROLE on the upstream session,
-// hijacks the connection, then runs the bidirectional relay loop.
-func runSession(ctx context.Context, clientConn net.Conn, policy *Policy, logger *slog.Logger) {
+// performs the proxy-side handshake under a deadline, selects a route from the
+// startup database name, opens an upstream connection through pgconn, issues
+// SET ROLE on the upstream session, hijacks the connection, then runs the
+// bidirectional relay loop.
+func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, logger *slog.Logger) {
 	defer clientConn.Close()
 
 	_ = clientConn.SetDeadline(time.Now().Add(handshakeTimeout))
@@ -35,7 +36,29 @@ func runSession(ctx context.Context, clientConn net.Conn, policy *Policy, logger
 		return
 	}
 
-	if err := authenticateClient(backend, startup, policy); err != nil {
+	// Select the upstream by the requested database. The client must name a
+	// database explicitly; the proxy does not infer one from the user.
+	dbName := startup.Parameters["database"]
+	if dbName == "" {
+		writeFatal(backend, "3D000", "no database specified in startup message")
+		logger.Info("postgres: no database specified",
+			slog.String("listener", listener.Name()),
+			slog.String("remote", clientConn.RemoteAddr().String()),
+		)
+		return
+	}
+	upstream := listener.Upstream(dbName)
+	if upstream == nil {
+		writeFatal(backend, "3D000", fmt.Sprintf("no upstream for database %q", dbName))
+		logger.Info("postgres: no upstream for database",
+			slog.String("database", dbName),
+			slog.String("listener", listener.Name()),
+			slog.String("remote", clientConn.RemoteAddr().String()),
+		)
+		return
+	}
+
+	if err := authenticateClient(backend, startup, listener); err != nil {
 		logger.Info("postgres: client auth failed",
 			slog.String("error", err.Error()),
 			slog.String("remote", clientConn.RemoteAddr().String()),
@@ -43,26 +66,33 @@ func runSession(ctx context.Context, clientConn net.Conn, policy *Policy, logger
 		return
 	}
 
-	upstream, err := dialUpstream(ctx, policy)
+	upstreamConn, err := dialUpstream(ctx, upstream)
 	if err != nil {
-		writeFatal(backend, "08006", "upstream connection failed")
+		var cfgErr upstreamConfigError
+		if errors.As(err, &cfgErr) {
+			// Configuration error, but surface it clearly to the client rather
+			// than as a generic connection failure.
+			writeFatal(backend, "3D000", cfgErr.Error())
+		} else {
+			writeFatal(backend, "08006", "upstream connection failed")
+		}
 		logger.Error("postgres: upstream connect failed", slog.String("error", err.Error()))
 		return
 	}
 
-	if policy.Role() != "" {
-		if err := setUpstreamRole(ctx, upstream, policy); err != nil {
+	if upstream.Role() != "" {
+		if err := setUpstreamRole(ctx, upstreamConn, upstream); err != nil {
 			writeFatal(backend, "08006", err.Error())
 			logger.Error("postgres: set role failed",
 				slog.String("error", err.Error()),
 				slog.String("remote", clientConn.RemoteAddr().String()),
 			)
-			_ = upstream.Close(ctx)
+			_ = upstreamConn.Close(ctx)
 			return
 		}
 	}
 
-	hijacked, err := upstream.Hijack()
+	hijacked, err := upstreamConn.Hijack()
 	if err != nil {
 		writeFatal(backend, "08006", "upstream hijack failed")
 		logger.Error("postgres: upstream hijack failed", slog.String("error", err.Error()))
@@ -79,7 +109,7 @@ func runSession(ctx context.Context, clientConn net.Conn, policy *Policy, logger
 	// truncated by it. The relay loop drives I/O end-to-end from here.
 	_ = clientConn.SetDeadline(time.Time{})
 
-	relay := newRelay(clientConn, hijacked.Conn, backend, hijacked.Frontend, policy, logger)
+	relay := newRelay(clientConn, hijacked.Conn, backend, hijacked.Frontend, upstream, logger)
 	relay.run()
 }
 
@@ -115,16 +145,66 @@ func receiveStartup(rawConn net.Conn, backend *pgproto3.Backend) (*pgproto3.Star
 	return nil, errors.New("startup message preceded by too many SSL/GSS requests")
 }
 
+// upstreamConfigError marks a dial failure caused by upstream configuration —
+// a DSN that names no database, or one whose database disagrees with the
+// upstream's routing database — rather than a transient connection problem. The
+// session surfaces these to the client as a clear database error.
+type upstreamConfigError interface {
+	error
+	isUpstreamConfigError()
+}
+
+// missingDSNDatabaseError reports that an upstream's DSN does not name a
+// database. The DSN must name the database it connects to, both so the upstream
+// session lands somewhere deterministic and so it can be validated against the
+// upstream's routing database.
+type missingDSNDatabaseError struct {
+	configured string // the upstream's routing database
+}
+
+func (e *missingDSNDatabaseError) Error() string {
+	return fmt.Sprintf("upstream DSN for database %q does not name a database; the DSN must specify the database it connects to",
+		e.configured)
+}
+
+func (*missingDSNDatabaseError) isUpstreamConfigError() {}
+
+// databaseMismatchError reports that an upstream's routing database does not
+// match the database its DSN connects to. The two must always be equal: the
+// routing database is the name the client connected with, so if the upstream
+// session lands on a different database the client's view (current_database(),
+// search_path resolution, etc.) silently diverges from what it asked for.
+type databaseMismatchError struct {
+	configured string // the upstream's routing database (what the client requested)
+	dsn        string // the database the DSN actually connects to
+}
+
+func (e *databaseMismatchError) Error() string {
+	return fmt.Sprintf("upstream database mismatch: client connected to database %q but its DSN connects to %q; the route database and DSN database must match",
+		e.configured, e.dsn)
+}
+
+func (*databaseMismatchError) isUpstreamConfigError() {}
+
 // dialUpstream opens an authenticated PgConn to the upstream database using
-// the DSN resolved from the policy's configured secret source.
-func dialUpstream(ctx context.Context, policy *Policy) (*pgconn.PgConn, error) {
-	dsn, err := policy.UpstreamDSN(ctx)
+// the DSN resolved from the upstream's configured secret source. It refuses to
+// connect when the DSN names no database, or when the DSN's database does not
+// match the upstream's routing database, since that would land the client on a
+// different database than the one it named.
+func dialUpstream(ctx context.Context, upstream *Upstream) (*pgconn.PgConn, error) {
+	dsn, err := upstream.DSN(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("loading upstream DSN: %w", err)
 	}
 	cfg, err := pgconn.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parsing upstream DSN: %w", err)
+	}
+	if cfg.Database == "" {
+		return nil, &missingDSNDatabaseError{configured: upstream.Database()}
+	}
+	if cfg.Database != upstream.Database() {
+		return nil, &databaseMismatchError{configured: upstream.Database(), dsn: cfg.Database}
 	}
 	conn, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {
@@ -140,10 +220,10 @@ func dialUpstream(ctx context.Context, policy *Policy) (*pgconn.PgConn, error) {
 // Transaction or statement pool modes silently swap backends between queries
 // and would defeat the policy; that constraint is enforced by deployment
 // configuration rather than by a runtime probe.
-func setUpstreamRole(ctx context.Context, conn *pgconn.PgConn, policy *Policy) error {
-	setSQL := "SET ROLE " + QuoteIdent(policy.Role())
+func setUpstreamRole(ctx context.Context, conn *pgconn.PgConn, upstream *Upstream) error {
+	setSQL := "SET ROLE " + QuoteIdent(upstream.Role())
 	if _, err := conn.Exec(ctx, setSQL).ReadAll(); err != nil {
-		return fmt.Errorf("upstream rejected SET ROLE %s: %w", QuoteIdent(policy.Role()), err)
+		return fmt.Errorf("upstream rejected SET ROLE %s: %w", QuoteIdent(upstream.Role()), err)
 	}
 	return nil
 }
@@ -187,8 +267,8 @@ type relay struct {
 	backend  *pgproto3.Backend
 	frontend *pgproto3.Frontend
 
-	policy *Policy
-	logger *slog.Logger
+	upstream *Upstream
+	logger   *slog.Logger
 
 	clientWriteMu sync.Mutex
 
@@ -202,13 +282,13 @@ type relay struct {
 	skipExtended bool
 }
 
-func newRelay(clientConn, upstreamConn net.Conn, backend *pgproto3.Backend, frontend *pgproto3.Frontend, policy *Policy, logger *slog.Logger) *relay {
+func newRelay(clientConn, upstreamConn net.Conn, backend *pgproto3.Backend, frontend *pgproto3.Frontend, upstream *Upstream, logger *slog.Logger) *relay {
 	return &relay{
 		clientConn:   clientConn,
 		upstreamConn: upstreamConn,
 		backend:      backend,
 		frontend:     frontend,
-		policy:       policy,
+		upstream:     upstream,
 		logger:       logger,
 	}
 }

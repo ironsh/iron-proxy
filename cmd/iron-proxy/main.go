@@ -11,10 +11,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
@@ -108,18 +106,17 @@ func main() {
 	// and (in managed mode) the config poller.
 	errc := make(chan error, 5)
 
-	// Postgres listeners come from the local YAML postgres: block (self-managed
-	// proxies, inline DSNs) and, in managed mode, from env-derived listeners
-	// synced by the control plane. The manager is created up front so the
-	// config poller can hot-reload it; local policies are the base set that
-	// synced listeners are layered onto.
-	localPgPolicies, err := postgres.LoadFromNode(cfg.Postgres, logger)
+	// The postgres listener comes from the local YAML postgres: block
+	// (self-managed proxies, inline DSNs) and, in managed mode, has additional
+	// routes layered on from the control-plane sync payload. The manager is
+	// created up front so the config poller can hot-reload it.
+	localPgListener, err := postgres.LoadFromNode(cfg.Postgres, logger)
 	if err != nil {
 		logger.Error("loading postgres config", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 	pgManager := postgres.NewManager(logger)
-	pgPolicies := localPgPolicies
+	pgListener := localPgListener
 
 	var holder *transform.PipelineHolder
 	var mcpHolder *mcp.PolicyHolder
@@ -127,7 +124,7 @@ func main() {
 
 	if managed {
 		var ingestToken string
-		holder, mcpHolder, ingestToken, pgPolicies = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgPolicies, logger)
+		holder, mcpHolder, ingestToken, pgListener = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgListener, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -243,7 +240,7 @@ func main() {
 	if mgmtServer != nil {
 		go func() { errc <- fmt.Errorf("management: %w", mgmtServer.ListenAndServe()) }()
 	}
-	pgManager.Start(pgPolicies, errc)
+	pgManager.Start(pgListener, errc)
 
 	startAttrs := []any{
 		slog.String("dns_listen", cfg.DNS.Listen),
@@ -310,7 +307,7 @@ func main() {
 //
 // Initial MCP policy preference: control-plane-supplied mcp block first, then
 // fall back to cfg.MCP from the YAML if the sync did not include one.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgPolicies []*postgres.Policy, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string, []*postgres.Policy) {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgListener *postgres.Listener, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string, *postgres.Listener) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
@@ -368,12 +365,13 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		os.Exit(1)
 	}
 
-	// Compute the initial postgres listener set: local YAML policies plus any
-	// synced listeners whose env vars are present. If the initial sync carried
-	// no postgres block (or an invalid one), fall back to the local policies.
-	pgPolicies := localPgPolicies
-	if policies, ok := postgresPoliciesFromSync(localPgPolicies, os.Getenv, logger, initialPostgres); ok {
-		pgPolicies = policies
+	// Compute the initial postgres listener: the local YAML listener with any
+	// control-plane-synced routes layered on when its env vars are present. If
+	// the initial sync carried no postgres block (or an invalid one), fall back
+	// to the local listener.
+	pgListener := localPgListener
+	if listener, ok := postgresListenerFromSync(localPgListener, os.Getenv, logger, initialPostgres); ok {
+		pgListener = listener
 	}
 
 	// Start config poller.
@@ -385,7 +383,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 			applyMCPSync(mcpHolder, logger, u.MCP)
 		}
 		if u.Postgres != nil {
-			applyPostgresSync(ctx, pgManager, localPgPolicies, os.Getenv, logger, u.Postgres)
+			applyPostgresSync(ctx, pgManager, localPgListener, os.Getenv, logger, u.Postgres)
 		}
 		return nil
 	}, logger)
@@ -394,7 +392,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		errc <- poller.Run(ctx)
 	}()
 
-	return holder, mcpHolder, ingestToken, pgPolicies
+	return holder, mcpHolder, ingestToken, pgListener
 }
 
 // buildInitialMCPHolder picks the initial MCP policy source: a control-plane
@@ -484,88 +482,102 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 	}
 }
 
-// pgEnv returns the environment variable name carrying the given listener knob
-// for a control-plane-synced postgres upstream. foreignID is normalized to
-// env-safe form: uppercased, with '-', '.', and '~' mapped to '_' (the full set
-// of non-alphanumeric characters a foreign_id may contain). For foreignID
-// "pg-analytics" and suffix "LISTEN" the result is
-// "IRON_PROXY_PG_PG_ANALYTICS_LISTEN".
-func pgEnv(foreignID, suffix string) string {
-	norm := strings.Map(func(r rune) rune {
-		switch r {
-		case '-', '.', '~':
-			return '_'
-		default:
-			return unicode.ToUpper(r)
-		}
-	}, foreignID)
-	return "IRON_PROXY_PG_" + norm + "_" + suffix
-}
+// Environment variables that configure the managed postgres listener when the
+// proxy has no local YAML postgres block to source these from. They configure
+// the single listener, not individual upstreams.
+const (
+	pgListenEnv         = "IRON_PROXY_PG_LISTEN"
+	pgClientUserEnv     = "IRON_PROXY_PG_CLIENT_USER"
+	pgClientPasswordEnv = "IRON_PROXY_PG_CLIENT_PASSWORD"
+)
 
-// postgresPoliciesFromSync builds the full postgres policy set for managed mode:
-// the local YAML policies plus every control-plane-synced listener whose
-// LISTEN, CLIENT_USER, and CLIENT_PASSWORD env vars are all present. Local YAML
-// policies win on a foreign_id/name conflict, and the conflicting synced entry
-// is dropped with a log line. A synced entry missing any required env var is
-// skipped (also logged) — that is how a proxy granted a secret it isn't meant
-// to serve locally simply ignores it. Returns ok=false only when the sync
-// payload itself is invalid, signaling the caller to keep the current
-// listeners.
-func postgresPoliciesFromSync(local []*postgres.Policy, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) ([]*postgres.Policy, bool) {
+// postgresListenerFromSync builds the single postgres listener for managed mode.
+// Each synced entry becomes an upstream keyed by its database, carrying the
+// database, DSN, and role the control plane delivered.
+//
+// When a local YAML postgres block is present, the synced upstreams are layered
+// onto it, reusing its bind address and client credential; a synced upstream
+// whose database collides with a local one is dropped (logged). Otherwise the
+// listener is built from the environment: IRON_PROXY_PG_LISTEN plus the shared
+// IRON_PROXY_PG_CLIENT_USER / IRON_PROXY_PG_CLIENT_PASSWORD. When no bind address
+// or client credential is available, or no upstreams resolve, no listener is
+// returned. Returns ok=false only when the sync payload itself is invalid,
+// signaling the caller to keep the current listener.
+func postgresListenerFromSync(local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) (*postgres.Listener, bool) {
 	entries, err := config.PostgresFromSync(raw, logger)
 	if err != nil {
-		logger.Error("rejecting invalid postgres config from sync, keeping current listeners", slog.String("error", err.Error()))
+		logger.Error("rejecting invalid postgres config from sync, keeping current listener", slog.String("error", err.Error()))
 		return nil, false
 	}
 
-	localNames := make(map[string]bool, len(local))
-	for _, p := range local {
-		localNames[p.Name()] = true
-	}
-
-	policies := make([]*postgres.Policy, 0, len(local)+len(entries))
-	policies = append(policies, local...)
+	synced := make([]*postgres.Upstream, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if localNames[e.ForeignID] {
-			logger.Warn("postgres listener defined in both local config and control plane; keeping local",
-				slog.String("foreign_id", e.ForeignID))
-			continue
-		}
-		listen := getenv(pgEnv(e.ForeignID, "LISTEN"))
-		clientUser := getenv(pgEnv(e.ForeignID, "CLIENT_USER"))
-		clientPassword := getenv(pgEnv(e.ForeignID, "CLIENT_PASSWORD"))
-		if listen == "" || clientUser == "" || clientPassword == "" {
-			logger.Info("skipping synced postgres listener: required env vars not set",
-				slog.String("foreign_id", e.ForeignID),
-				slog.Bool("has_listen", listen != ""),
-				slog.Bool("has_client_user", clientUser != ""),
-				slog.Bool("has_client_password", clientPassword != ""),
-			)
-			continue
-		}
-		p, err := postgres.NewManagedPolicy(e.ForeignID, listen, e.DSN, clientUser, clientPassword, e.Role)
+		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.Role)
 		if err != nil {
-			logger.Error("skipping synced postgres listener: invalid policy",
+			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),
 				slog.String("error", err.Error()),
 			)
 			continue
 		}
-		policies = append(policies, p)
+		if seen[u.Database()] {
+			logger.Warn("skipping synced postgres upstream: duplicate database",
+				slog.String("foreign_id", e.ForeignID),
+				slog.String("database", u.Database()),
+			)
+			continue
+		}
+		seen[u.Database()] = true
+		synced = append(synced, u)
 	}
-	return policies, true
+
+	// With a local listener, layer the synced upstreams on top, reusing its
+	// address and client credential. Local wins on a database collision.
+	if local != nil {
+		merged, dropped := local.WithUpstreams(synced)
+		for _, db := range dropped {
+			logger.Warn("skipping synced postgres upstream: duplicate database",
+				slog.String("database", db))
+		}
+		return merged, true
+	}
+
+	// No local listener: source the listener knobs from the environment.
+	if len(synced) == 0 {
+		return nil, true
+	}
+	listen := getenv(pgListenEnv)
+	clientUser := getenv(pgClientUserEnv)
+	clientPassword := getenv(pgClientPasswordEnv)
+	if listen == "" || clientUser == "" || clientPassword == "" {
+		logger.Info("skipping control-plane postgres upstreams: listener env not fully set",
+			slog.Bool("has_listen", listen != ""),
+			slog.Bool("has_client_user", clientUser != ""),
+			slog.Bool("has_client_password", clientPassword != ""),
+			slog.Int("upstream_count", len(synced)),
+		)
+		return nil, true
+	}
+
+	listener, err := postgres.NewListener(listen, clientUser, clientPassword, synced)
+	if err != nil {
+		logger.Error("skipping postgres listener: invalid listener", slog.String("error", err.Error()))
+		return nil, true
+	}
+	return listener, true
 }
 
-// applyPostgresSync rebuilds the postgres listener set from a sync payload and
+// applyPostgresSync rebuilds the postgres listener from a sync payload and
 // hot-reloads the manager. An invalid payload is logged and the running
-// listeners are preserved.
-func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local []*postgres.Policy, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) {
-	policies, ok := postgresPoliciesFromSync(local, getenv, logger, raw)
+// listener is preserved.
+func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) {
+	listener, ok := postgresListenerFromSync(local, getenv, logger, raw)
 	if !ok {
 		return
 	}
-	mgr.Reload(ctx, policies)
-	logger.Info("postgres listeners reloaded from sync", slog.Int("count", len(policies)))
+	mgr.Reload(ctx, listener)
+	logger.Info("postgres listener reloaded from sync", slog.Bool("running", listener != nil))
 }
 
 // newReloadFunc returns a management.ReloadFunc that re-reads the YAML config
@@ -591,17 +603,17 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
-		newPgPolicies, err := postgres.LoadFromNode(newCfg.Postgres, logger)
+		newPgListener, err := postgres.LoadFromNode(newCfg.Postgres, logger)
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 		holder.Store(newPipeline)
 		mcpHolder.Store(newPolicy)
-		pgManager.Reload(ctx, newPgPolicies)
+		pgManager.Reload(ctx, newPgListener)
 		logger.Info("pipeline reloaded via management API",
 			slog.String("transforms", newPipeline.Names()),
-			slog.Int("postgres_servers", len(newPgPolicies)),
+			slog.Bool("postgres_listener", newPgListener != nil),
 		)
 		return nil
 	}

@@ -18,22 +18,22 @@ const handshakeTimeout = 30 * time.Second
 // Server is the listener that accepts incoming PostgreSQL client connections
 // and dispatches them to per-conn session handlers.
 type Server struct {
-	policy *Policy
-	logger *slog.Logger
+	listener *Listener
+	logger   *slog.Logger
 
 	mu       sync.Mutex
-	listener net.Listener
+	netLn    net.Listener
 	shutdown bool
 }
 
-// NewServer constructs a postgres listener bound to policy.
-func NewServer(policy *Policy, logger *slog.Logger) *Server {
-	return &Server{policy: policy, logger: logger}
+// NewServer constructs a postgres server bound to the given listener config.
+func NewServer(listener *Listener, logger *slog.Logger) *Server {
+	return &Server{listener: listener, logger: logger}
 }
 
-// Name returns the configured server name. Used in logs and error wrapping
-// when multiple postgres servers are running.
-func (s *Server) Name() string { return s.policy.Name() }
+// Name returns the configured listener name. Used in logs and error wrapping
+// when multiple postgres listeners are running.
+func (s *Server) Name() string { return s.listener.Name() }
 
 // Addr returns the address the server is bound to. Useful in tests where the
 // configured listen address is ":0" — the actual port is only known after
@@ -41,31 +41,28 @@ func (s *Server) Name() string { return s.policy.Name() }
 func (s *Server) Addr() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.listener == nil {
+	if s.netLn == nil {
 		return ""
 	}
-	return s.listener.Addr().String()
+	return s.netLn.Addr().String()
 }
 
 // ListenAndServe binds to the configured listen address and serves clients
 // until Shutdown is called or the listener returns a fatal error.
 func (s *Server) ListenAndServe() error {
-	ln, err := net.Listen("tcp", s.policy.Listen())
+	ln, err := net.Listen("tcp", s.listener.Listen())
 	if err != nil {
 		return fmt.Errorf("postgres listen: %w", err)
 	}
 	s.mu.Lock()
-	s.listener = ln
+	s.netLn = ln
 	s.mu.Unlock()
 
-	startAttrs := []any{
-		slog.String("name", s.policy.Name()),
+	s.logger.Info("postgres proxy starting",
+		slog.String("name", s.listener.Name()),
 		slog.String("addr", ln.Addr().String()),
-	}
-	if role := s.policy.Role(); role != "" {
-		startAttrs = append(startAttrs, slog.String("role", role))
-	}
-	s.logger.Info("postgres proxy starting", startAttrs...)
+		slog.Int("upstreams", len(s.listener.upstreams)),
+	)
 
 	for {
 		conn, err := ln.Accept()
@@ -91,7 +88,7 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) Shutdown(_ context.Context) error {
 	s.mu.Lock()
 	s.shutdown = true
-	ln := s.listener
+	ln := s.netLn
 	s.mu.Unlock()
 	if ln == nil {
 		return nil
@@ -108,5 +105,5 @@ func (s *Server) handle(conn net.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	runSession(ctx, conn, s.policy, s.logger)
+	runSession(ctx, conn, s.listener, s.logger)
 }

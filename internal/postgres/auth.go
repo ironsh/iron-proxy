@@ -19,13 +19,13 @@ import (
 // On failure, an ErrorResponse describing the auth failure has already been
 // written to the client; callers should close the connection without further
 // protocol exchange.
-func authenticateClient(backend *pgproto3.Backend, startup *pgproto3.StartupMessage, policy *Policy) error {
+func authenticateClient(backend *pgproto3.Backend, startup *pgproto3.StartupMessage, listener *Listener) error {
 	user := startup.Parameters["user"]
 	if user == "" {
 		writeFatal(backend, "28000", "no user provided in startup message")
 		return errors.New("missing user in startup message")
 	}
-	if user != policy.ClientUser() {
+	if user != listener.ClientUser() {
 		writeFatal(backend, "28000", fmt.Sprintf("unknown user %q", user))
 		return fmt.Errorf("unknown user %q", user)
 	}
@@ -45,7 +45,7 @@ func authenticateClient(backend *pgproto3.Backend, startup *pgproto3.StartupMess
 		return fmt.Errorf("expected PasswordMessage; got %T", msg)
 	}
 
-	if !policy.VerifyClient(user, pwMsg.Password) {
+	if !listener.VerifyClient(user, pwMsg.Password) {
 		writeFatal(backend, "28P01", "password authentication failed")
 		return errors.New("client password mismatch")
 	}
