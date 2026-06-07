@@ -405,9 +405,9 @@ transforms:
 
 The sandbox never holds real credentials. Instead:
 
-1. Configure iron-proxy with the real secret source: environment variables,
-   AWS Secrets Manager, AWS Systems Manager Parameter Store, 1Password (service
-   account), or 1Password Connect.
+1. Configure iron-proxy with the real secret source: environment variables, a
+   file on disk, AWS Secrets Manager, AWS Systems Manager Parameter Store,
+   1Password (service account), or 1Password Connect.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -436,7 +436,14 @@ Query parameters are always scanned.
 
 Secret sources:
 
-- **`env`:** reads `var` from the proxy process environment.
+- **`env`:** reads `var` from the proxy process environment. Fixed at process
+  start — use `file` instead if you need to rotate the value on a running proxy.
+- **`file`:** reads the secret from `path` on disk. The file is re-read on every
+  config reload (boot and each `POST /v1/reload`) and, when `ttl` is set, on
+  cache expiry — so you can rotate a running proxy's secret by rewriting the
+  file (atomically: write-temp + rename) and reloading, without a restart. The
+  value is the exact file contents (no trimming), so the writer controls
+  trailing whitespace. Optional `ttl` and `failure_ttl` are supported.
 - **`aws_sm`:** reads `secret_id` from AWS Secrets Manager. Optional `region`,
   `ttl`, and `failure_ttl` are supported.
 - **`aws_ssm`:** reads `name` from AWS Systems Manager Parameter Store. Optional

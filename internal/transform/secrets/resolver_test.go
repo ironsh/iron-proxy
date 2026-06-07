@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -93,6 +95,123 @@ func TestEnvBuilder_HappyPath(t *testing.T) {
 	val, err := result.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "real-value", val)
+}
+
+// --- fileBuilder tests ---
+
+func TestFileBuilder_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(path, []byte("real-file-value"), 0o400))
+
+	r := newFileBuilder(slog.Default())
+	node := yamlNode(t, map[string]string{"type": "file", "path": path})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+	require.Equal(t, path, result.Name())
+
+	val, err := result.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "real-file-value", val)
+}
+
+func TestFileBuilder_PreservesExactBytes(t *testing.T) {
+	// The value is the exact file contents — no trimming — so the writer
+	// controls trailing whitespace (matching k8s/docker file-mounted secrets).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(path, []byte("token-with-newline\n"), 0o400))
+
+	r := newFileBuilder(slog.Default())
+	node := yamlNode(t, map[string]string{"type": "file", "path": path})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+
+	val, err := result.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "token-with-newline\n", val)
+}
+
+func TestFileBuilder_TTLRefreshSeesNewContents(t *testing.T) {
+	// With a ttl set, a rotated file is picked up on cache expiry without a
+	// pipeline rebuild. Rotation mirrors the integrator's atomic write-temp +
+	// rename onto a read-only (0o400) secret file.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret")
+	writeAtomic := func(value string) {
+		tmp := filepath.Join(dir, "secret.tmp")
+		require.NoError(t, os.WriteFile(tmp, []byte(value), 0o400))
+		require.NoError(t, os.Rename(tmp, path))
+	}
+	writeAtomic("v1")
+
+	r := newFileBuilder(slog.Default())
+	node := yamlNode(t, map[string]string{"type": "file", "path": path, "ttl": "10ms"})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+
+	val, err := result.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "v1", val)
+
+	writeAtomic("v2")
+	require.Eventually(t, func() bool {
+		v, err := result.Get(context.Background())
+		return err == nil && v == "v2"
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestFileBuilder_Errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  map[string]string
+		errMsg string
+		errAt  string
+	}{
+		{
+			name:   "missing path field",
+			input:  map[string]string{"type": "file"},
+			errMsg: "\"path\" field",
+			errAt:  "build",
+		},
+		{
+			name:   "nonexistent file",
+			input:  map[string]string{"type": "file", "path": "/nonexistent/secret/path"},
+			errMsg: "reading secret file",
+			errAt:  "fetch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newFileBuilder(slog.Default())
+			node := yamlNode(t, tt.input)
+			result, err := r.Build(node)
+			if tt.errAt == "build" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errMsg)
+				return
+			}
+			require.NoError(t, err)
+			_, err = result.Get(context.Background())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+func TestFileBuilder_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(path, []byte(""), 0o400))
+
+	r := newFileBuilder(slog.Default())
+	node := yamlNode(t, map[string]string{"type": "file", "path": path})
+	result, err := r.Build(node)
+	require.NoError(t, err)
+
+	_, err = result.Get(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "is empty")
 }
 
 func TestEnvBuilder_Errors(t *testing.T) {

@@ -118,6 +118,54 @@ func (r *envBuilder) Build(raw yaml.Node) (secretSource, error) {
 	})
 }
 
+// --- file builder ---
+
+// fileBuilder reads secrets from a file on disk. The file is re-read on every
+// pipeline build (boot and each /v1/reload) and, when ttl is set, on cache
+// expiry — so an integrator can rotate a running proxy's secret value by
+// rewriting the file (atomically: write-temp + rename) and triggering a
+// reload, without restarting the process. Unlike env (fixed at exec), a file
+// is mutable for the process lifetime.
+type fileBuilder struct {
+	readFile func(string) ([]byte, error)
+	logger   *slog.Logger
+}
+
+type fileConfig struct {
+	Type       string `yaml:"type"`
+	Path       string `yaml:"path"`
+	TTL        string `yaml:"ttl,omitempty"`
+	FailureTTL string `yaml:"failure_ttl,omitempty"`
+}
+
+func newFileBuilder(logger *slog.Logger) *fileBuilder {
+	return &fileBuilder{readFile: os.ReadFile, logger: logger}
+}
+
+func (r *fileBuilder) Build(raw yaml.Node) (secretSource, error) {
+	var cfg fileConfig
+	if err := raw.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parsing file source config: %w", err)
+	}
+	if cfg.Path == "" {
+		return nil, fmt.Errorf("file source requires \"path\" field")
+	}
+	return buildLazySource(cfg.Path, cfg.TTL, cfg.FailureTTL, r.logger, func(context.Context) (string, error) {
+		// The value is the exact file contents — no trimming. The writer
+		// controls trailing whitespace, matching how Kubernetes and Docker
+		// expose file-mounted secrets. Read each call so a ttl refresh sees
+		// the current contents.
+		b, err := r.readFile(cfg.Path)
+		if err != nil {
+			return "", fmt.Errorf("reading secret file %q: %w", cfg.Path, err)
+		}
+		if len(b) == 0 {
+			return "", fmt.Errorf("secret file %q is empty", cfg.Path)
+		}
+		return string(b), nil
+	})
+}
+
 // --- shared AWS client cache ---
 
 // awsClientCache provides region-keyed caching for any AWS service client.
