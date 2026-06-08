@@ -7,14 +7,13 @@ tools.
 ## Repo at a glance
 
 - Single Go module: `github.com/ironsh/iron-proxy` (Go 1.26+).
-- Two binaries: `cmd/iron-proxy` (the MITM egress proxy) and
-  `cmd/iron-token-broker` (OAuth token broker for shared credentials).
+- One binary: `cmd/iron-proxy` (the MITM egress proxy).
 - Core packages live under `internal/`. The transform pipeline lives in
   `internal/transform/` with one subpackage per transform
   (`allowlist`, `secrets`, `bodycapture`, `headerallowlist`, `annotate`,
   `judge`, `grpc`, `hmacsign`, `oauth`, `awsauth`, `gcpauth`).
 - Integration tests against real backends (AWS, 1Password, GCP, Postgres,
-  gRPC, MCP, token broker) live in `integration_test/`. Unit tests sit next
+  gRPC, MCP) live in `integration_test/`. Unit tests sit next
   to the code they exercise.
 
 The README is the source of truth for product behavior. When in doubt about

@@ -90,9 +90,7 @@ func (r *opConnectBuilder) fetchSecret(ctx context.Context, cfg opConnectConfig,
 	return val, nil
 }
 
-// OPRef is a parsed op://vault/item/[section/]field reference. Exported so
-// other packages (notably internal/broker/store) can share the parser and
-// the Connect-side field selector without re-implementing them.
+// OPRef is a parsed op://vault/item/[section/]field reference.
 type OPRef struct {
 	Vault   string
 	Item    string

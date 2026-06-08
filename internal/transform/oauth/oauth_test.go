@@ -793,10 +793,8 @@ tokens:
 	require.NoError(t, err)
 
 	// httptest can't observe wire-level casing (the server parses through
-	// textproto, which canonicalizes); the wire-level preservation guarantee
-	// is exercised by the broker's TestRefreshPreservesHeaderCasing, which
-	// uses a raw TCP listener. Here we just confirm the value reached the
-	// token endpoint at all.
+	// textproto, which canonicalizes). Here we just confirm the value reached
+	// the token endpoint at all.
 	require.Equal(t, "venue-api-key", srv.LastHeaders().Get("X-Api-Key"))
 	// The inbound request itself must not have received the header.
 	require.Empty(t, req.Header.Get("X-Api-Key"))
