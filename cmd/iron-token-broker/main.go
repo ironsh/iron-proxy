@@ -76,6 +76,7 @@ func main() {
 		Credentials: credentials,
 		Logger:      logger,
 		BearerToken: bearerToken,
+		ProxyFunc:   cfg.UpstreamProxy.ProxyFunc(),
 	})
 	if err != nil {
 		logger.Error("initializing broker", slog.String("error", err.Error()))
@@ -143,4 +144,3 @@ func newLogger(cfg *config.Config) (*slog.Logger, error) {
 	}
 	return slog.New(handler), nil
 }
-

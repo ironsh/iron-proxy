@@ -21,6 +21,14 @@ defaults:
   max_refresh_interval: "24h"         # keep-alive ceiling so idle creds don't age out
   refresh_timeout: "30s"              # per-attempt HTTP timeout against the IdP
 
+# Route credential-refresh requests through an upstream SOCKS5/HTTP CONNECT
+# proxy. The standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment variables
+# override the matching field below when set, so this block can be omitted if
+# those are already exported.
+# upstream_proxy:
+#   https_proxy: "http://proxy.corp:3128"
+#   no_proxy: "localhost,127.0.0.1"
+
 credentials:
   # OpenAI Codex — public client, no client_secret. The shipped UUIDs
   # below are placeholders; copy yours from the 1Password UI with the

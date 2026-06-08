@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -40,8 +41,12 @@ type Options struct {
 	Config      *config.Config
 	Credentials []config.BuiltCredential
 	Logger      *slog.Logger
-	BearerToken string // captured value of cfg.BearerAuthEnv; empty disables auth
+	BearerToken string       // captured value of cfg.BearerAuthEnv; empty disables auth
 	HTTPClient  *http.Client // shared across credentials; nil = default
+	// ProxyFunc routes credential-refresh requests through an upstream
+	// SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil falls back to
+	// http.ProxyFromEnvironment so the standard env vars are still honored.
+	ProxyFunc func(*http.Request) (*url.URL, error)
 }
 
 // New wires a Broker but does not start any goroutines or open any
@@ -54,7 +59,7 @@ func New(opts Options) (*Broker, error) {
 	met := newMetrics()
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
-		httpClient = newSharedHTTPClient(time.Duration(opts.Config.Defaults.RefreshTimeout))
+		httpClient = newSharedHTTPClient(time.Duration(opts.Config.Defaults.RefreshTimeout), opts.ProxyFunc)
 	}
 
 	creds := make(map[string]*credentialState, len(opts.Credentials))
@@ -139,7 +144,10 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 // refresh loop. A single client lets every refresh share the TLS session
 // cache and connection pool against the IdP, which matters for IdPs that
 // throttle TLS handshakes.
-func newSharedHTTPClient(refreshTimeout time.Duration) *http.Client {
+func newSharedHTTPClient(refreshTimeout time.Duration, proxyFunc func(*http.Request) (*url.URL, error)) *http.Client {
+	if proxyFunc == nil {
+		proxyFunc = http.ProxyFromEnvironment
+	}
 	transport := &http.Transport{
 		MaxIdleConns:          50,
 		MaxIdleConnsPerHost:   10,
@@ -147,10 +155,9 @@ func newSharedHTTPClient(refreshTimeout time.Duration) *http.Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		// Don't follow redirects automatically — the token endpoint
-		// is a single canonical URL, and a redirect there is a sign
-		// of misconfiguration.
-		Proxy: http.ProxyFromEnvironment,
+		// Route through an upstream proxy when one is configured/exported;
+		// otherwise connect directly.
+		Proxy: proxyFunc,
 	}
 	if refreshTimeout > 0 && refreshTimeout < 30*time.Second {
 		transport.ResponseHeaderTimeout = refreshTimeout

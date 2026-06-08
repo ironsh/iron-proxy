@@ -51,6 +51,23 @@ proxy:
   # upstream_deny_cidrs:
   #   - "169.254.169.254/32"
   #   - "127.0.0.0/8"
+  #
+  # Route iron-proxy's own outbound connections through an upstream
+  # SOCKS5/HTTP CONNECT proxy. Useful in corporate networks where all egress
+  # must traverse a forward proxy. Proxy URLs accept http, https, socks5, and
+  # socks5h schemes. The standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment
+  # variables override the matching field below when set, so you can omit this
+  # block entirely if those are already exported.
+  #
+  # NOTE: when an upstream proxy is in use, upstream_deny_cidrs is enforced
+  # against the proxy's address, not the final target — the proxy resolves and
+  # connects to the target on iron-proxy's behalf. This currently applies to
+  # the HTTP/HTTPS forward path (incl. CONNECT in mitm mode); raw TCP tunnels
+  # (sni-only passthrough, WebSocket) still dial directly.
+  # upstream_proxy:
+  #   http_proxy: "http://proxy.corp:3128"
+  #   https_proxy: "http://proxy.corp:3128"
+  #   no_proxy: "localhost,127.0.0.1,.internal.example.com"
 
 # TLS / MITM configuration
 tls:
