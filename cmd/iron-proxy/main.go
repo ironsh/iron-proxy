@@ -216,6 +216,7 @@ func main() {
 		MCPPolicy:                     mcpHolder,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
+		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
 	})
 
 	// Initialize metrics server.

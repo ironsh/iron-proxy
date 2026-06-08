@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/broker/store"
+	proxyconfig "github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -55,6 +56,10 @@ type Config struct {
 	Log           Log          `yaml:"log"`
 	Defaults      Defaults     `yaml:"defaults"`
 	Credentials   []Credential `yaml:"credentials"`
+	// UpstreamProxy routes credential-refresh requests through an upstream
+	// SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+	// environment variables override these fields when set.
+	UpstreamProxy proxyconfig.UpstreamProxy `yaml:"upstream_proxy"`
 }
 
 // Log configures structured logging.

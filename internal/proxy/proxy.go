@@ -67,13 +67,17 @@ type Options struct {
 	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
 	Pipeline   *transform.PipelineHolder
 	Resolver   *net.Resolver
-	Guard      *dnsguard.Guard // nil is treated as an empty (no-op) guard
+	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
 	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
 	// config.DefaultUpstreamResponseHeaderTimeout.
 	UpstreamResponseHeaderTimeout time.Duration
+	// UpstreamProxy, when non-nil, routes upstream HTTP/HTTPS requests through
+	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
+	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
+	UpstreamProxy func(*http.Request) (*url.URL, error)
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -94,7 +98,7 @@ func New(opts Options) *Proxy {
 		tunnelDone:     make(chan struct{}),
 		certCache:      opts.CertCache,
 		pipeline:       opts.Pipeline,
-		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout),
+		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
@@ -712,7 +716,10 @@ func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 // is rejected before the TCP connect.
 // responseHeaderTimeout overrides the default 30-second
 // ResponseHeaderTimeout when greater than zero; pass 0 to keep the default.
-func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeaderTimeout time.Duration) *http.Transport {
+// proxyFunc, when non-nil, routes upstream requests through an upstream
+// SOCKS5/HTTP CONNECT proxy; the dialer (and thus guard.DialControl) then
+// applies to the proxy connection rather than the final target.
+func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeaderTimeout time.Duration, proxyFunc func(*http.Request) (*url.URL, error)) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -726,6 +733,7 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
+		Proxy:                 proxyFunc,
 		DialContext:           dialer.DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,

@@ -90,6 +90,10 @@ type Proxy struct {
 	// at connect time against the resolved address. When unset, a secure
 	// default (IMDS + loopback) is applied; set to an empty list to disable.
 	UpstreamDenyCIDRs CIDRList `yaml:"upstream_deny_cidrs"`
+	// UpstreamProxy routes iron-proxy's own outbound connections through an
+	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
+	// NO_PROXY environment variables override these fields when set.
+	UpstreamProxy UpstreamProxy `yaml:"upstream_proxy"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
