@@ -80,6 +80,8 @@ type TransformContext struct {
 	Logger     *slog.Logger
 	Mode       Mode
 	Tunnel     *TunnelInfo
+	ProxyLogin string
+	SourceIP   string
 
 	// BodyCapture is the side channel a body_capture transform uses to
 	// communicate captured request body bytes out of the pipeline. The proxy
@@ -98,6 +100,10 @@ type TransformContext struct {
 type TunnelInfo struct {
 	// Target is the host:port from the CONNECT request or SOCKS5 target.
 	Target string
+	// ProxyLogin is the authenticated proxy login that opened the tunnel.
+	ProxyLogin string
+	// SourceIP is the client IP that opened the tunnel.
+	SourceIP string
 
 	// RequestTransforms are the traces from the CONNECT/SOCKS5 request
 	// pipeline, in the order the transforms ran. Inner request transforms and
@@ -128,6 +134,8 @@ type PipelineResult struct {
 	Method     string
 	Path       string
 	RemoteAddr string
+	ProxyLogin string
+	SourceIP   string
 	SNI        string
 	Mode       Mode
 

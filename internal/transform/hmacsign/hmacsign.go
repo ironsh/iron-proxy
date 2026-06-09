@@ -192,7 +192,7 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*HMACSig
 func (h *HMACSign) Name() string { return "hmac_sign" }
 
 func (h *HMACSign) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if !hostmatch.MatchAnyRule(h.rules, req) {
+	if !hostmatch.MatchAnyRuleContext(h.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

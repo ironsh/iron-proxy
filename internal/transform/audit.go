@@ -32,6 +32,7 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.String("method", result.Method),
 				slog.String("path", result.Path),
 				slog.String("remote_addr", result.RemoteAddr),
+				slog.String("source_ip", result.SourceIP),
 				slog.String("sni", result.SNI),
 				slog.String("mode", result.Mode.String()),
 				slog.String("action", action),
@@ -39,8 +40,17 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
 			),
 		}
+		if result.ProxyLogin != "" {
+			attrs = append(attrs, slog.String("proxy_login", result.ProxyLogin))
+		}
 		if result.Tunnel != nil {
 			tunnelAttrs := []any{slog.String("target", result.Tunnel.Target)}
+			if result.Tunnel.ProxyLogin != "" {
+				tunnelAttrs = append(tunnelAttrs, slog.String("proxy_login", result.Tunnel.ProxyLogin))
+			}
+			if result.Tunnel.SourceIP != "" {
+				tunnelAttrs = append(tunnelAttrs, slog.String("source_ip", result.Tunnel.SourceIP))
+			}
 			if len(result.Tunnel.RequestTransforms) > 0 {
 				tunnelAttrs = append(tunnelAttrs,
 					slog.Any("request_transforms", buildTraceEntries(result.Tunnel.RequestTransforms)),

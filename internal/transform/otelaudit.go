@@ -46,11 +46,15 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 			log.String("method", result.Method),
 			log.String("path", result.Path),
 			log.String("remote_addr", result.RemoteAddr),
+			log.String("source_ip", result.SourceIP),
 			log.String("sni", result.SNI),
 			log.String("mode", result.Mode.String()),
 			log.String("action", action),
 			log.Int("status_code", result.StatusCode),
 			log.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
+		}
+		if result.ProxyLogin != "" {
+			attrs = append(attrs, log.String("proxy_login", result.ProxyLogin))
 		}
 
 		if result.Action == ActionReject {

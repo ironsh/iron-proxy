@@ -193,7 +193,7 @@ func (g *GCPAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		}, nil
 	}
 
-	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
+	if len(g.rules) > 0 && !hostmatch.MatchAnyRuleContext(g.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
