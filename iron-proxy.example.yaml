@@ -29,6 +29,18 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
+  # Optional CONNECT/SOCKS5 proxy listener.
+  # tunnel_listen: ":8080"
+  #
+  # Optional client auth for HTTP proxy requests, CONNECT, and SOCKS5.
+  # Default is false; existing no-auth configs keep working.
+  # auth:
+  #   required: true
+  #   users:
+  #     - login: "ci"
+  #       password_env: "IRON_PROXY_CI_PASSWORD"
+  #     - login: "dev"
+  #       password_env: "IRON_PROXY_DEV_PASSWORD"
   # Global body buffer limits for transforms.
   max_request_body_bytes: 1048576   # default: 1 MiB
   # max_response_body_bytes: 0      # default: 0 (uncapped)
@@ -107,6 +119,9 @@ transforms:
         - host: "api.openai.com"
           methods: ["POST"]
           paths: ["/v1/*"]
+          # Optional: also require an authenticated proxy login and source IP.
+          # proxy_logins: ["ci"]
+          # source_cidrs: ["10.16.0.0/16"]
         - host: "*.anthropic.com"
           methods: ["POST"]
           paths: ["/v1/messages", "/v1/complete"]

@@ -236,6 +236,11 @@ proxy:
   tunnel_listen: ":8080" # Optional CONNECT/SOCKS5 listener
   max_request_body_bytes: 1048576 # 1 MiB (default)
   max_response_body_bytes: 0 # uncapped (default)
+  auth:
+    required: false # Default: false
+    # users:
+    #   - login: "ci"
+    #     password_env: "IRON_PROXY_CI_PASSWORD"
 
 tls:
   ca_cert: "/etc/iron-proxy/ca.crt" # Required
@@ -251,6 +256,10 @@ transforms:
         - "*.anthropic.com"
       cidrs:
         - "10.0.0.0/8"
+      rules:
+        - host: "api.openai.com"
+          proxy_logins: ["ci"]
+          source_cidrs: ["10.16.0.0/16"]
 
   - name: secrets
     config:
@@ -269,6 +278,27 @@ log:
   level: "info" # debug, info, warn, error
 ```
 
+### Proxy auth
+
+`proxy.auth.required` enables client authentication for HTTP proxy requests,
+HTTP `CONNECT`, and SOCKS5. Default is `false`.
+
+HTTP and `CONNECT` clients use `Proxy-Authorization: Basic ...`. SOCKS5 clients
+use username/password auth. In `tls.mode: sni-only`, raw HTTPS connections do
+not carry auth metadata; when auth is required, use the tunnel listener.
+
+```yaml
+proxy:
+  tunnel_listen: ":8080"
+  auth:
+    required: true
+    users:
+      - login: "ci"
+        password_env: "IRON_PROXY_CI_PASSWORD"
+      - login: "dev"
+        password_env: "IRON_PROXY_DEV_PASSWORD"
+```
+
 ### DNS
 
 Everything resolves to `proxy_ip` by default, which is what routes traffic
@@ -285,6 +315,19 @@ Unmatched requests get a `403 Forbidden`.
 
 Domain patterns use glob matching: `*.example.com` matches any subdomain and
 `example.com` itself.
+
+Rules can also be scoped by authenticated proxy login and client source CIDR:
+
+```yaml
+transforms:
+  - name: allowlist
+    config:
+      rules:
+        - host: "api.openai.com"
+          methods: ["POST"]
+          proxy_logins: ["ci", "dev"]
+          source_cidrs: ["10.16.0.0/16"]
+```
 
 **Warn mode:** Set `warn: true` to observe what the allowlist would block without
 actually enforcing it. Requests that would be rejected are allowed through but
