@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -95,6 +97,11 @@ func (r *replacerTransform) TransformResponse(_ context.Context, _ *transform.Tr
 
 func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) (*Proxy, string, string, *x509.CertPool) {
 	t.Helper()
+	return startProxyWithAuth(t, transforms, config.ProxyAuth{})
+}
+
+func startProxyWithAuth(t *testing.T, transforms []transform.Transformer, auth config.ProxyAuth) (*Proxy, string, string, *x509.CertPool) {
+	t.Helper()
 
 	caCert, caKey := generateTestCA(t)
 	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
@@ -107,6 +114,7 @@ func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) 
 		HTTPSAddr: "127.0.0.1:0",
 		CertCache: cache,
 		Pipeline:  holder,
+		Auth:      auth,
 		Logger:    testLogger(),
 	})
 
@@ -159,6 +167,55 @@ func TestHTTPProxy(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "hello from upstream", string(body))
+}
+
+func TestHTTPProxy_AuthRequired(t *testing.T) {
+	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users: []config.ProxyAuthUser{{
+			Login:    "ci",
+			Password: "secret",
+		}},
+	})
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+	require.NoError(t, err)
+	req.Host = "example.com"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	require.Equal(t, proxyAuthRealm, resp.Header.Get("Proxy-Authenticate"))
+}
+
+func TestHTTPProxy_AuthValid(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Empty(t, r.Header.Get("Proxy-Authorization"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users: []config.ProxyAuthUser{{
+			Login:    "ci",
+			Password: "secret",
+		}},
+	})
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+	require.NoError(t, err)
+	req.Host = upstream.Listener.Addr().String()
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("ci:secret")))
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func TestHTTPProxy_PostBody(t *testing.T) {

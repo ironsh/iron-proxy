@@ -219,6 +219,7 @@ func main() {
 		Resolver:                      resolver,
 		Guard:                         guard,
 		MCPPolicy:                     mcpHolder,
+		Auth:                          cfg.Proxy.Auth,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),

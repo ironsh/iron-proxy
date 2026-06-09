@@ -45,6 +45,7 @@ type Proxy struct {
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
 	mcpPolicy      *mcp.PolicyHolder
+	auth           *authenticator
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -69,6 +70,7 @@ type Options struct {
 	Resolver   *net.Resolver
 	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
 	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	Auth       config.ProxyAuth
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -102,6 +104,7 @@ func New(opts Options) *Proxy {
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
+		auth:           newAuthenticator(opts.Auth),
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -293,9 +296,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	// Clone tunnelInfo so a transform that mutates the annotations map can't
 	// leak state into sibling requests that share the same tunnel.
 	tctx := &transform.TransformContext{
-		Logger: p.logger,
-		Mode:   transform.ModeMITM,
-		Tunnel: cloneTunnelInfo(tunnelInfo),
+		Logger:   p.logger,
+		Mode:     transform.ModeMITM,
+		Tunnel:   cloneTunnelInfo(tunnelInfo),
+		SourceIP: sourceIP(r.RemoteAddr),
+	}
+	if tctx.Tunnel != nil {
+		tctx.ProxyLogin = tctx.Tunnel.ProxyLogin
+		if tctx.Tunnel.SourceIP != "" {
+			tctx.SourceIP = tctx.Tunnel.SourceIP
+		}
 	}
 	if r.TLS != nil {
 		tctx.SNI = r.TLS.ServerName
@@ -306,12 +316,27 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		Method:     r.Method,
 		Path:       r.URL.Path,
 		RemoteAddr: r.RemoteAddr,
+		ProxyLogin: tctx.ProxyLogin,
+		SourceIP:   tctx.SourceIP,
 		SNI:        tctx.SNI,
 		Mode:       transform.ModeMITM,
 		Tunnel:     tctx.Tunnel,
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
+
+	if tunnelInfo == nil && p.auth.enabled() {
+		auth, ok := p.auth.authenticateHeader(r.Header.Get("Proxy-Authorization"))
+		if !ok {
+			result.Action = transform.ActionReject
+			result.StatusCode = http.StatusProxyAuthRequired
+			p.writeResponse(w, proxyAuthRequiredResponse(r))
+			return
+		}
+		tctx.ProxyLogin = auth.Login
+		result.ProxyLogin = auth.Login
+		r.Header.Del("Proxy-Authorization")
+	}
 
 	bodyLimits := pl.BodyLimits()
 	// Wrap request body for lazy buffering by transforms.

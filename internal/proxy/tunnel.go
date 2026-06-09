@@ -92,7 +92,22 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	ok, rejectResp, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header)
+	var auth proxyAuth
+	if p.auth.enabled() {
+		var ok bool
+		auth, ok = p.auth.authenticateHeader(req.Header.Get("Proxy-Authorization"))
+		if !ok {
+			resp := proxyAuthRequiredResponse(req)
+			p.emitTunnelAuthReject(conn.RemoteAddr().String(), host, resp.StatusCode)
+			if err := resp.Write(conn); err != nil {
+				return fmt.Errorf("write auth rejection: %w", err)
+			}
+			return nil
+		}
+		req.Header.Del("Proxy-Authorization")
+	}
+
+	ok, rejectResp, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), host, req.Header, auth)
 	if !ok {
 		if rejectResp == nil {
 			rejectResp = &http.Response{
@@ -140,23 +155,51 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("read methods: %w", err)
 	}
 
-	// We only support no-auth (0x00)
+	var auth proxyAuth
 	hasNoAuth := false
+	hasUserPass := false
 	for _, m := range methods {
 		if m == 0x00 {
 			hasNoAuth = true
-			break
+		}
+		if m == 0x02 {
+			hasUserPass = true
 		}
 	}
-	if !hasNoAuth {
-		if err := p.socks5Reply(conn, 0xFF); err != nil {
-			return fmt.Errorf("write no-acceptable-methods: %w", err)
+	if p.auth.enabled() {
+		switch {
+		case hasUserPass:
+			if _, err := conn.Write([]byte{0x05, 0x02}); err != nil {
+				return fmt.Errorf("write username-password method: %w", err)
+			}
+			var ok bool
+			auth, ok, err = p.readSOCKS5UserPass(conn, br)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+		case !p.auth.required && hasNoAuth:
+			if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+				return fmt.Errorf("write auth reply: %w", err)
+			}
+		default:
+			if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
+				return fmt.Errorf("write no-acceptable-methods: %w", err)
+			}
+			return nil
 		}
-		return nil
-	}
-	// Reply: use no-auth
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		return fmt.Errorf("write auth reply: %w", err)
+	} else {
+		if !hasNoAuth {
+			if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
+				return fmt.Errorf("write no-acceptable-methods: %w", err)
+			}
+			return nil
+		}
+		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+			return fmt.Errorf("write auth reply: %w", err)
+		}
 	}
 
 	// --- Connect request ---
@@ -215,7 +258,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	ok, _, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil)
+	ok, _, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil, auth)
 	if !ok {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
@@ -239,12 +282,48 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 	return err
 }
 
+func (p *Proxy) readSOCKS5UserPass(conn net.Conn, br *bufio.Reader) (proxyAuth, bool, error) {
+	ver, err := br.ReadByte()
+	if err != nil {
+		return proxyAuth{}, false, fmt.Errorf("read username-password version: %w", err)
+	}
+	if ver != 0x01 {
+		return proxyAuth{}, false, fmt.Errorf("unsupported username-password version: %d", ver)
+	}
+	ulen, err := br.ReadByte()
+	if err != nil {
+		return proxyAuth{}, false, fmt.Errorf("read username length: %w", err)
+	}
+	username := make([]byte, ulen)
+	if _, err := io.ReadFull(br, username); err != nil {
+		return proxyAuth{}, false, fmt.Errorf("read username: %w", err)
+	}
+	plen, err := br.ReadByte()
+	if err != nil {
+		return proxyAuth{}, false, fmt.Errorf("read password length: %w", err)
+	}
+	password := make([]byte, plen)
+	if _, err := io.ReadFull(br, password); err != nil {
+		return proxyAuth{}, false, fmt.Errorf("read password: %w", err)
+	}
+	if !p.auth.authenticateLoginPassword(string(username), string(password)) {
+		if _, err := conn.Write([]byte{0x01, 0x01}); err != nil {
+			return proxyAuth{}, false, fmt.Errorf("write username-password failure: %w", err)
+		}
+		return proxyAuth{}, false, nil
+	}
+	if _, err := conn.Write([]byte{0x01, 0x00}); err != nil {
+		return proxyAuth{}, false, fmt.Errorf("write username-password success: %w", err)
+	}
+	return proxyAuth{Login: string(username)}, true, nil
+}
+
 // tunnelTransformCheck runs a synthetic CONNECT request through the transform
 // pipeline to decide whether the tunnel should be allowed. When connectHeaders
 // is non-nil the headers from the original CONNECT request (e.g.
 // Proxy-Authorization) are forwarded to transforms so they can make
 // authentication and policy decisions at the tunnel level.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response, *transform.TunnelInfo) {
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header, auth proxyAuth) (bool, *http.Response, *transform.TunnelInfo) {
 	host, _, _ := net.SplitHostPort(target)
 
 	hdr := http.Header{}
@@ -270,9 +349,11 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	}
 
 	tctx := &transform.TransformContext{
-		Logger: p.logger,
-		SNI:    host,
-		Mode:   mode,
+		Logger:     p.logger,
+		SNI:        host,
+		Mode:       mode,
+		ProxyLogin: auth.Login,
+		SourceIP:   sourceIP(remoteAddr),
 	}
 
 	result := &transform.PipelineResult{
@@ -280,6 +361,8 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 		Method:     http.MethodConnect,
 		Path:       "",
 		RemoteAddr: remoteAddr,
+		ProxyLogin: auth.Login,
+		SourceIP:   tctx.SourceIP,
 		SNI:        host,
 		Mode:       mode,
 	}
@@ -311,8 +394,26 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	result.StatusCode = http.StatusOK
 	return true, nil, &transform.TunnelInfo{
 		Target:            target,
+		ProxyLogin:        auth.Login,
+		SourceIP:          tctx.SourceIP,
 		RequestTransforms: result.RequestTransforms,
 	}
+}
+
+func (p *Proxy) emitTunnelAuthReject(remoteAddr, target string, status int) {
+	host, _, _ := net.SplitHostPort(target)
+	result := &transform.PipelineResult{
+		Host:       target,
+		Method:     http.MethodConnect,
+		RemoteAddr: remoteAddr,
+		SourceIP:   sourceIP(remoteAddr),
+		SNI:        host,
+		Mode:       transform.ModeMITM,
+		Action:     transform.ActionReject,
+		StatusCode: status,
+	}
+	_, finish := p.beginPipelineRun(result)
+	finish()
 }
 
 // serveTunnel peeks at the client's first byte after the CONNECT/SOCKS5
@@ -347,7 +448,7 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string, tunnelInfo *tran
 // port is ignored to prevent port-pivot attacks).
 func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	if p.tlsMode == config.TLSModeSNIOnly {
-		return p.serveSNIPassthrough(clientConn)
+		return p.serveSNIPassthrough(clientConn, tunnelInfo)
 	}
 
 	tlsConn := tls.Server(clientConn, &tls.Config{
@@ -391,6 +492,8 @@ func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
 	}
 	return &transform.TunnelInfo{
 		Target:            info.Target,
+		ProxyLogin:        info.ProxyLogin,
+		SourceIP:          info.SourceIP,
 		RequestTransforms: traces,
 	}
 }

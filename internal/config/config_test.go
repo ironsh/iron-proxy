@@ -58,6 +58,8 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 1000, cfg.TLS.CertCacheSize)
 	require.Equal(t, ":9090", cfg.Metrics.Listen)
 	require.Equal(t, "info", cfg.Log.Level)
+	require.False(t, cfg.Proxy.Auth.Required)
+	require.Empty(t, cfg.Proxy.Auth.Users)
 }
 
 func TestLoad_OverrideDefaults(t *testing.T) {
@@ -179,6 +181,38 @@ tls:
 `,
 			wantErr: "dns.records[0].value is required",
 		},
+		{
+			name: "proxy auth required without users",
+			yaml: `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  auth:
+    required: true
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`,
+			wantErr: "proxy.auth.users is required",
+		},
+		{
+			name: "proxy auth duplicate login",
+			yaml: `
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  auth:
+    users:
+      - login: ci
+        password: one
+      - login: ci
+        password: two
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`,
+			wantErr: "duplicated",
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,6 +222,27 @@ tls:
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestLoad_ProxyAuthPasswordEnv(t *testing.T) {
+	t.Setenv("IRON_PROXY_CI_PASSWORD", "secret")
+
+	cfg, err := Load(strings.NewReader(`
+dns:
+  proxy_ip: "10.0.0.1"
+proxy:
+  auth:
+    required: true
+    users:
+      - login: ci
+        password_env: IRON_PROXY_CI_PASSWORD
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`))
+	require.NoError(t, err)
+	require.True(t, cfg.Proxy.Auth.Required)
+	require.Equal(t, "ci", cfg.Proxy.Auth.Users[0].Login)
 }
 
 func TestLoad_UnknownFields(t *testing.T) {
