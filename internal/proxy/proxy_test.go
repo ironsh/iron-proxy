@@ -218,6 +218,46 @@ func TestHTTPProxy_AuthValid(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+func TestHTTPProxy_ReloadAuth(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users: []config.ProxyAuthUser{{
+			Login:    "ci",
+			Password: "secret",
+		}},
+	})
+
+	do := func(login string) int {
+		t.Helper()
+		req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+		require.NoError(t, err)
+		req.Host = upstream.Listener.Addr().String()
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(login+":secret")))
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	require.Equal(t, http.StatusProxyAuthRequired, do("dev"))
+
+	p.ReloadAuth(config.ProxyAuth{
+		Required: true,
+		Users: []config.ProxyAuthUser{
+			{Login: "ci", Password: "secret"},
+			{Login: "dev", Password: "secret"},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, do("dev"))
+}
+
 func TestHTTPProxy_PostBody(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

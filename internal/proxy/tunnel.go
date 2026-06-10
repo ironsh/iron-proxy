@@ -92,10 +92,11 @@ func (p *Proxy) handleCONNECT(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
+	authSnapshot := p.auth.Load()
 	var auth proxyAuth
-	if p.auth.enabled() {
+	if authSnapshot.enabled() {
 		var ok bool
-		auth, ok = p.auth.authenticateHeader(req.Header.Get("Proxy-Authorization"))
+		auth, ok = authSnapshot.authenticateHeader(req.Header.Get("Proxy-Authorization"))
 		if !ok {
 			resp := proxyAuthRequiredResponse(req)
 			p.emitTunnelAuthReject(conn.RemoteAddr().String(), host, resp.StatusCode)
@@ -155,6 +156,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 		return fmt.Errorf("read methods: %w", err)
 	}
 
+	authSnapshot := p.auth.Load()
 	var auth proxyAuth
 	hasNoAuth := false
 	hasUserPass := false
@@ -166,21 +168,21 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 			hasUserPass = true
 		}
 	}
-	if p.auth.enabled() {
+	if authSnapshot.enabled() {
 		switch {
 		case hasUserPass:
 			if _, err := conn.Write([]byte{0x05, 0x02}); err != nil {
 				return fmt.Errorf("write username-password method: %w", err)
 			}
 			var ok bool
-			auth, ok, err = p.readSOCKS5UserPass(conn, br)
+			auth, ok, err = p.readSOCKS5UserPass(conn, br, authSnapshot)
 			if err != nil {
 				return err
 			}
 			if !ok {
 				return nil
 			}
-		case !p.auth.required && hasNoAuth:
+		case !authSnapshot.required && hasNoAuth:
 			if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
 				return fmt.Errorf("write auth reply: %w", err)
 			}
@@ -282,7 +284,7 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 	return err
 }
 
-func (p *Proxy) readSOCKS5UserPass(conn net.Conn, br *bufio.Reader) (proxyAuth, bool, error) {
+func (p *Proxy) readSOCKS5UserPass(conn net.Conn, br *bufio.Reader, authSnapshot *authenticator) (proxyAuth, bool, error) {
 	ver, err := br.ReadByte()
 	if err != nil {
 		return proxyAuth{}, false, fmt.Errorf("read username-password version: %w", err)
@@ -306,7 +308,7 @@ func (p *Proxy) readSOCKS5UserPass(conn net.Conn, br *bufio.Reader) (proxyAuth, 
 	if _, err := io.ReadFull(br, password); err != nil {
 		return proxyAuth{}, false, fmt.Errorf("read password: %w", err)
 	}
-	if !p.auth.authenticateLoginPassword(string(username), string(password)) {
+	if !authSnapshot.authenticateLoginPassword(string(username), string(password)) {
 		if _, err := conn.Write([]byte{0x01, 0x01}); err != nil {
 			return proxyAuth{}, false, fmt.Errorf("write username-password failure: %w", err)
 		}

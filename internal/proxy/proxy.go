@@ -45,7 +45,7 @@ type Proxy struct {
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
 	mcpPolicy      *mcp.PolicyHolder
-	auth           *authenticator
+	auth           *authenticatorHolder
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -104,7 +104,7 @@ func New(opts Options) *Proxy {
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
-		auth:           newAuthenticator(opts.Auth),
+		auth:           newAuthenticatorHolder(opts.Auth),
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -124,6 +124,13 @@ func New(opts Options) *Proxy {
 	}
 
 	return p
+}
+
+// ReloadAuth atomically swaps proxy client authentication config for new
+// HTTP/CONNECT/SOCKS5 handshakes. Existing tunnels keep their authenticated
+// login in TunnelInfo.
+func (p *Proxy) ReloadAuth(auth config.ProxyAuth) {
+	p.auth.Store(auth)
 }
 
 // ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners.
@@ -325,8 +332,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
 
-	if tunnelInfo == nil && p.auth.enabled() {
-		auth, ok := p.auth.authenticateHeader(r.Header.Get("Proxy-Authorization"))
+	authSnapshot := p.auth.Load()
+	if tunnelInfo == nil && authSnapshot.enabled() {
+		auth, ok := authSnapshot.authenticateHeader(r.Header.Get("Proxy-Authorization"))
 		if !ok {
 			result.Action = transform.ActionReject
 			result.StatusCode = http.StatusProxyAuthRequired

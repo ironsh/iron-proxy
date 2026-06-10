@@ -67,7 +67,8 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, tunnelInfo *transform.T
 		result.Err = fmt.Errorf("client hello missing sni")
 		return result.Err
 	}
-	if p.auth.required && result.ProxyLogin == "" {
+	authSnapshot := p.auth.Load()
+	if authSnapshot.required && result.ProxyLogin == "" {
 		result.Action = transform.ActionReject
 		result.StatusCode = http.StatusProxyAuthRequired
 		result.Err = fmt.Errorf("proxy auth requires an HTTP proxy or SOCKS5 auth handshake")

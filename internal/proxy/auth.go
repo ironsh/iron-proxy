@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ironsh/iron-proxy/internal/config"
 )
@@ -18,8 +19,30 @@ type authenticator struct {
 	passwords map[string]string
 }
 
+type authenticatorHolder struct {
+	value atomic.Value // *authenticator
+}
+
 type proxyAuth struct {
 	Login string
+}
+
+func newAuthenticatorHolder(cfg config.ProxyAuth) *authenticatorHolder {
+	h := &authenticatorHolder{}
+	h.Store(cfg)
+	return h
+}
+
+func (h *authenticatorHolder) Store(cfg config.ProxyAuth) {
+	h.value.Store(newAuthenticator(cfg))
+}
+
+func (h *authenticatorHolder) Load() *authenticator {
+	v := h.value.Load()
+	if v == nil {
+		return newAuthenticator(config.ProxyAuth{})
+	}
+	return v.(*authenticator)
 }
 
 func newAuthenticator(cfg config.ProxyAuth) *authenticator {

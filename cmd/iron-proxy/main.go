@@ -234,7 +234,7 @@ func main() {
 		mgmtServer = management.New(management.Options{
 			Addr:   cfg.Management.Listen,
 			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
-			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger),
+			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, p, bodyLimits, logger),
 			Logger: logger,
 			Ctx:    ctx,
 		})
@@ -601,7 +601,7 @@ func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgr
 // wrapped in *management.ValidationError so the management server returns
 // 422 and the existing state is left untouched. Validation runs for every
 // component before any state is mutated.
-func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, p *proxy.Proxy, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
 	return func(ctx context.Context) error {
 		newCfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -626,6 +626,7 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		holder.Store(newPipeline)
 		mcpHolder.Store(newPolicy)
 		pgManager.Reload(ctx, newPgListener)
+		p.ReloadAuth(newCfg.Proxy.Auth)
 		logger.Info("pipeline reloaded via management API",
 			slog.String("transforms", newPipeline.Names()),
 			slog.Bool("postgres_listener", newPgListener != nil),
