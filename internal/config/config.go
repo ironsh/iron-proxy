@@ -59,11 +59,24 @@ type Config struct {
 
 // DNS configures the built-in DNS server.
 type DNS struct {
+	// Enabled controls whether the built-in DNS server runs. A nil pointer
+	// (the field omitted) defaults to true, preserving historical behavior.
+	// Set it to false (or IRON_DNS_ENABLED=false) to disable DNS interception
+	// entirely — useful when clients reach the proxy via explicit
+	// HTTP(S)_PROXY settings rather than DNS redirection. When disabled,
+	// proxy_ip is not required.
+	Enabled          *bool       `yaml:"enabled"`
 	Listen           string      `yaml:"listen"`
 	ProxyIP          string      `yaml:"proxy_ip"`
 	UpstreamResolver string      `yaml:"upstream_resolver"`
 	Passthrough      []string    `yaml:"passthrough"`
 	Records          []DNSRecord `yaml:"records"`
+}
+
+// IsEnabled reports whether the DNS server should run. DNS is on unless
+// explicitly disabled.
+func (d DNS) IsEnabled() bool {
+	return d.Enabled == nil || *d.Enabled
 }
 
 // DNSRecord is a static DNS record entry.
@@ -209,7 +222,7 @@ func parse(r io.Reader) (*Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.DNS.Listen == "" {
+	if cfg.DNS.IsEnabled() && cfg.DNS.Listen == "" {
 		cfg.DNS.Listen = ":53"
 	}
 	if cfg.Proxy.HTTPListen == "" {
@@ -251,7 +264,7 @@ func applyDefaults(cfg *Config) {
 
 // Validate checks required fields and value constraints.
 func Validate(cfg *Config) error {
-	if cfg.DNS.ProxyIP == "" {
+	if cfg.DNS.IsEnabled() && cfg.DNS.ProxyIP == "" {
 		return fmt.Errorf("dns.proxy_ip is required")
 	}
 

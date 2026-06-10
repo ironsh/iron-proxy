@@ -264,6 +264,61 @@ func TestApplyEnvOverrides_UpstreamResponseHeaderTimeout(t *testing.T) {
 	})
 }
 
+func TestApplyEnvOverrides_DNSEnabled(t *testing.T) {
+	t.Run("false disables dns", func(t *testing.T) {
+		setEnvs(t, map[string]string{"IRON_DNS_ENABLED": "false"})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.NotNil(t, cfg.DNS.Enabled)
+		require.False(t, cfg.DNS.IsEnabled())
+	})
+
+	t.Run("true enables dns", func(t *testing.T) {
+		setEnvs(t, map[string]string{"IRON_DNS_ENABLED": "true"})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.NotNil(t, cfg.DNS.Enabled)
+		require.True(t, cfg.DNS.IsEnabled())
+	})
+
+	t.Run("unset defaults to enabled", func(t *testing.T) {
+		setEnvs(t, map[string]string{})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Nil(t, cfg.DNS.Enabled)
+		require.True(t, cfg.DNS.IsEnabled())
+	})
+
+	t.Run("invalid bool rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{"IRON_DNS_ENABLED": "maybe"})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.ErrorContains(t, err, "IRON_DNS_ENABLED")
+	})
+}
+
+// TestLoadConfig_DNSDisabled_NoListenDefault_NoProxyIPRequired verifies that
+// disabling DNS via env skips the :53 listen default and lifts the proxy_ip
+// requirement, so a DNS-less proxy can be configured entirely from env vars.
+func TestLoadConfig_DNSDisabled_NoListenDefault_NoProxyIPRequired(t *testing.T) {
+	setEnvs(t, map[string]string{
+		"IRON_DNS_ENABLED": "false",
+		"IRON_TLS_CA_CERT": "/ca.pem",
+		"IRON_TLS_CA_KEY":  "/ca-key.pem",
+	})
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.DNS.IsEnabled())
+	require.Equal(t, "", cfg.DNS.Listen)
+	require.Equal(t, "", cfg.DNS.ProxyIP)
+	require.NoError(t, Validate(cfg))
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
@@ -276,6 +331,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 
 	// Clear all IRON_* env vars to prevent cross-test leakage.
 	ironKeys := []string{
+		"IRON_DNS_ENABLED",
 		"IRON_DNS_LISTEN",
 		"IRON_DNS_PROXY_IP",
 		"IRON_DNS_UPSTREAM_RESOLVER",
