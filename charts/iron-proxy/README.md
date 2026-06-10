@@ -24,20 +24,38 @@ See below.
 ## How iron-proxy runs
 
 iron-proxy intercepts DNS, answers queries with a single `proxy_ip`, then terminates and
-inspects the HTTP/HTTPS traffic clients send to that IP. The chart wires up:
+inspects the HTTP/HTTPS traffic clients send to that IP. The chart wires up these
+listeners, configured under `.Values.listeners`:
 
-| Listener | Default port | Service port key |
-| --- | --- | --- |
-| DNS | 53/UDP | `service.ports.dns` |
-| HTTP | 80/TCP | `service.ports.http` |
-| HTTPS | 443/TCP | `service.ports.https` |
-| Metrics / health (`GET /healthz`) | 9090/TCP | `service.ports.metrics` |
-| Tunnel (CONNECT/SOCKS5, optional) | 8080/TCP | `service.ports.tunnel` |
-| Postgres MITM (optional) | 5432/TCP | `service.ports.postgres` |
-| Management API (optional) | 9092/TCP | `service.ports.management` |
+| Listener | `listeners` key | Default port | Enabled by default |
+| --- | --- | --- | --- |
+| DNS | `dns` | 53/UDP | yes |
+| HTTP | `http` | 80/TCP | yes |
+| HTTPS | `https` | 443/TCP | yes |
+| Metrics / health (`GET /healthz`) | `metrics` | 9090/TCP | yes |
+| Tunnel (CONNECT/SOCKS5) | `tunnel` | 8080/TCP | no |
+| Postgres MITM | `postgres` | 5432/TCP | no |
+| Management API | `management` | 9092/TCP | no |
 
 Ports 53/80/443 are privileged, so the container is granted the `NET_BIND_SERVICE`
 capability and otherwise runs as non-root with a read-only root filesystem.
+
+### Listeners are the single source of truth for ports
+
+`.Values.listeners` is the one place ports are defined. Each enabled listener is exposed on
+the Service, exposed as a container port, **and** has its bind address (`:<port>`) fed into
+the proxy automatically: merged into the rendered config in standalone mode, or emitted as
+the matching `IRON_*_LISTEN` env var in managed mode. So the Service and the proxy can never
+disagree about ports. Do not set `dns.listen`, `proxy.http_listen`, etc. under `config` —
+those keys are overridden by `listeners`. To move a port, change it in one place:
+
+```yaml
+listeners:
+  https:
+    port: 8443        # Service port, container port, and proxy bind all become 8443
+  tunnel:
+    enabled: true     # turn on the optional CONNECT/SOCKS5 tunnel
+```
 
 ## Run modes
 
@@ -45,7 +63,8 @@ capability and otherwise runs as non-root with a read-only root filesystem.
 
 The chart renders `.Values.config` into a ConfigMap as `proxy.yaml` and starts the proxy
 with `-config /etc/iron-proxy/config/proxy.yaml`. The config keys mirror
-[`iron-proxy.example.yaml`](../../iron-proxy.example.yaml) exactly.
+[`iron-proxy.example.yaml`](../../iron-proxy.example.yaml) exactly, except for listen
+addresses, which come from `.Values.listeners` (see above).
 
 ```yaml
 mode: standalone
@@ -53,11 +72,7 @@ service:
   type: LoadBalancer
 config:
   dns:
-    listen: ":53"
     proxy_ip: "203.0.113.10"   # MUST equal the IP clients reach this proxy on
-  proxy:
-    http_listen: ":80"
-    https_listen: ":443"
   tls:
     mode: "mitm"
     ca_cert: "/etc/iron-proxy/tls/ca.crt"
@@ -87,14 +102,21 @@ env:
 ### Managed
 
 In managed mode the proxy authenticates to the control plane with a bearer token and pulls
-its config from there. No `proxy.yaml` is used.
+its transforms, secrets, and routes from there. There is no `proxy.yaml`: everything else is
+configured through `IRON_*` env vars. The chart renders those for you from the `managed`
+block, and listen addresses still come from `.Values.listeners` (as `IRON_*_LISTEN`). The CA
+cert/key paths (`IRON_TLS_CA_CERT`/`IRON_TLS_CA_KEY`) are derived from the CA mount
+automatically when `ca.mode` is not `none`.
 
 ```yaml
 mode: managed
 managed:
   existingTokenSecret: iron-proxy-token   # Secret with a "token" key
   # tokenSecretKey: token
-  # controlPlaneURL: https://api.iron.sh  # override if self-hosting
+  # controlPlaneURL: https://api.iron.sh   # override if self-hosting
+  proxyIP: "203.0.113.10"                  # REQUIRED -> IRON_DNS_PROXY_IP
+  # tlsMode: "sni-only"                     # -> IRON_TLS_MODE (set when ca.mode=none)
+  # logLevel: "info"                        # -> IRON_LOG_LEVEL
 ca:
   mode: existingSecret
   existingSecret: iron-proxy-ca
@@ -103,6 +125,9 @@ ca:
 ```bash
 kubectl create secret generic iron-proxy-token --from-literal=token="$IRON_PROXY_TOKEN"
 ```
+
+`managed.proxyIP` is required (the proxy fails validation without `IRON_DNS_PROXY_IP`).
+Anything not covered by the `managed` block can still be set through `.Values.env`.
 
 ## CA certificate (MITM mode)
 
@@ -158,6 +183,10 @@ credentials with:
 | `managed.existingTokenSecret` | `""` | Existing Secret holding the token. |
 | `managed.tokenSecretKey` | `token` | Key within that Secret. |
 | `managed.controlPlaneURL` | `""` | Override `IRON_CONTROL_PLANE_URL`. |
+| `managed.proxyIP` | `""` | `IRON_DNS_PROXY_IP`. Required in managed mode. |
+| `managed.tlsMode` | `""` | `IRON_TLS_MODE` (`mitm`/`sni-only`). |
+| `managed.logLevel` | `""` | `IRON_LOG_LEVEL`. |
+| `managed.upstreamResolver` | `""` | `IRON_DNS_UPSTREAM_RESOLVER`. |
 | `ca.mode` | `existingSecret` | `existingSecret`, `inline`, or `none`. |
 | `ca.existingSecret` | `""` | Secret name for `existingSecret` mode. |
 | `ca.certKey` / `ca.keyKey` | `ca.crt` / `ca.key` | Keys within that Secret. |
@@ -169,7 +198,7 @@ credentials with:
 | `service.clusterIP` | `""` | Static cluster IP (set so it can be `proxy_ip`). |
 | `service.loadBalancerIP` | `""` | Static LB IP. |
 | `service.annotations` | `{}` | Service annotations. |
-| `service.ports.*` | see values | Per-listener `enabled`/`port`/`targetPort`/`protocol`. |
+| `listeners.*` | see values | Per-listener `enabled`/`port`/`protocol`. Single source of truth for ports. |
 | `livenessProbe` / `readinessProbe` | `/healthz` on metrics | Probes; fully overridable. |
 | `serviceAccount.create` | `true` | Create a ServiceAccount. |
 | `serviceAccount.annotations` | `{}` | SA annotations (IRSA / Workload Identity). |
@@ -187,6 +216,7 @@ credentials with:
   `replicaCount > 1` only makes sense behind a single shared Service IP that load-balances
   to the replicas, with a config that is identical and stateless across pods.
 - **Privileged ports.** If your cluster policy forbids `NET_BIND_SERVICE`, move the DNS/HTTP/
-  HTTPS listeners in `config` to ports >= 1024 and remap them via `service.ports.*.port`.
+  HTTPS listeners to ports >= 1024 via `listeners.*.port` (which updates the bind, the
+  container port, and the Service together).
 - **CA trust.** Generate the CA once and keep it in a Secret. Clients trust the CA, so it
   must survive pod restarts and rollouts unchanged.

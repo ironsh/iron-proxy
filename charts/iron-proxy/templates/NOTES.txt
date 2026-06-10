@@ -12,12 +12,17 @@ Run mode: {{ .Values.mode }}
    (typically this Service's ClusterIP or LoadBalancer IP). It is currently set to
    "{{ .Values.config.dns.proxy_ip }}". Update it with --set config.dns.proxy_ip=<ip>
    (and ideally pin service.clusterIP to a known value) then `helm upgrade`.
+{{- else }}
+
+   IMPORTANT: managed.proxyIP (IRON_DNS_PROXY_IP) must equal the IP clients reach
+   iron-proxy on and is required. It is currently {{ if .Values.managed.proxyIP }}"{{ .Values.managed.proxyIP }}"{{ else }}UNSET — the proxy will fail to start{{ end }}.
+   Set it with --set managed.proxyIP=<ip> then `helm upgrade`.
 {{- end }}
 
 2. Point client pods at iron-proxy for DNS so hostnames resolve to proxy_ip, then
    send their HTTP/HTTPS traffic through it.
 
-{{- if eq .Values.config.tls.mode "mitm" }}
+{{- if ne .Values.ca.mode "none" }}
 
 3. MITM mode terminates TLS, so clients must trust the proxy CA.
 {{- if eq .Values.ca.mode "existingSecret" }}
@@ -31,5 +36,5 @@ Run mode: {{ .Values.mode }}
 
 4. Check health:
 
-   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "iron-proxy.fullname" . }} {{ .Values.service.ports.metrics.port }}:{{ .Values.service.ports.metrics.port }}
-   curl http://localhost:{{ .Values.service.ports.metrics.port }}/healthz   # -> OK
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "iron-proxy.fullname" . }} {{ .Values.listeners.metrics.port }}:{{ .Values.listeners.metrics.port }}
+   curl http://localhost:{{ .Values.listeners.metrics.port }}/healthz   # -> OK

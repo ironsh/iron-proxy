@@ -1,6 +1,6 @@
 {{- if .Values.metrics.serviceMonitor.enabled }}
-{{- if not .Values.service.ports.metrics.enabled }}
-{{- fail "metrics.serviceMonitor.enabled requires service.ports.metrics.enabled" }}
+{{- if not .Values.listeners.metrics.enabled }}
+{{- fail "metrics.serviceMonitor.enabled requires listeners.metrics.enabled" }}
 {{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

@@ -13,7 +13,7 @@ spec:
     metadata:
       annotations:
         {{- if and (eq .Values.mode "standalone") (not .Values.configExistingConfigMap) }}
-        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        checksum/config: {{ printf "%s%s" (toYaml .Values.config) (toYaml .Values.listeners) | sha256sum }}
         {{- end }}
         {{- if eq .Values.ca.mode "inline" }}
         checksum/ca: {{ printf "%s%s" .Values.ca.cert .Values.ca.key | sha256sum }}
@@ -61,10 +61,7 @@ spec:
                   name: {{ include "iron-proxy.tokenSecretName" . }}
                   key: token
                   {{- end }}
-            {{- with .Values.managed.controlPlaneURL }}
-            - name: IRON_CONTROL_PLANE_URL
-              value: {{ . | quote }}
-            {{- end }}
+            {{- include "iron-proxy.managedEnv" . | nindent 12 }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -80,11 +77,11 @@ spec:
             {{- end }}
           {{- end }}
           ports:
-            {{- range $name, $p := .Values.service.ports }}
-            {{- if $p.enabled }}
+            {{- range $name, $l := .Values.listeners }}
+            {{- if $l.enabled }}
             - name: {{ $name }}
-              containerPort: {{ $p.targetPort }}
-              protocol: {{ $p.protocol | default "TCP" }}
+              containerPort: {{ $l.port }}
+              protocol: {{ $l.protocol | default "TCP" }}
             {{- end }}
             {{- end }}
           {{- with .Values.livenessProbe }}

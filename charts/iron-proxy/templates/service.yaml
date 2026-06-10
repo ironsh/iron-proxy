@@ -19,11 +19,11 @@ spec:
   selector:
     {{- include "iron-proxy.selectorLabels" . | nindent 4 }}
   ports:
-    {{- range $name, $p := .Values.service.ports }}
-    {{- if $p.enabled }}
+    {{- range $name, $l := .Values.listeners }}
+    {{- if $l.enabled }}
     - name: {{ $name }}
-      port: {{ $p.port }}
-      targetPort: {{ $p.targetPort }}
-      protocol: {{ $p.protocol | default "TCP" }}
+      port: {{ $l.port }}
+      targetPort: {{ $l.port }}
+      protocol: {{ $l.protocol | default "TCP" }}
     {{- end }}
     {{- end }}
