@@ -1,0 +1,11 @@
+{{- if and (eq .Values.mode "standalone") (not .Values.configExistingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iron-proxy.fullname" . }}
+  labels:
+    {{- include "iron-proxy.labels" . | nindent 4 }}
+data:
+  proxy.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}
+{{- end }}

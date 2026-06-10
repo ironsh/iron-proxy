@@ -1,0 +1,188 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iron-proxy.fullname" . }}
+  labels:
+    {{- include "iron-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "iron-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if and (eq .Values.mode "standalone") (not .Values.configExistingConfigMap) }}
+        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        {{- end }}
+        {{- if eq .Values.ca.mode "inline" }}
+        checksum/ca: {{ printf "%s%s" .Values.ca.cert .Values.ca.key | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "iron-proxy.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "iron-proxy.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- if eq .Values.ca.mode "generate" }}
+      initContainers:
+        - name: generate-ca
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - iron-proxy
+            - generate-ca
+            - -outdir
+            - /etc/iron-proxy/tls
+            - -name
+            - {{ .Values.ca.commonName | quote }}
+            - -alg
+            - {{ .Values.ca.algorithm | quote }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: ca
+              mountPath: /etc/iron-proxy/tls
+      {{- end }}
+      containers:
+        - name: iron-proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if eq .Values.mode "standalone" }}
+          args:
+            - -config
+            - /etc/iron-proxy/config/proxy.yaml
+          {{- end }}
+          env:
+            {{- if eq .Values.mode "managed" }}
+            - name: IRON_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.managed.existingTokenSecret }}
+                  name: {{ .Values.managed.existingTokenSecret }}
+                  key: {{ .Values.managed.tokenSecretKey }}
+                  {{- else }}
+                  name: {{ include "iron-proxy.tokenSecretName" . }}
+                  key: token
+                  {{- end }}
+            {{- with .Values.managed.controlPlaneURL }}
+            - name: IRON_CONTROL_PLANE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.envFrom .Values.secretEnv }}
+          envFrom:
+            {{- if .Values.secretEnv }}
+            - secretRef:
+                name: {{ include "iron-proxy.secretEnvName" . }}
+            {{- end }}
+            {{- with .Values.envFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            {{- range $name, $p := .Values.service.ports }}
+            {{- if $p.enabled }}
+            - name: {{ $name }}
+              containerPort: {{ $p.targetPort }}
+              protocol: {{ $p.protocol | default "TCP" }}
+            {{- end }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if eq .Values.mode "standalone" }}
+            - name: config
+              mountPath: /etc/iron-proxy/config
+              readOnly: true
+            {{- end }}
+            {{- if ne .Values.ca.mode "none" }}
+            - name: ca
+              mountPath: /etc/iron-proxy/tls
+              {{- if ne .Values.ca.mode "generate" }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- if eq .Values.mode "standalone" }}
+        - name: config
+          configMap:
+            name: {{ .Values.configExistingConfigMap | default (include "iron-proxy.fullname" .) }}
+        {{- end }}
+        {{- if eq .Values.ca.mode "existingSecret" }}
+        {{- if not .Values.ca.existingSecret }}
+        {{- fail "ca.mode=existingSecret requires ca.existingSecret to be set" }}
+        {{- end }}
+        - name: ca
+          secret:
+            secretName: {{ .Values.ca.existingSecret }}
+            items:
+              - key: {{ .Values.ca.certKey }}
+                path: ca.crt
+              - key: {{ .Values.ca.keyKey }}
+                path: ca.key
+        {{- else if eq .Values.ca.mode "inline" }}
+        - name: ca
+          secret:
+            secretName: {{ include "iron-proxy.caSecretName" . }}
+        {{- else if eq .Values.ca.mode "generate" }}
+        - name: ca
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,265 @@
+# Default values for iron-proxy.
+# This is a YAML-formatted file. Declare variables to be passed into the templates.
+
+# -- Number of proxy replicas. iron-proxy intercepts DNS and answers with a single
+# proxy_ip, so clients reach one logical endpoint. Scaling beyond 1 requires a shared
+# Service IP (ClusterIP/LoadBalancer) and stateless config; see the chart README.
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: ironsh/iron-proxy
+  # -- Image tag. Defaults to the chart's appVersion when empty. Pin a released
+  # version (e.g. "v1.2.3") for production rather than relying on "latest".
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the full release name used in resource names.
+fullnameOverride: ""
+
+# -- Run mode: "standalone" (config from a rendered ConfigMap, the default) or
+# "managed" (control-plane token; no config file is used).
+mode: standalone
+
+# -- iron-proxy YAML config, rendered verbatim into a ConfigMap as proxy.yaml and
+# passed via -config in standalone mode. Keys mirror iron-proxy.example.yaml exactly.
+# Edit dns.proxy_ip to the address clients use to reach this proxy (typically the
+# Service ClusterIP or LoadBalancer IP) and add your transforms/secrets.
+config:
+  dns:
+    listen: ":53"
+    # IMPORTANT: the IP returned for intercepted DNS queries. Must be the address
+    # clients reach iron-proxy on (this chart's Service IP). Update before use.
+    proxy_ip: "10.0.0.1"
+    passthrough: []
+  proxy:
+    http_listen: ":80"
+    https_listen: ":443"
+  tls:
+    # "mitm" (terminates TLS, needs a CA) or "sni-only" (no CA needed; set ca.mode=none).
+    mode: "mitm"
+    ca_cert: "/etc/iron-proxy/tls/ca.crt"
+    ca_key: "/etc/iron-proxy/tls/ca.key"
+  transforms:
+    - name: allowlist
+      config:
+        domains:
+          - "api.openai.com"
+          - "api.anthropic.com"
+  log:
+    level: "info"
+
+# -- Use a pre-existing ConfigMap (with a proxy.yaml key) instead of rendering
+# .Values.config. When set, .Values.config is ignored. Standalone mode only.
+configExistingConfigMap: ""
+
+# Managed mode settings (used only when mode=managed).
+managed:
+  # -- Control-plane bearer token. When set, rendered into a chart-managed Secret
+  # and exposed as IRON_PROXY_TOKEN. Prefer existingTokenSecret for real secrets.
+  token: ""
+  # -- Reference an existing Secret holding the control-plane token instead of
+  # supplying it inline.
+  existingTokenSecret: ""
+  # -- Key within existingTokenSecret holding the token.
+  tokenSecretKey: "token"
+  # -- Override the control plane URL (sets IRON_CONTROL_PLANE_URL). Empty uses
+  # the binary default (https://api.iron.sh).
+  controlPlaneURL: ""
+
+# MITM CA certificate/key handling. iron-proxy needs a CA in mitm mode to mint
+# leaf certs; sni-only mode needs none (use mode: none).
+ca:
+  # -- One of: generate | existingSecret | inline | none.
+  #   generate:       an initContainer generates an ephemeral CA per pod start.
+  #                   Works with zero config but the CA changes on every restart,
+  #                   so clients cannot pin trust. Switch to existingSecret/inline
+  #                   for production.
+  #   existingSecret: mount a Secret you created (e.g. via `iron-proxy generate-ca`).
+  #   inline:         supply ca.cert/ca.key PEM below; the chart creates the Secret.
+  #   none:           mount nothing (sni-only mode, or config points elsewhere).
+  mode: generate
+  # existingSecret mode:
+  # -- Name of the existing Secret holding the CA cert and key.
+  existingSecret: ""
+  # -- Key in the Secret holding the CA certificate (mounted as ca.crt).
+  certKey: "ca.crt"
+  # -- Key in the Secret holding the CA private key (mounted as ca.key).
+  keyKey: "ca.key"
+  # inline mode:
+  # -- PEM-encoded CA certificate.
+  cert: ""
+  # -- PEM-encoded CA private key.
+  key: ""
+  # generate mode:
+  # -- Common name for the generated CA.
+  commonName: "iron-proxy CA"
+  # -- Key algorithm for the generated CA: rsa4096 or ed25519.
+  algorithm: "rsa4096"
+
+# -- Extra environment variables (e.g. secret-backend credentials referenced from
+# config: OPENAI_API_KEY, OP_SERVICE_ACCOUNT_TOKEN, AWS_*). Standard core/v1 EnvVar list.
+env: []
+#  - name: OPENAI_API_KEY
+#    valueFrom:
+#      secretKeyRef:
+#        name: my-api-keys
+#        key: openai
+
+# -- Pull whole environments from existing Secrets/ConfigMaps. Standard envFrom list.
+envFrom: []
+#  - secretRef:
+#      name: my-api-keys
+
+# -- Inline key/value pairs rendered into a chart-managed Secret and exposed via
+# envFrom. Convenient for demos; prefer env/envFrom with your own Secrets in prod.
+secretEnv: {}
+#  OPENAI_API_KEY: sk-...
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Static cluster IP. Set so it can be used as dns.proxy_ip.
+  clusterIP: ""
+  # -- Static LoadBalancer IP (when type is LoadBalancer).
+  loadBalancerIP: ""
+  # -- Annotations for the Service.
+  annotations: {}
+  # Listener ports. Only entries with enabled=true are exposed on the Service and
+  # the container. targetPort must match the listen port set in .Values.config.
+  ports:
+    dns:
+      enabled: true
+      port: 53
+      targetPort: 53
+      protocol: UDP
+    http:
+      enabled: true
+      port: 80
+      targetPort: 80
+      protocol: TCP
+    https:
+      enabled: true
+      port: 443
+      targetPort: 443
+      protocol: TCP
+    metrics:
+      enabled: true
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+    tunnel:
+      enabled: false
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    postgres:
+      enabled: false
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+    management:
+      enabled: false
+      port: 9092
+      targetPort: 9092
+      protocol: TCP
+
+# -- Liveness probe. Defaults to GET /healthz on the metrics port.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+# -- Readiness probe. Defaults to GET /healthz on the metrics port.
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 2
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+serviceAccount:
+  # -- Create a ServiceAccount.
+  create: true
+  # -- Name of the ServiceAccount. Generated from the fullname when empty.
+  name: ""
+  # -- Annotations (e.g. EKS IRSA / GKE Workload Identity for the workload_identity
+  # secret providers).
+  annotations: {}
+  # -- Automount the API token.
+  automountServiceAccountToken: false
+
+# -- Pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. NET_BIND_SERVICE lets the proxy bind the
+# privileged ports 53/80/443 as non-root. If your policy forbids it, move the
+# listeners in .Values.config to ports >=1024 and remap via service.ports.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+
+# -- Seconds to wait for graceful shutdown. iron-proxy uses a 10s shutdown window.
+terminationGracePeriodSeconds: 30
+
+# -- Resource requests/limits.
+resources: {}
+#  limits:
+#    cpu: 500m
+#    memory: 256Mi
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+
+# -- Pod annotations.
+podAnnotations: {}
+# -- Pod labels.
+podLabels: {}
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity.
+affinity: {}
+# -- Topology spread constraints.
+topologySpreadConstraints: []
+# -- Priority class name.
+priorityClassName: ""
+
+# -- Extra volumes (e.g. for file-based secret sources, gRPC TLS certs, GCP keyfiles).
+extraVolumes: []
+# -- Extra volume mounts matching extraVolumes.
+extraVolumeMounts: []
+
+metrics:
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor scraping the metrics port.
+    enabled: false
+    # -- Extra labels for the ServiceMonitor (e.g. to match a Prometheus selector).
+    labels: {}
+    # -- Scrape interval.
+    interval: 30s
+    # -- Metrics path.
+    path: /metrics
