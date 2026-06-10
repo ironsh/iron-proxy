@@ -63,6 +63,7 @@ spec:
                   {{- end }}
             {{- include "iron-proxy.managedEnv" . | nindent 12 }}
             {{- end }}
+            {{- include "iron-proxy.listenerEnv" . | nindent 12 }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

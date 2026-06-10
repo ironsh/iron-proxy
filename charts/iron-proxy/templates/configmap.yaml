@@ -1,19 +1,14 @@
 {{- if and (eq .Values.mode "standalone") (not .Values.configExistingConfigMap) }}
 {{- /*
-Derive listen addresses from .Values.listeners and merge them into the user's
-config so the proxy binds exactly the ports the Service exposes. Listener values
-win over anything set under config (those keys are documented as ignored).
+The core listen addresses (dns/http/https/tunnel/metrics) are supplied via
+IRON_*_LISTEN env vars from .Values.listeners (see iron-proxy.listenerEnv), so they
+are not written here. postgres and management have no env override, so when those
+listeners are enabled their listen address is merged into the config from
+.Values.listeners — keeping .Values.listeners the single source of truth for ports.
 */}}
 {{- $l := .Values.listeners -}}
 {{- $cfg := deepCopy .Values.config -}}
 {{- $over := dict -}}
-{{- if $l.dns.enabled }}{{- $_ := set $over "dns" (dict "listen" (printf ":%v" (int $l.dns.port))) -}}{{- end }}
-{{- $proxy := dict -}}
-{{- if $l.http.enabled }}{{- $_ := set $proxy "http_listen" (printf ":%v" (int $l.http.port)) -}}{{- end }}
-{{- if $l.https.enabled }}{{- $_ := set $proxy "https_listen" (printf ":%v" (int $l.https.port)) -}}{{- end }}
-{{- if $l.tunnel.enabled }}{{- $_ := set $proxy "tunnel_listen" (printf ":%v" (int $l.tunnel.port)) -}}{{- end }}
-{{- if $proxy }}{{- $_ := set $over "proxy" $proxy -}}{{- end }}
-{{- if $l.metrics.enabled }}{{- $_ := set $over "metrics" (dict "listen" (printf ":%v" (int $l.metrics.port))) -}}{{- end }}
 {{- if $l.postgres.enabled }}{{- $_ := set $over "postgres" (dict "listen" (printf ":%v" (int $l.postgres.port))) -}}{{- end }}
 {{- if $l.management.enabled }}{{- $_ := set $over "management" (dict "listen" (printf ":%v" (int $l.management.port))) -}}{{- end }}
 {{- $merged := mergeOverwrite $cfg $over -}}

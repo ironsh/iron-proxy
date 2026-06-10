@@ -32,10 +32,11 @@ mode: standalone
 # Edit dns.proxy_ip to the address clients use to reach this proxy (typically the
 # Service ClusterIP or LoadBalancer IP) and add your transforms/secrets.
 #
-# NOTE: listen addresses (dns.listen, proxy.http_listen/https_listen/tunnel_listen,
-# metrics.listen, postgres.listen, management.listen) are NOT set here. They are
-# derived from .Values.listeners and merged in at render time so the Service ports
-# and the proxy's binds can never drift. Setting them here has no effect.
+# NOTE: listen addresses are NOT set here. The core listeners (dns/http/https/
+# tunnel/metrics) are injected as IRON_*_LISTEN env vars from .Values.listeners
+# (which also override any file value), and postgres/management listen addresses
+# are merged in from .Values.listeners at render time. This keeps .Values.listeners
+# the single source of truth for ports; setting listen addresses here has no effect.
 config:
   dns:
     # IMPORTANT: the IP returned for intercepted DNS queries. Must be the address
@@ -134,13 +135,16 @@ secretEnv: {}
 #  OPENAI_API_KEY: sk-...
 
 # Listeners are the single source of truth for ports. Each enabled listener is
-# bound by the proxy, exposed on the container, and exposed on the Service — and
-# the bind address (":<port>") is fed into the config (standalone) or the matching
-# IRON_*_LISTEN env var (managed), so the Service and the proxy can never disagree.
+# bound by the proxy, exposed on the container, and exposed on the Service. The
+# bind address (":<port>") is fed to the proxy via the matching IRON_*_LISTEN env
+# var (dns/http/https/tunnel/metrics, in both modes) or merged into the config
+# (postgres/management), so the Service and the proxy can never disagree.
 #
 # dns/http/https/metrics are core and enabled by default; tunnel/postgres/management
 # are optional. Disabling a listener removes it from the Service and container ports.
-# (management has no env override and is incompatible with managed mode.)
+# Disabling dns additionally turns off the DNS server entirely (IRON_DNS_ENABLED=false)
+# — use this when clients reach the proxy via explicit HTTP(S)_PROXY settings rather
+# than DNS interception. (management has no env override and is standalone-only.)
 listeners:
   dns:
     enabled: true

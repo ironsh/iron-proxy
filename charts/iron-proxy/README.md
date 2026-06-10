@@ -44,10 +44,13 @@ capability and otherwise runs as non-root with a read-only root filesystem.
 
 `.Values.listeners` is the one place ports are defined. Each enabled listener is exposed on
 the Service, exposed as a container port, **and** has its bind address (`:<port>`) fed into
-the proxy automatically: merged into the rendered config in standalone mode, or emitted as
-the matching `IRON_*_LISTEN` env var in managed mode. So the Service and the proxy can never
-disagree about ports. Do not set `dns.listen`, `proxy.http_listen`, etc. under `config` —
-those keys are overridden by `listeners`. To move a port, change it in one place:
+the proxy. For the core listeners (dns/http/https/tunnel/metrics) this is done with the
+`IRON_*_LISTEN` environment variables in **both** standalone and managed mode — env
+overrides apply on top of any config file, so there is one source of truth and no drift.
+(postgres and management have no env override: their listen address is merged into the
+config in standalone mode and driven by the control plane in managed mode.) Do not set
+`dns.listen`, `proxy.http_listen`, etc. under `config`; those keys are ignored. To move a
+port, change it in one place:
 
 ```yaml
 listeners:
@@ -55,7 +58,13 @@ listeners:
     port: 8443        # Service port, container port, and proxy bind all become 8443
   tunnel:
     enabled: true     # turn on the optional CONNECT/SOCKS5 tunnel
+  dns:
+    enabled: false    # disable the DNS server entirely (IRON_DNS_ENABLED=false)
 ```
+
+Disabling `dns` turns the DNS server off completely (not just hidden from the Service). Use
+this when clients reach the proxy through explicit `HTTP_PROXY`/`HTTPS_PROXY` settings rather
+than DNS interception; `proxy_ip` is then not required.
 
 ## Run modes
 

@@ -6,7 +6,11 @@ Run mode: {{ .Values.mode }}
 
    kubectl --namespace {{ .Release.Namespace }} get svc {{ include "iron-proxy.fullname" . }}
 
-{{- if eq .Values.mode "standalone" }}
+{{- if not .Values.listeners.dns.enabled }}
+
+   The DNS server is disabled (listeners.dns.enabled=false). Point clients at the
+   proxy via explicit HTTP(S)_PROXY settings; proxy_ip is not needed.
+{{- else if eq .Values.mode "standalone" }}
 
    IMPORTANT: config.dns.proxy_ip must equal the IP clients reach iron-proxy on
    (typically this Service's ClusterIP or LoadBalancer IP). It is currently set to
@@ -19,8 +23,14 @@ Run mode: {{ .Values.mode }}
    Set it with --set managed.proxyIP=<ip> then `helm upgrade`.
 {{- end }}
 
+{{- if .Values.listeners.dns.enabled }}
+
 2. Point client pods at iron-proxy for DNS so hostnames resolve to proxy_ip, then
    send their HTTP/HTTPS traffic through it.
+{{- else }}
+
+2. Send client HTTP/HTTPS traffic through iron-proxy (e.g. HTTPS_PROXY/HTTP_PROXY).
+{{- end }}
 
 {{- if ne .Values.ca.mode "none" }}
 
