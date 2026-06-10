@@ -2,6 +2,11 @@
 
 # DNS server configuration
 dns:
+  # Whether the built-in DNS server runs. Defaults to true when omitted. Set to
+  # false (or IRON_DNS_ENABLED=false) to disable DNS interception entirely — useful
+  # when clients reach the proxy via explicit HTTP(S)_PROXY settings instead of DNS
+  # redirection. When disabled, proxy_ip is not required.
+  # enabled: true
   listen: ":53"
   # The IP address returned for intercepted DNS queries.
   # Should be the IP where iron-proxy is running.

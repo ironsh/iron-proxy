@@ -239,6 +239,48 @@ transforms:
 	require.Equal(t, []string{"10.0.0.0/8"}, allowCfg.CIDRs)
 }
 
+func TestLoad_DNSDisabled(t *testing.T) {
+	t.Run("disabled skips proxy_ip requirement and listen default", func(t *testing.T) {
+		yaml := `
+dns:
+  enabled: false
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.NotNil(t, cfg.DNS.Enabled)
+		require.False(t, cfg.DNS.IsEnabled())
+		require.Equal(t, "", cfg.DNS.Listen)
+	})
+
+	t.Run("enabled by default still requires proxy_ip", func(t *testing.T) {
+		yaml := `
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.ErrorContains(t, err, "dns.proxy_ip is required")
+	})
+
+	t.Run("explicitly enabled gets listen default", func(t *testing.T) {
+		yaml := `
+dns:
+  enabled: true
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.True(t, cfg.DNS.IsEnabled())
+		require.Equal(t, ":53", cfg.DNS.Listen)
+	})
+}
+
 func TestLoad_SNIOnlyMode(t *testing.T) {
 	t.Run("ca cert not required", func(t *testing.T) {
 		yaml := `

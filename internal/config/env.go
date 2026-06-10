@@ -10,6 +10,13 @@ import (
 // applyEnvOverrides layers IRON_* environment variables on top of an existing
 // Config. Only non-empty environment variables override the corresponding field.
 func applyEnvOverrides(cfg *Config) error {
+	if v := os.Getenv("IRON_DNS_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("IRON_DNS_ENABLED: %w", err)
+		}
+		cfg.DNS.Enabled = &b
+	}
 	if v := os.Getenv("IRON_DNS_LISTEN"); v != "" {
 		cfg.DNS.Listen = v
 	}

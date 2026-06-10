@@ -183,11 +183,16 @@ func main() {
 		logger.Info("using upstream resolver", slog.String("addr", cfg.DNS.UpstreamResolver))
 	}
 
-	// Initialize DNS server.
-	dnsServer, err := idns.New(cfg.DNS, resolver, logger)
-	if err != nil {
-		logger.Error("initializing DNS server", slog.String("error", err.Error()))
-		os.Exit(1)
+	// Initialize DNS server unless disabled. When off, clients are expected to
+	// reach the proxy via explicit HTTP(S)_PROXY settings rather than DNS
+	// interception.
+	var dnsServer *idns.Server
+	if cfg.DNS.IsEnabled() {
+		dnsServer, err = idns.New(cfg.DNS, resolver, logger)
+		if err != nil {
+			logger.Error("initializing DNS server", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
 	}
 
 	// Build the upstream-dial deny guard. config.Validate has already
@@ -235,7 +240,9 @@ func main() {
 	}
 
 	// Start services.
-	go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
+	if dnsServer != nil {
+		go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
+	}
 	go func() { errc <- fmt.Errorf("proxy: %w", p.ListenAndServe()) }()
 	go func() { errc <- fmt.Errorf("metrics: %w", metricsServer.ListenAndServe()) }()
 	if mgmtServer != nil {
@@ -243,8 +250,12 @@ func main() {
 	}
 	pgManager.Start(pgListener, errc)
 
+	dnsListen := "disabled"
+	if cfg.DNS.IsEnabled() {
+		dnsListen = cfg.DNS.Listen
+	}
 	startAttrs := []any{
-		slog.String("dns_listen", cfg.DNS.Listen),
+		slog.String("dns_listen", dnsListen),
 		slog.String("http_listen", cfg.Proxy.HTTPListen),
 		slog.String("https_listen", cfg.Proxy.HTTPSListen),
 		slog.String("metrics_listen", cfg.Metrics.Listen),
@@ -279,8 +290,10 @@ func main() {
 			logger.Error("shutting down OTEL log provider", slog.String("error", err.Error()))
 		}
 	}
-	if err := dnsServer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("dns shutdown error", slog.String("error", err.Error()))
+	if dnsServer != nil {
+		if err := dnsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("dns shutdown error", slog.String("error", err.Error()))
+		}
 	}
 	if err := p.Shutdown(shutdownCtx); err != nil {
 		logger.Error("proxy shutdown error", slog.String("error", err.Error()))
