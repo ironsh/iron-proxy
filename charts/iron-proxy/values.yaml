@@ -76,15 +76,13 @@ managed:
 # MITM CA certificate/key handling. iron-proxy needs a CA in mitm mode to mint
 # leaf certs; sni-only mode needs none (use mode: none).
 ca:
-  # -- One of: generate | existingSecret | inline | none.
-  #   generate:       an initContainer generates an ephemeral CA per pod start.
-  #                   Works with zero config but the CA changes on every restart,
-  #                   so clients cannot pin trust. Switch to existingSecret/inline
-  #                   for production.
+  # -- One of: existingSecret | inline | none.
   #   existingSecret: mount a Secret you created (e.g. via `iron-proxy generate-ca`).
   #   inline:         supply ca.cert/ca.key PEM below; the chart creates the Secret.
   #   none:           mount nothing (sni-only mode, or config points elsewhere).
-  mode: generate
+  # Generate a stable CA once with `iron-proxy generate-ca` and store it in a
+  # Secret; do not regenerate it per pod, or clients lose trust on every restart.
+  mode: existingSecret
   # existingSecret mode:
   # -- Name of the existing Secret holding the CA cert and key.
   existingSecret: ""
@@ -97,11 +95,6 @@ ca:
   cert: ""
   # -- PEM-encoded CA private key.
   key: ""
-  # generate mode:
-  # -- Common name for the generated CA.
-  commonName: "iron-proxy CA"
-  # -- Key algorithm for the generated CA: rsa4096 or ed25519.
-  algorithm: "rsa4096"
 
 # -- Extra environment variables (e.g. secret-backend credentials referenced from
 # config: OPENAI_API_KEY, OP_SERVICE_ACCOUNT_TOKEN, AWS_*). Standard core/v1 EnvVar list.

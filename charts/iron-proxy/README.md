@@ -6,14 +6,20 @@ proxy, to Kubernetes.
 ## TL;DR
 
 ```bash
+# Create a CA once and store it in a Secret (MITM mode needs one):
+iron-proxy generate-ca -outdir ./ca -name "Acme egress CA"
+kubectl create secret generic iron-proxy-ca \
+  --from-file=ca.crt=./ca/ca.crt --from-file=ca.key=./ca/ca.key
+
 # From a checkout of the repo:
-helm install iron-proxy ./charts/iron-proxy
+helm install iron-proxy ./charts/iron-proxy \
+  --set ca.existingSecret=iron-proxy-ca
 ```
 
-The default install runs in standalone mode with a sample allowlist config and an
-ephemeral self-signed CA generated at pod start. It is a starting point: you will almost
-always want to edit `config` (especially `config.dns.proxy_ip`), supply a stable CA, and
-add your secret-backend credentials. See below.
+The chart runs in standalone mode with a sample allowlist config by default. It is a
+starting point: you will almost always want to edit `config` (especially
+`config.dns.proxy_ip`), point at your CA Secret, and add your secret-backend credentials.
+See below.
 
 ## How iron-proxy runs
 
@@ -100,18 +106,18 @@ kubectl create secret generic iron-proxy-token --from-literal=token="$IRON_PROXY
 
 ## CA certificate (MITM mode)
 
-MITM mode mints leaf certificates from a CA, so clients must trust that CA. The mount path
-is always `/etc/iron-proxy/tls` (matching the default `config.tls.ca_cert`/`ca_key`). Pick a
-`ca.mode`:
+MITM mode mints leaf certificates from a CA, so clients must trust that CA. The CA must be
+stable: a CA that changes on pod restart breaks every client that trusted the old one. The
+mount path is always `/etc/iron-proxy/tls` (matching the default `config.tls.ca_cert`/
+`ca_key`). Pick a `ca.mode`:
 
 | `ca.mode` | Behavior | Use when |
 | --- | --- | --- |
-| `generate` (default) | An initContainer runs `iron-proxy generate-ca` into an emptyDir on every pod start | Demos/trials. CA changes per restart, so clients cannot pin it. |
-| `existingSecret` | Mount a Secret you created | Production. Stable, rotatable CA. |
+| `existingSecret` (default) | Mount a Secret you created | Production. Stable, rotatable CA. |
 | `inline` | Provide `ca.cert`/`ca.key` PEM; the chart creates the Secret | GitOps where the CA lives in your (encrypted) values. |
 | `none` | Mount nothing | `tls.mode: sni-only`, which needs no CA. |
 
-Create a stable CA for `existingSecret` mode with the bundled subcommand:
+Create a CA for `existingSecret` mode with the bundled subcommand:
 
 ```bash
 iron-proxy generate-ca -outdir ./ca -name "Acme egress CA"
@@ -152,12 +158,10 @@ credentials with:
 | `managed.existingTokenSecret` | `""` | Existing Secret holding the token. |
 | `managed.tokenSecretKey` | `token` | Key within that Secret. |
 | `managed.controlPlaneURL` | `""` | Override `IRON_CONTROL_PLANE_URL`. |
-| `ca.mode` | `generate` | `generate`, `existingSecret`, `inline`, or `none`. |
+| `ca.mode` | `existingSecret` | `existingSecret`, `inline`, or `none`. |
 | `ca.existingSecret` | `""` | Secret name for `existingSecret` mode. |
 | `ca.certKey` / `ca.keyKey` | `ca.crt` / `ca.key` | Keys within that Secret. |
 | `ca.cert` / `ca.key` | `""` | PEM material for `inline` mode. |
-| `ca.commonName` | `iron-proxy CA` | CN for `generate` mode. |
-| `ca.algorithm` | `rsa4096` | Key algorithm for `generate` mode (`rsa4096`/`ed25519`). |
 | `env` | `[]` | Extra environment variables. |
 | `envFrom` | `[]` | Pull env from existing Secrets/ConfigMaps. |
 | `secretEnv` | `{}` | Inline key/values → chart Secret, injected via `envFrom`. |
@@ -184,5 +188,5 @@ credentials with:
   to the replicas, with a config that is identical and stateless across pods.
 - **Privileged ports.** If your cluster policy forbids `NET_BIND_SERVICE`, move the DNS/HTTP/
   HTTPS listeners in `config` to ports >= 1024 and remap them via `service.ports.*.port`.
-- **CA trust.** With `ca.mode: generate` the CA is not stable across restarts; use
-  `existingSecret` or `inline` for anything clients need to trust durably.
+- **CA trust.** Generate the CA once and keep it in a Secret. Clients trust the CA, so it
+  must survive pod restarts and rollouts unchanged.

@@ -20,13 +20,7 @@ Run mode: {{ .Values.mode }}
 {{- if eq .Values.config.tls.mode "mitm" }}
 
 3. MITM mode terminates TLS, so clients must trust the proxy CA.
-{{- if eq .Values.ca.mode "generate" }}
-   The CA is generated fresh on every pod start (ca.mode=generate) and is NOT stable
-   across restarts. Use ca.mode=existingSecret or ca.mode=inline for a CA clients can
-   pin. Extract the current CA with:
-
-     kubectl --namespace {{ .Release.Namespace }} exec deploy/{{ include "iron-proxy.fullname" . }} -- cat /etc/iron-proxy/tls/ca.crt
-{{- else if eq .Values.ca.mode "existingSecret" }}
+{{- if eq .Values.ca.mode "existingSecret" }}
    The CA comes from Secret "{{ .Values.ca.existingSecret }}". Distribute its
    "{{ .Values.ca.certKey }}" entry to clients as a trusted root.
 {{- else if eq .Values.ca.mode "inline" }}

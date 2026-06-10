@@ -40,28 +40,6 @@ spec:
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- if eq .Values.ca.mode "generate" }}
-      initContainers:
-        - name: generate-ca
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command:
-            - iron-proxy
-            - generate-ca
-            - -outdir
-            - /etc/iron-proxy/tls
-            - -name
-            - {{ .Values.ca.commonName | quote }}
-            - -alg
-            - {{ .Values.ca.algorithm | quote }}
-          {{- with .Values.securityContext }}
-          securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: ca
-              mountPath: /etc/iron-proxy/tls
-      {{- end }}
       containers:
         - name: iron-proxy
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -134,9 +112,7 @@ spec:
             {{- if ne .Values.ca.mode "none" }}
             - name: ca
               mountPath: /etc/iron-proxy/tls
-              {{- if ne .Values.ca.mode "generate" }}
               readOnly: true
-              {{- end }}
             {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -163,9 +139,6 @@ spec:
         - name: ca
           secret:
             secretName: {{ include "iron-proxy.caSecretName" . }}
-        {{- else if eq .Values.ca.mode "generate" }}
-        - name: ca
-          emptyDir: {}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
