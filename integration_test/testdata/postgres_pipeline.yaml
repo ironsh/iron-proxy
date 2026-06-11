@@ -22,6 +22,9 @@ postgres:
         type: env
         var: PG_UPSTREAM_DSN
       role: tenant_role
+      settings:
+        - name: app.tenant_label
+          value: centaur
 
 metrics:
   listen: "127.0.0.1:0"

@@ -92,3 +92,38 @@ func TestClassify(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyMutationFacts covers the generic GUC-mutation facts Classify
+// reports (independent of the role-specific Kind): the names written, and the
+// reset-everything statements RESET ALL / DISCARD ALL.
+func TestClassifyMutationFacts(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		setGUCs  []string
+		resetAll bool
+		discard  bool
+	}{
+		{name: "set custom guc", sql: "SET centaur.slack_channel_id = 'C123'", setGUCs: []string{"centaur.slack_channel_id"}},
+		{name: "set local custom guc", sql: "SET LOCAL centaur.slack_channel_id = 'C123'", setGUCs: []string{"centaur.slack_channel_id"}},
+		{name: "reset custom guc", sql: "RESET centaur.slack_channel_id", setGUCs: []string{"centaur.slack_channel_id"}},
+		{name: "set_config custom guc", sql: "SELECT set_config('centaur.slack_channel_id', 'C123', false)", setGUCs: []string{"centaur.slack_channel_id"}},
+		{name: "name lowercased", sql: "SET Centaur.Slack_Channel_ID = 'C123'", setGUCs: []string{"centaur.slack_channel_id"}},
+		{name: "search_path collected", sql: "SET search_path = public", setGUCs: []string{"search_path"}},
+		{name: "multi statement collects all", sql: "SET a.x = '1'; SET a.y = '2'", setGUCs: []string{"a.x", "a.y"}},
+		{name: "reset all flagged", sql: "RESET ALL", resetAll: true},
+		{name: "discard all flagged", sql: "DISCARD ALL", discard: true},
+		{name: "discard plans not flagged", sql: "DISCARD PLANS"},
+		{name: "select writes nothing", sql: "SELECT 1"},
+		{name: "current_setting writes nothing", sql: "SELECT current_setting('centaur.slack_channel_id')"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := Classify(tt.sql)
+			require.ElementsMatchf(t, tt.setGUCs, op.SetGUCs, "Classify(%q).SetGUCs", tt.sql)
+			require.Equalf(t, tt.resetAll, op.ResetAll, "Classify(%q).ResetAll", tt.sql)
+			require.Equalf(t, tt.discard, op.Discard, "Classify(%q).Discard", tt.sql)
+		})
+	}
+}

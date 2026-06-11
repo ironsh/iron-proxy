@@ -316,6 +316,45 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Len(t, results, 1)
 	})
 
+	t.Run("session setting is injected at session start", func(t *testing.T) {
+		// The proxy applied SET via set_config for app.tenant_label during the
+		// handshake, so the client's first query already sees the value.
+		conn := dial(t, pgClientPassword)
+		results, err := conn.Exec(context.Background(), "SELECT current_setting('app.tenant_label')").ReadAll()
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		require.Len(t, results[0].Rows, 1)
+		require.Equal(t, "centaur", string(results[0].Rows[0][0]))
+	})
+
+	t.Run("client cannot override a pinned setting", func(t *testing.T) {
+		conn := dial(t, pgClientPassword)
+		currentLabel := func() string {
+			results, err := conn.Exec(context.Background(), "SELECT current_setting('app.tenant_label')").ReadAll()
+			require.NoError(t, err)
+			return string(results[0].Rows[0][0])
+		}
+
+		// Direct SET, the set_config bypass, RESET, and RESET ALL are all
+		// blocked, and none of them perturbs the injected value.
+		for _, sql := range []string{
+			"SET app.tenant_label = 'evil'",
+			"SELECT set_config('app.tenant_label', 'evil', false)",
+			"RESET app.tenant_label",
+			"RESET ALL",
+			"DISCARD ALL",
+		} {
+			err := exec(t, conn, sql)
+			require.Errorf(t, err, "expected %q to be rejected", sql)
+			var pgErr *pgconn.PgError
+			require.Truef(t, errors.As(err, &pgErr), "want PgError for %q, got %T: %v", sql, err, err)
+			require.Equalf(t, "42501", pgErr.Code, "reject code for %q", sql)
+			require.Equal(t, "centaur", currentLabel(), "injected setting must survive %q", sql)
+		}
+		// Role is also still intact after the blocked statements.
+		require.Equal(t, pgRole, currentRole(t, conn))
+	})
+
 	t.Run("do block is rejected", func(t *testing.T) {
 		conn := dial(t, pgClientPassword)
 		err := exec(t, conn, "DO $$ BEGIN PERFORM 1; END $$")

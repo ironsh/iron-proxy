@@ -36,7 +36,7 @@ func discardLogger() *slog.Logger {
 // client credential) for conflict/passthrough tests.
 func localListener(t *testing.T, database string) *postgres.Listener {
 	t.Helper()
-	u, err := postgres.NewManagedUpstream(database, staticSource{name: "local", value: "host=local"}, "")
+	u, err := postgres.NewManagedUpstream(database, staticSource{name: "local", value: "host=local"}, "", nil)
 	require.NoError(t, err)
 	l, err := postgres.NewListener("127.0.0.1:0", "u", "p", []*postgres.Upstream{u})
 	require.NoError(t, err)

@@ -7,9 +7,14 @@ import (
 )
 
 func TestClassifyClientStatement(t *testing.T) {
+	// pinned models an upstream that pins one custom setting; nil means an
+	// upstream that pins nothing beyond the always-on role policy.
+	pinned := map[string]struct{}{"centaur.slack_channel_id": {}}
+
 	tests := []struct {
 		name    string
 		sql     string
+		pinned  map[string]struct{}
 		allowed bool
 		reason  RejectReason
 	}{
@@ -27,6 +32,13 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set session authorization rejected", sql: "SET SESSION AUTHORIZATION admin", reason: RejectClientRoleChange},
 		{name: "reset session authorization rejected", sql: "RESET SESSION AUTHORIZATION", reason: RejectClientRoleChange},
 
+		// RESET ALL / DISCARD ALL reset the managed role, so they are blocked
+		// even when the upstream pins no custom settings.
+		{name: "reset all rejected", sql: "RESET ALL", reason: RejectResetAll},
+		{name: "discard all rejected", sql: "DISCARD ALL", reason: RejectDiscardAll},
+		{name: "discard plans allowed", sql: "DISCARD PLANS", allowed: true},
+		{name: "discard temp allowed", sql: "DISCARD TEMP", allowed: true},
+
 		// Multi-statement batches are allowed when every statement passes the
 		// role policy, and rejected per-statement otherwise.
 		{name: "clean multi statement allowed", sql: "SELECT 1; SELECT 2", allowed: true},
@@ -37,6 +49,20 @@ func TestClassifyClientStatement(t *testing.T) {
 		// SET of other GUCs is fine — only role-changing statements are rejected.
 		{name: "set search_path allowed", sql: "SET search_path = public", allowed: true},
 		{name: "set local search_path allowed", sql: "SET LOCAL search_path = public", allowed: true},
+
+		// A pinned setting may not be mutated by the client through any form.
+		{name: "set pinned rejected", sql: "SET centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "set local pinned rejected", sql: "SET LOCAL centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "reset pinned rejected", sql: "RESET centaur.slack_channel_id", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "set_config pinned rejected", sql: "SELECT set_config('centaur.slack_channel_id', 'C999', false)", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "set pinned buried in batch rejected", sql: "SELECT 1; SET centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "reset all rejected even with pin", sql: "RESET ALL", pinned: pinned, reason: RejectResetAll},
+		// Reading a pinned setting is fine; only writes are blocked.
+		{name: "current_setting pinned allowed", sql: "SELECT current_setting('centaur.slack_channel_id')", pinned: pinned, allowed: true},
+		// A setting that isn't pinned passes through.
+		{name: "set unpinned allowed", sql: "SET centaur.other = 'x'", pinned: pinned, allowed: true},
+		// Without a pin, the same SET is allowed.
+		{name: "set formerly-pinned allowed without pin", sql: "SET centaur.slack_channel_id = 'C999'", allowed: true},
 
 		// Function-call bypass attempts — caught by AST walker.
 		{name: "set_config role rejected", sql: "SELECT set_config('role', 'admin', false)", reason: RejectClientRoleChange},
@@ -52,7 +78,7 @@ func TestClassifyClientStatement(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := ClassifyClientStatement(tt.sql)
+			allowed, reason := ClassifyClientStatement(tt.sql, tt.pinned)
 			if tt.allowed {
 				require.Truef(t, allowed, "ClassifyClientStatement(%q) returned (false, %v); want allowed", tt.sql, reason)
 				return
@@ -66,27 +92,37 @@ func TestClassifyClientStatement(t *testing.T) {
 func TestNewManagedUpstream(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 
-	u, err := NewManagedUpstream("analytics", dsn, "readonly")
+	u, err := NewManagedUpstream("analytics", dsn, "readonly", nil)
 	require.NoError(t, err)
 	require.Equal(t, "analytics", u.Database())
 	require.Equal(t, "readonly", u.Role())
 
 	// Absent role is allowed (no SET ROLE issued).
-	u, err = NewManagedUpstream("main", dsn, "")
+	u, err = NewManagedUpstream("main", dsn, "", nil)
 	require.NoError(t, err)
 	require.Empty(t, u.Role())
 
+	// Settings are carried through and pinned.
+	u, err = NewManagedUpstream("centaur", dsn, "reader", []Setting{{Name: "centaur.slack_channel_id", Value: "C123"}})
+	require.NoError(t, err)
+	require.Equal(t, []Setting{{Name: "centaur.slack_channel_id", Value: "C123"}}, u.Settings())
+	require.Contains(t, u.PinnedGUCs(), "centaur.slack_channel_id")
+
+	// Settings are validated identically to the YAML path.
+	_, err = NewManagedUpstream("centaur", dsn, "", []Setting{{Name: "role", Value: "x"}})
+	require.ErrorContains(t, err, "managed by the proxy")
+
 	// Required fields.
-	_, err = NewManagedUpstream("", dsn, "")
+	_, err = NewManagedUpstream("", dsn, "", nil)
 	require.ErrorContains(t, err, "database is required")
-	_, err = NewManagedUpstream("d", nil, "")
+	_, err = NewManagedUpstream("d", nil, "", nil)
 	require.ErrorContains(t, err, "dsn source is required")
 }
 
 func TestNewListener(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 	mustUpstream := func(database string) *Upstream {
-		u, err := NewManagedUpstream(database, dsn, "")
+		u, err := NewManagedUpstream(database, dsn, "", nil)
 		require.NoError(t, err)
 		return u
 	}
@@ -117,7 +153,7 @@ func TestNewListener(t *testing.T) {
 func TestListenerWithUpstreams(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 	mustUpstream := func(database string) *Upstream {
-		u, err := NewManagedUpstream(database, dsn, "")
+		u, err := NewManagedUpstream(database, dsn, "", nil)
 		require.NoError(t, err)
 		return u
 	}

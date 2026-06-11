@@ -15,7 +15,7 @@ import (
 // server.
 func TestDialUpstreamDatabaseMismatch(t *testing.T) {
 	up, err := NewManagedUpstream("appdb",
-		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 dbname=otherdb"}, "")
+		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 dbname=otherdb"}, "", nil)
 	require.NoError(t, err)
 
 	_, err = dialUpstream(context.Background(), up)
@@ -30,7 +30,7 @@ func TestDialUpstreamDatabaseMismatch(t *testing.T) {
 // not name a database. Caught before any network round-trip.
 func TestDialUpstreamMissingDatabase(t *testing.T) {
 	up, err := NewManagedUpstream("appdb",
-		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 user=app"}, "")
+		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 user=app"}, "", nil)
 	require.NoError(t, err)
 
 	_, err = dialUpstream(context.Background(), up)
@@ -45,7 +45,7 @@ func TestDialUpstreamMissingDatabase(t *testing.T) {
 // is listening on port 1), but the failure must not be a databaseMismatchError.
 func TestDialUpstreamDatabaseMatchPassesCheck(t *testing.T) {
 	up, err := NewManagedUpstream("appdb",
-		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 dbname=appdb"}, "")
+		staticDSN{name: "dsn", value: "host=127.0.0.1 port=1 dbname=appdb"}, "", nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

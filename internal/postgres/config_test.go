@@ -106,4 +106,49 @@ func TestCompile(t *testing.T) {
 		_, err := Compile(cfg(u), logger, stubSource)
 		require.ErrorContains(t, err, "dsn is required")
 	})
+
+	t.Run("settings compiled and pinned", func(t *testing.T) {
+		u := upstream("centaur")
+		u.Settings = []Setting{
+			{Name: "centaur.slack_channel_id", Value: "C123"},
+			{Name: "centaur.tenant", Value: ""},
+		}
+		l, err := Compile(cfg(u), logger, stubSource)
+		require.NoError(t, err)
+		up := l.Upstream("centaur")
+		require.Equal(t, u.Settings, up.Settings())
+		require.Contains(t, up.PinnedGUCs(), "centaur.slack_channel_id")
+		require.Contains(t, up.PinnedGUCs(), "centaur.tenant")
+	})
+
+	t.Run("setting name is required", func(t *testing.T) {
+		u := upstream("a")
+		u.Settings = []Setting{{Name: "", Value: "x"}}
+		_, err := Compile(cfg(u), logger, stubSource)
+		require.ErrorContains(t, err, "name is required")
+	})
+
+	t.Run("invalid setting name rejected", func(t *testing.T) {
+		u := upstream("a")
+		u.Settings = []Setting{{Name: "bad name!", Value: "x"}}
+		_, err := Compile(cfg(u), logger, stubSource)
+		require.ErrorContains(t, err, "invalid setting name")
+	})
+
+	t.Run("reserved setting name rejected", func(t *testing.T) {
+		u := upstream("a")
+		u.Settings = []Setting{{Name: "Role", Value: "x"}}
+		_, err := Compile(cfg(u), logger, stubSource)
+		require.ErrorContains(t, err, "managed by the proxy")
+	})
+
+	t.Run("duplicate setting name rejected", func(t *testing.T) {
+		u := upstream("a")
+		u.Settings = []Setting{
+			{Name: "app.x", Value: "1"},
+			{Name: "APP.X", Value: "2"},
+		}
+		_, err := Compile(cfg(u), logger, stubSource)
+		require.ErrorContains(t, err, "duplicate setting")
+	})
 }

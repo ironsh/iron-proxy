@@ -701,6 +701,15 @@ transforms:
 #       # The Postgres role the proxy SETs at session start. Every query the
 #       # client issues runs as this role on the upstream database.
 #       role: tenant_role
+#       # Optional session variables (GUCs) the proxy SETs at session start,
+#       # before the SET ROLE. The proxy also pins these: a client may not SET,
+#       # RESET, or set_config them afterwards (nor RESET ALL / DISCARD ALL), so
+#       # a setting used as a security boundary (e.g. an RLS key) can't be
+#       # overridden. Names must be bare or dotted GUC identifiers; role and
+#       # session_authorization are reserved (use role above).
+#       settings:
+#         - name: app.tenant_id
+#           value: centaur
 #     # Clients connect with dbname=analyticsdb to reach this upstream.
 #     - database: analyticsdb
 #       dsn:
