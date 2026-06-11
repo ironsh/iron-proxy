@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ironsh/iron-proxy/internal/postgres"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -132,6 +133,9 @@ type PostgresSyncEntry struct {
 	Database string
 	DSN      secrets.Source
 	Role     string
+	// Settings are the pinned session variables the proxy SETs at session start
+	// for this upstream. Optional; nil when the control plane sends none.
+	Settings []postgres.Setting
 }
 
 // PostgresFromSync parses the top-level postgres: array from the control
@@ -160,6 +164,10 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 			Database  string          `json:"database"`
 			DSN       json.RawMessage `json:"dsn"`
 			Role      string          `json:"role"`
+			Settings  []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"settings"`
 		}
 		if err := json.Unmarshal(re, &e); err != nil {
 			return nil, fmt.Errorf("parsing postgres[%d]: %w", i, err)
@@ -181,11 +189,19 @@ func PostgresFromSync(raw json.RawMessage, logger *slog.Logger) ([]PostgresSyncE
 		if err != nil {
 			return nil, fmt.Errorf("postgres[%q]: building dsn source: %w", e.ForeignID, err)
 		}
+		var settings []postgres.Setting
+		if len(e.Settings) > 0 {
+			settings = make([]postgres.Setting, len(e.Settings))
+			for j, s := range e.Settings {
+				settings[j] = postgres.Setting{Name: s.Name, Value: s.Value}
+			}
+		}
 		entries = append(entries, PostgresSyncEntry{
 			ForeignID: e.ForeignID,
 			Database:  e.Database,
 			DSN:       src,
 			Role:      e.Role,
+			Settings:  settings,
 		})
 	}
 	return entries, nil

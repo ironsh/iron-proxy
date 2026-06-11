@@ -80,16 +80,14 @@ func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, lo
 		return
 	}
 
-	if upstream.Role() != "" {
-		if err := setUpstreamRole(ctx, upstreamConn, upstream); err != nil {
-			writeFatal(backend, "08006", err.Error())
-			logger.Error("postgres: set role failed",
-				slog.String("error", err.Error()),
-				slog.String("remote", clientConn.RemoteAddr().String()),
-			)
-			_ = upstreamConn.Close(ctx)
-			return
-		}
+	if err := applySessionSetup(ctx, upstreamConn, upstream); err != nil {
+		writeFatal(backend, "08006", err.Error())
+		logger.Error("postgres: session setup failed",
+			slog.String("error", err.Error()),
+			slog.String("remote", clientConn.RemoteAddr().String()),
+		)
+		_ = upstreamConn.Close(ctx)
+		return
 	}
 
 	hijacked, err := upstreamConn.Hijack()
@@ -213,17 +211,33 @@ func dialUpstream(ctx context.Context, upstream *Upstream) (*pgconn.PgConn, erro
 	return conn, nil
 }
 
-// setUpstreamRole issues `SET ROLE "<role>"` on the upstream session.
+// applySessionSetup prepares the upstream session before the relay starts: it
+// applies the upstream's pinned settings, then issues `SET ROLE "<role>"`.
 //
-// The proxy assumes the role persists for the lifetime of the connection,
-// which requires PgBouncer (if present) to be running in session-pool mode.
-// Transaction or statement pool modes silently swap backends between queries
-// and would defeat the policy; that constraint is enforced by deployment
-// configuration rather than by a runtime probe.
-func setUpstreamRole(ctx context.Context, conn *pgconn.PgConn, upstream *Upstream) error {
-	setSQL := "SET ROLE " + QuoteIdent(upstream.Role())
-	if _, err := conn.Exec(ctx, setSQL).ReadAll(); err != nil {
-		return fmt.Errorf("upstream rejected SET ROLE %s: %w", QuoteIdent(upstream.Role()), err)
+// Settings are applied first, while the session still runs as the connecting
+// (login) user, so a setting that requires elevated privilege isn't blocked by
+// an already-downgraded role. Each is applied through set_config(name, value,
+// false) via the extended protocol so the value is a bound parameter — no SQL
+// quoting of the configured value is needed.
+//
+// The proxy assumes the role and settings persist for the lifetime of the
+// connection, which requires PgBouncer (if present) to be running in
+// session-pool mode. Transaction or statement pool modes silently swap backends
+// between queries and would defeat the policy; that constraint is enforced by
+// deployment configuration rather than by a runtime probe.
+func applySessionSetup(ctx context.Context, conn *pgconn.PgConn, upstream *Upstream) error {
+	for _, s := range upstream.Settings() {
+		rr := conn.ExecParams(ctx, "SELECT set_config($1, $2, false)",
+			[][]byte{[]byte(s.Name), []byte(s.Value)}, nil, nil, nil)
+		if _, err := rr.Close(); err != nil {
+			return fmt.Errorf("upstream rejected setting %q: %w", s.Name, err)
+		}
+	}
+	if upstream.Role() != "" {
+		setSQL := "SET ROLE " + QuoteIdent(upstream.Role())
+		if _, err := conn.Exec(ctx, setSQL).ReadAll(); err != nil {
+			return fmt.Errorf("upstream rejected SET ROLE %s: %w", QuoteIdent(upstream.Role()), err)
+		}
 	}
 	return nil
 }
@@ -336,7 +350,7 @@ func (r *relay) clientToServer() {
 				// Unexpected mid-batch; treat the Simple Query as a fresh statement.
 				r.skipExtended = false
 			}
-			if allowed, reason := ClassifyClientStatement(m.String); !allowed {
+			if allowed, reason := ClassifyClientStatement(m.String, r.upstream.PinnedGUCs()); !allowed {
 				r.writeReject(reason, true)
 				continue
 			}
@@ -346,7 +360,7 @@ func (r *relay) clientToServer() {
 			}
 
 		case *pgproto3.Parse:
-			if allowed, reason := ClassifyClientStatement(m.Query); !allowed {
+			if allowed, reason := ClassifyClientStatement(m.Query, r.upstream.PinnedGUCs()); !allowed {
 				r.writeReject(reason, false)
 				r.skipExtended = true
 				continue
@@ -416,6 +430,24 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Severity: "ERROR",
 			Code:     "0A000",
 			Message:  "blocked by iron-proxy policy: DO blocks are not supported (their plpgsql body cannot be inspected for embedded role changes)",
+		}
+	case RejectPinnedSetting:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "42501",
+			Message:  "blocked by iron-proxy policy: this session setting is managed by the proxy; clients may not SET / RESET / set_config it",
+		}
+	case RejectResetAll:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "42501",
+			Message:  "blocked by iron-proxy policy: RESET ALL would reset the proxy-managed role and session settings",
+		}
+	case RejectDiscardAll:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "42501",
+			Message:  "blocked by iron-proxy policy: DISCARD ALL would reset the proxy-managed role and session settings",
 		}
 	case RejectClientRoleChange:
 		fallthrough

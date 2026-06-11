@@ -21,8 +21,25 @@ import (
 // `WITH x AS (SELECT pg_catalog.set_config('role', ...)) SELECT * FROM x`,
 // or `PREPARE p AS SET ROLE admin`.
 type Op struct {
-	// Kind is the classified statement kind.
+	// Kind is the classified statement kind. It captures the role-policy verdict
+	// (OpSetRole and friends), DO blocks, parse errors, and empties — the cases
+	// that don't depend on which custom GUCs a given upstream pins.
 	Kind OpKind
+
+	// SetGUCs is the lowercased set of GUC names the statement writes through
+	// SET / RESET <name> / set_config(<name>, ...). Role and
+	// session_authorization are reported here too, but those are already
+	// covered by Kind; the per-upstream policy uses this for custom pinned
+	// names. Nil when the statement writes no GUC.
+	SetGUCs []string
+
+	// ResetAll is true when the statement contains RESET ALL, which resets every
+	// session variable — including the proxy-managed role and any pinned GUC.
+	ResetAll bool
+
+	// Discard is true when the statement contains DISCARD ALL, which (among
+	// other things) resets every session variable like RESET ALL.
+	Discard bool
 }
 
 // OpKind enumerates the statement classes the policy reasons about.
@@ -107,91 +124,123 @@ func classifyUncached(sql string) Op {
 		return Op{Kind: OpEmpty}
 	}
 
-	// Multi-statement Simple Queries are permitted as long as every statement
-	// passes the role policy. We classify each statement and reject the whole
-	// batch on the first one that mutates the role or is an (opaque) DO block.
-	// The relay forwards the batch unchanged when all statements are allowed;
-	// the upstream runs it as one implicit transaction.
+	// Multi-statement Simple Queries are classified per statement and the batch
+	// carries the union of what its statements do. Kind takes the first
+	// role-changing or DO-block statement (so the relay can reject it as before);
+	// the GUC-mutation facts accumulate across the batch so the per-upstream
+	// policy can reject a batch touching any pinned setting wherever it appears.
+	op := Op{Kind: OpOther}
 	for _, s := range stmts {
 		root := s.GetStmt()
 		if root == nil {
 			continue
 		}
-		if kind := classifyStmt(root); kind != OpOther {
-			return Op{Kind: kind}
+		m := classifyStmt(root)
+		if op.Kind == OpOther {
+			op.Kind = m.kind
 		}
+		op.SetGUCs = append(op.SetGUCs, m.setGUCs...)
+		op.ResetAll = op.ResetAll || m.resetAll
+		op.Discard = op.Discard || m.discard
 	}
-	return Op{Kind: OpOther}
+	return op
 }
 
-// classifyStmt classifies a single statement's root node, returning the OpKind
-// of any role-mutating or otherwise-rejectable construct it finds, or OpOther
-// when the statement is allowed.
-func classifyStmt(root *pg_query.Node) OpKind {
+// mutations is what a single statement does that the policy cares about: its
+// role-policy kind (OpSetRole and friends, or OpDoBlock), the GUC names it
+// writes, and whether it resets every variable via RESET ALL / DISCARD ALL.
+type mutations struct {
+	kind     OpKind
+	setGUCs  []string
+	resetAll bool
+	discard  bool
+}
+
+// classifyStmt classifies a single statement's root node.
+func classifyStmt(root *pg_query.Node) mutations {
 	// Top-level shape gives us a fast path for the common DDL/DML cases.
 	switch root.Node.(type) {
 	case *pg_query.Node_TransactionStmt:
-		// BEGIN / COMMIT / ROLLBACK / SAVEPOINT etc. — no role mutation.
-		return OpOther
+		// BEGIN / COMMIT / ROLLBACK / SAVEPOINT etc. — no GUC mutation.
+		return mutations{kind: OpOther}
 	case *pg_query.Node_DoStmt:
-		return OpDoBlock
+		// The plpgsql body is opaque to the SQL AST walker; we can't see GUC
+		// writes inside it, so the statement is rejected wholesale via Kind.
+		return mutations{kind: OpDoBlock}
 	}
-
-	// Generic scan: any role-affecting node anywhere in the tree triggers a
-	// rejection. Covers SELECT set_config(...), PREPARE ... AS SET ROLE,
-	// CTEs, subqueries, INSERT...SELECT, function arguments, etc.
-	if kind := scanForRoleChange(root); kind != 0 {
-		return kind
-	}
-	return OpOther
+	return scanMutations(root)
 }
 
-// scanForRoleChange walks the AST rooted at node and returns the OpKind of
-// any role-affecting construct it finds. Returns 0 if none.
+// scanMutations walks the AST rooted at node and reports every GUC-affecting
+// construct it finds: SET / RESET / RESET ALL, DISCARD ALL, and set_config(...)
+// calls, wherever they're nested (CTEs, subqueries, PREPARE bodies, function
+// arguments, ...).
 //
-// The walk uses protoreflect for generic descent so we don't have to maintain
-// a hand-rolled case statement for every Node subtype as Postgres adds
-// syntax. Any nested *VariableSetStmt or *FuncCall to set_config is caught
-// regardless of how it's wrapped.
-func scanForRoleChange(node *pg_query.Node) OpKind {
-	var found OpKind
-	walkProto(node.ProtoReflect(), func(m protoreflect.Message) bool {
-		msg := m.Interface()
-		switch n := msg.(type) {
+// The walk uses protoreflect for generic descent so we don't have to maintain a
+// hand-rolled case statement for every Node subtype as Postgres adds syntax.
+func scanMutations(node *pg_query.Node) mutations {
+	var m mutations
+	walkProto(node.ProtoReflect(), func(msg protoreflect.Message) bool {
+		switch n := msg.Interface().(type) {
 		case *pg_query.VariableSetStmt:
-			if kind, ok := roleGUCs[strings.ToLower(n.GetName())]; ok {
-				switch n.GetKind() {
-				case pg_query.VariableSetKind_VAR_RESET, pg_query.VariableSetKind_VAR_RESET_ALL:
-					if kind == OpSetRole {
-						found = OpResetRole
-					} else {
-						found = OpResetSessionAuthorization
-					}
-				default:
-					found = kind
-				}
-				return false
+			if n.GetKind() == pg_query.VariableSetKind_VAR_RESET_ALL {
+				m.resetAll = true
+				break
+			}
+			// SET, SET LOCAL, and RESET <name> all name a single GUC.
+			name := strings.ToLower(n.GetName())
+			if name != "" {
+				m.setGUCs = append(m.setGUCs, name)
+			}
+			if rk := roleKindFor(name, n.GetKind()); rk != 0 && m.kind == 0 {
+				m.kind = rk
+			}
+		case *pg_query.DiscardStmt:
+			// Only DISCARD ALL resets session variables; the PLANS / SEQUENCES /
+			// TEMP variants leave GUCs (and the role) intact.
+			if n.GetTarget() == pg_query.DiscardMode_DISCARD_ALL {
+				m.discard = true
 			}
 		case *pg_query.VariableShowStmt:
-			// SHOW is read-only; allow.
+			// SHOW is read-only; ignore.
 		case *pg_query.FuncCall:
-			if kind := classifyFuncCall(n); kind != 0 {
-				found = kind
-				return false
+			if name, kind := setConfigTarget(n); name != "" {
+				m.setGUCs = append(m.setGUCs, name)
+				if kind != 0 && m.kind == 0 {
+					m.kind = kind
+				}
 			}
 		}
 		return true
 	})
-	return found
+	return m
 }
 
-// classifyFuncCall returns a role-change OpKind if fc is a call to
-// set_config (or pg_catalog.set_config) whose first argument is a string
-// literal naming a role-mutating GUC. Returns 0 otherwise.
-func classifyFuncCall(fc *pg_query.FuncCall) OpKind {
+// roleKindFor returns the role-policy OpKind for a SET/RESET of the named GUC,
+// or 0 when the GUC is not role-affecting. kind distinguishes a write
+// (OpSetRole) from a reset (OpResetRole).
+func roleKindFor(name string, kind pg_query.VariableSetKind) OpKind {
+	base, ok := roleGUCs[name]
+	if !ok {
+		return 0
+	}
+	if kind == pg_query.VariableSetKind_VAR_RESET {
+		if base == OpSetRole {
+			return OpResetRole
+		}
+		return OpResetSessionAuthorization
+	}
+	return base
+}
+
+// setConfigTarget inspects fc and, when it is a call to set_config (or
+// pg_catalog.set_config) whose first argument is a string-literal GUC name,
+// returns that lowercased name and the role-policy OpKind for it (0 when the
+// target is not role-affecting). Returns ("", 0) when fc is not such a call.
+func setConfigTarget(fc *pg_query.FuncCall) (name string, kind OpKind) {
 	names := fc.GetFuncname()
 	if len(names) == 0 {
-		return 0
+		return "", 0
 	}
 	// Funcname is a list of String nodes: ["set_config"] for unqualified
 	// or ["pg_catalog", "set_config"] for schema-qualified. We accept any
@@ -200,24 +249,23 @@ func classifyFuncCall(fc *pg_query.FuncCall) OpKind {
 	last := names[len(names)-1]
 	lastStr, ok := last.Node.(*pg_query.Node_String_)
 	if !ok {
-		return 0
+		return "", 0
 	}
 	if !strings.EqualFold(lastStr.String_.GetSval(), "set_config") {
-		return 0
+		return "", 0
 	}
 	args := fc.GetArgs()
 	if len(args) < 1 {
-		return 0
+		return "", 0
 	}
 	param, ok := stringConst(args[0])
 	if !ok {
-		return 0
+		return "", 0
 	}
-	kind, ok := roleGUCsForSetConfig[strings.ToLower(param)]
-	if !ok {
-		return 0
-	}
-	return kind
+	lower := strings.ToLower(param)
+	// roleGUCsForSetConfig returns the zero OpKind (0) for non-role names, which
+	// is exactly the "not role-affecting" signal callers expect.
+	return lower, roleGUCsForSetConfig[lower]
 }
 
 // stringConst returns the string value of node if it's an A_Const with a

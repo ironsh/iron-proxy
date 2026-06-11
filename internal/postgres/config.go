@@ -4,9 +4,9 @@
 //
 // The listener accepts client connections, authenticates them against
 // proxy-managed credentials, opens its own authenticated connection upstream
-// (handling SCRAM/MD5 termination via pgconn), optionally issues a single
-// `SET ROLE "<role>"` on the upstream session, then relays the PostgreSQL
-// wire protocol bidirectionally.
+// (handling SCRAM/MD5 termination via pgconn), applies the upstream's pinned
+// session settings and optionally issues a single `SET ROLE "<role>"` on the
+// upstream session, then relays the PostgreSQL wire protocol bidirectionally.
 //
 // Deployment assumption: if PgBouncer (or any pooler) sits between the proxy
 // and PostgreSQL, it must be configured in session-pool mode. Transaction or
@@ -14,12 +14,14 @@
 // nullify the role injection. This is not probed at runtime — the constraint
 // is enforced by deployment configuration.
 //
-// While the relay is running the proxy is mostly transparent: it rejects only
+// While the relay is running the proxy is mostly transparent. It rejects
 // client-issued role-changing statements (`SET ROLE`, `RESET ROLE`,
-// `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`), the function-
-// call equivalents (`set_config('role', ...)`), and DO blocks. Multi-statement
-// Simple Queries are allowed as long as every statement passes the role policy;
-// a batch is rejected if any statement mutates the role or is a DO block.
+// `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`) and their
+// function-call equivalents (`set_config('role', ...)`); any `SET`, `RESET`, or
+// `set_config` of a setting the upstream pins; the reset-everything statements
+// `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
+// settings); and DO blocks. Multi-statement Simple Queries are allowed as long
+// as every statement passes; a batch is rejected if any statement is rejected.
 // Extended Query, COPY, and prepared statements pass through unchanged.
 //
 // The proxy runs a single postgres listener fronting multiple upstream
@@ -35,6 +37,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -91,6 +95,24 @@ type UpstreamConfig struct {
 	// this role on the upstream database. Optional: when empty, the proxy issues
 	// no SET ROLE and the upstream session runs as the connecting user.
 	Role string `yaml:"role,omitempty"`
+
+	// Settings are session variables (GUCs) the proxy SETs at session start for
+	// this upstream, in order, before the SET ROLE. Each is applied via
+	// set_config(name, value, false) so the value is a session-level parameter.
+	// The proxy also pins these names: a client may not SET, RESET, or
+	// set_config them afterwards (nor RESET ALL / DISCARD ALL), so a setting
+	// used as a security boundary (e.g. an RLS key) can't be overridden. The
+	// name must be a bare or dotted GUC identifier; role and
+	// session_authorization are reserved (use Role). Optional.
+	Settings []Setting `yaml:"settings,omitempty"`
+}
+
+// Setting is one session variable the proxy injects at session start: a GUC
+// name and the value it is set to. Values are applied verbatim through
+// set_config, so no SQL quoting is required of the configuration.
+type Setting struct {
+	Name  string `yaml:"name"`
+	Value string `yaml:"value"`
 }
 
 // ClientConfig describes the credentials the proxy demands from clients.
@@ -166,10 +188,17 @@ func (l *Listener) WithUpstreams(extra []*Upstream) (listener *Listener, dropped
 }
 
 // Upstream is the compiled, runtime form of a single UpstreamConfig: one
-// upstream database with its DSN and optional injected role.
+// upstream database with its DSN, optional injected role, and optional pinned
+// session settings.
 type Upstream struct {
 	database string
 	role     string
+	settings []Setting
+
+	// pinnedGUCs is the lowercased set of setting names the relay forbids the
+	// client from mutating. Derived from settings; never includes role or
+	// session_authorization (those are always blocked by the role policy).
+	pinnedGUCs map[string]struct{}
 
 	dsn secrets.Source
 }
@@ -181,6 +210,14 @@ func (u *Upstream) Database() string { return u.database }
 // Role returns the role the proxy SETs upstream at session start. Empty
 // means no role is set (the upstream session runs as the connecting user).
 func (u *Upstream) Role() string { return u.role }
+
+// Settings returns the session variables the proxy SETs at session start, in
+// configuration order.
+func (u *Upstream) Settings() []Setting { return u.settings }
+
+// PinnedGUCs returns the lowercased set of setting names the client is forbidden
+// from mutating for this upstream. The returned map must not be modified.
+func (u *Upstream) PinnedGUCs() map[string]struct{} { return u.pinnedGUCs }
 
 // DSN returns the upstream connection string, fetched from the configured
 // secret source. The result is cached by the source; repeated calls do not
@@ -252,10 +289,17 @@ func Compile(c ListenerConfig, logger *slog.Logger, buildSource SourceBuilder) (
 			return nil, fmt.Errorf("%s: building dsn source: %w", uctx, err)
 		}
 
+		settings, pinned, err := compileSettings(uctx, uc.Settings)
+		if err != nil {
+			return nil, err
+		}
+
 		upstreams[uc.Database] = &Upstream{
-			database: uc.Database,
-			role:     uc.Role,
-			dsn:      dsnSource,
+			database:   uc.Database,
+			role:       uc.Role,
+			settings:   settings,
+			pinnedGUCs: pinned,
+			dsn:        dsnSource,
 		}
 	}
 
@@ -304,20 +348,65 @@ func NewListener(listen, clientUser, clientPassword string, upstreams []*Upstrea
 }
 
 // NewManagedUpstream builds an Upstream for a control-plane-synced listener. The
-// DSN source and optional role come from the control plane. Database is the
-// routing key and is required; role is optional.
-func NewManagedUpstream(database string, dsn secrets.Source, role string) (*Upstream, error) {
+// DSN source, optional role, and optional pinned session settings come from the
+// control plane. Database is the routing key and is required; role and settings
+// are optional. Settings are validated identically to the YAML path.
+func NewManagedUpstream(database string, dsn secrets.Source, role string, settings []Setting) (*Upstream, error) {
 	if database == "" {
 		return nil, fmt.Errorf("postgres: managed upstream database is required")
 	}
 	if dsn == nil {
 		return nil, fmt.Errorf("postgres upstream[%q]: dsn source is required", database)
 	}
+	compiled, pinned, err := compileSettings(fmt.Sprintf("postgres upstream[%q]", database), settings)
+	if err != nil {
+		return nil, err
+	}
 	return &Upstream{
-		database: database,
-		role:     role,
-		dsn:      dsn,
+		database:   database,
+		role:       role,
+		settings:   compiled,
+		pinnedGUCs: pinned,
+		dsn:        dsn,
 	}, nil
+}
+
+// gucNameRe matches a Postgres GUC name: a bare identifier, or a dotted
+// class.name custom variable. The strict charset lets the proxy treat validated
+// names as trusted, and matches the form custom settings (e.g. centaur.foo)
+// must take.
+var gucNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$`)
+
+// compileSettings validates a slice of session settings and returns the cleaned
+// slice alongside the lowercased set of names to pin. ctx is a config-location
+// prefix for error messages (e.g. `postgres.upstreams["centaur"]`). Names must
+// be valid GUC identifiers, unique within the upstream, and may not be role or
+// session_authorization (those are managed via the role field and always
+// blocked by the role policy).
+func compileSettings(ctx string, settings []Setting) ([]Setting, map[string]struct{}, error) {
+	if len(settings) == 0 {
+		return nil, nil, nil
+	}
+	out := make([]Setting, 0, len(settings))
+	pinned := make(map[string]struct{}, len(settings))
+	for i, s := range settings {
+		if s.Name == "" {
+			return nil, nil, fmt.Errorf("%s: settings[%d]: name is required", ctx, i)
+		}
+		if !gucNameRe.MatchString(s.Name) {
+			return nil, nil, fmt.Errorf("%s: settings[%d]: invalid setting name %q", ctx, i, s.Name)
+		}
+		lower := strings.ToLower(s.Name)
+		if lower == "role" || lower == "session_authorization" {
+			return nil, nil, fmt.Errorf("%s: settings[%d]: %q is managed by the proxy; use the role field", ctx, i, s.Name)
+		}
+		if _, dup := pinned[lower]; dup {
+			return nil, nil, fmt.Errorf("%s: duplicate setting %q", ctx, s.Name)
+		}
+		pinned[lower] = struct{}{}
+		out = append(out, s)
+	}
+	return out, pinned, nil
 }
 
 // QuoteIdent returns s formatted as a Postgres double-quoted identifier,

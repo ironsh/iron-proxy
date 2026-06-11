@@ -513,7 +513,7 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 	synced := make([]*postgres.Upstream, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.Role)
+		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.Role, e.Settings)
 		if err != nil {
 			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),

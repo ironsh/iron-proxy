@@ -29,7 +29,7 @@ func TestPostgresFromSync_ParsesEntries(t *testing.T) {
 	t.Setenv("PG_MAIN_DSN", "host=main")
 
 	raw := json.RawMessage(`[
-		{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"role":"readonly"},
+		{"id":"pgs_1","foreign_id":"pg-analytics","database":"analytics","dsn":{"type":"env","var":"PG_ANALYTICS_DSN"},"role":"readonly","settings":[{"name":"app.tenant","value":"centaur"},{"name":"app.region","value":"us"}]},
 		{"id":"pgs_2","foreign_id":"pg-main","database":"maindb","dsn":{"type":"env","var":"PG_MAIN_DSN"}}
 	]`)
 
@@ -44,10 +44,15 @@ func TestPostgresFromSync_ParsesEntries(t *testing.T) {
 	got, err := entries[0].DSN.Get(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "host=analytics", got)
+	require.Len(t, entries[0].Settings, 2)
+	require.Equal(t, "app.tenant", entries[0].Settings[0].Name)
+	require.Equal(t, "centaur", entries[0].Settings[0].Value)
+	require.Equal(t, "app.region", entries[0].Settings[1].Name)
 
 	require.Equal(t, "pg-main", entries[1].ForeignID)
 	require.Equal(t, "maindb", entries[1].Database)
 	require.Empty(t, entries[1].Role)
+	require.Empty(t, entries[1].Settings)
 }
 
 func TestPostgresFromSync_DatabaseDistinctFromForeignID(t *testing.T) {
