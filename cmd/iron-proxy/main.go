@@ -209,7 +209,7 @@ func main() {
 	}
 
 	// Initialize proxy.
-	p := proxy.New(proxy.Options{
+	p, err := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
 		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
 		TunnelAddr:                    cfg.Proxy.TunnelListen,
@@ -224,6 +224,10 @@ func main() {
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
 	})
+	if err != nil {
+		logger.Error("initializing proxy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
@@ -622,11 +626,13 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
+		if err := p.ReloadAuth(ctx, newCfg.Proxy.Auth); err != nil {
+			return &management.ValidationError{Err: err}
+		}
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 		holder.Store(newPipeline)
 		mcpHolder.Store(newPolicy)
 		pgManager.Reload(ctx, newPgListener)
-		p.ReloadAuth(newCfg.Proxy.Auth)
 		logger.Info("pipeline reloaded via management API",
 			slog.String("transforms", newPipeline.Names()),
 			slog.Bool("postgres_listener", newPgListener != nil),

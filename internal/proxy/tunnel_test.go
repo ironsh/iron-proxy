@@ -35,7 +35,7 @@ func startTunnelProxyWithAuth(t *testing.T, transforms []transform.Transformer, 
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:   "127.0.0.1:0",
 		HTTPSAddr:  "127.0.0.1:0",
 		TunnelAddr: "127.0.0.1:0",
@@ -44,6 +44,7 @@ func startTunnelProxyWithAuth(t *testing.T, transforms []transform.Transformer, 
 		Auth:       auth,
 		Logger:     testLogger(),
 	})
+	require.NoError(t, err)
 
 	// Start tunnel listener
 	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -199,10 +200,7 @@ func TestTunnel_CONNECT_MethodNotAllowed(t *testing.T) {
 func TestTunnel_CONNECT_AuthRequired(t *testing.T) {
 	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
@@ -223,10 +221,7 @@ func TestTunnel_CONNECT_AuthRequired(t *testing.T) {
 func TestTunnel_CONNECT_AuthValid(t *testing.T) {
 	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
@@ -315,10 +310,7 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 func TestTunnel_SOCKS5_AuthRequired(t *testing.T) {
 	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
@@ -343,10 +335,7 @@ func TestTunnel_SOCKS5_UsernamePasswordAuth(t *testing.T) {
 
 	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)

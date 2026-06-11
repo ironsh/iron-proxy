@@ -240,7 +240,9 @@ proxy:
     required: false # Default: false
     # users:
     #   - login: "ci"
-    #     password_env: "IRON_PROXY_CI_PASSWORD"
+    #     password:
+    #       type: env
+    #       var: "IRON_PROXY_CI_PASSWORD"
 
 tls:
   ca_cert: "/etc/iron-proxy/ca.crt" # Required
@@ -286,6 +288,8 @@ HTTP `CONNECT`, and SOCKS5. Default is `false`.
 HTTP and `CONNECT` clients use `Proxy-Authorization: Basic ...`. SOCKS5 clients
 use username/password auth. In `tls.mode: sni-only`, raw HTTPS connections do
 not carry auth metadata; when auth is required, use the tunnel listener.
+Each user password is a secret source (`env`, `file`, AWS, 1Password, etc.)
+resolved on startup and management reload.
 
 ```yaml
 proxy:
@@ -294,9 +298,13 @@ proxy:
     required: true
     users:
       - login: "ci"
-        password_env: "IRON_PROXY_CI_PASSWORD"
+        password:
+          type: env
+          var: "IRON_PROXY_CI_PASSWORD"
       - login: "dev"
-        password_env: "IRON_PROXY_DEV_PASSWORD"
+        password:
+          type: file
+          path: "/run/secrets/iron_proxy_dev_password"
 ```
 
 ### DNS

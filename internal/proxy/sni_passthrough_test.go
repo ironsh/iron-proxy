@@ -98,7 +98,8 @@ func buildSNIProxy(t *testing.T, allowed []string, withTunnel bool) (*Proxy, fun
 	if withTunnel {
 		opts.TunnelAddr = "127.0.0.1:0"
 	}
-	p := New(opts)
+	p, err := New(opts)
+	require.NoError(t, err)
 
 	return p, func() []transform.PipelineResult {
 		mu.Lock()

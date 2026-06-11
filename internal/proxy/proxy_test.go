@@ -18,12 +18,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
@@ -32,6 +34,24 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func authUser(t *testing.T, login, password string) config.ProxyAuthUser {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), login)
+	require.NoError(t, os.WriteFile(path, []byte(password), 0o600))
+	return config.ProxyAuthUser{
+		Login: login,
+		Password: yaml.Node{
+			Kind: yaml.MappingNode,
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "type"},
+				{Kind: yaml.ScalarNode, Value: "file"},
+				{Kind: yaml.ScalarNode, Value: "path"},
+				{Kind: yaml.ScalarNode, Value: path},
+			},
+		},
+	}
 }
 
 func generateTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -109,7 +129,7 @@ func startProxyWithAuth(t *testing.T, transforms []transform.Transformer, auth c
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:  "127.0.0.1:0",
 		HTTPSAddr: "127.0.0.1:0",
 		CertCache: cache,
@@ -117,6 +137,7 @@ func startProxyWithAuth(t *testing.T, transforms []transform.Transformer, auth c
 		Auth:      auth,
 		Logger:    testLogger(),
 	})
+	require.NoError(t, err)
 
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -172,10 +193,7 @@ func TestHTTPProxy(t *testing.T) {
 func TestHTTPProxy_AuthRequired(t *testing.T) {
 	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
@@ -200,10 +218,7 @@ func TestHTTPProxy_AuthValid(t *testing.T) {
 
 	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
@@ -227,10 +242,7 @@ func TestHTTPProxy_ReloadAuth(t *testing.T) {
 
 	p, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
 		Required: true,
-		Users: []config.ProxyAuthUser{{
-			Login:    "ci",
-			Password: "secret",
-		}},
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
 	})
 
 	do := func(login string) int {
@@ -247,13 +259,13 @@ func TestHTTPProxy_ReloadAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusProxyAuthRequired, do("dev"))
 
-	p.ReloadAuth(config.ProxyAuth{
+	require.NoError(t, p.ReloadAuth(context.Background(), config.ProxyAuth{
 		Required: true,
 		Users: []config.ProxyAuthUser{
-			{Login: "ci", Password: "secret"},
-			{Login: "dev", Password: "secret"},
+			authUser(t, "ci", "secret"),
+			authUser(t, "dev", "secret"),
 		},
-	})
+	}))
 
 	require.Equal(t, http.StatusOK, do("dev"))
 }
@@ -389,11 +401,12 @@ func TestHTTPProxy_ClientCancel(t *testing.T) {
 		close(done)
 	})
 
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr: "127.0.0.1:0",
 		Pipeline: transform.NewPipelineHolder(pipeline),
 		Logger:   testLogger(),
 	})
+	require.NoError(t, err)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() { _ = p.httpServer.Serve(ln) }()

@@ -118,12 +118,10 @@ type ProxyAuth struct {
 	Users    []ProxyAuthUser `yaml:"users"`
 }
 
-// ProxyAuthUser is one proxy login. Password can be supplied directly or read
-// from PasswordEnv; PasswordEnv is preferred for production configs.
+// ProxyAuthUser is one proxy login. Password is a secrets source.
 type ProxyAuthUser struct {
-	Login       string `yaml:"login"`
-	Password    string `yaml:"password,omitempty"`
-	PasswordEnv string `yaml:"password_env,omitempty"`
+	Login    string    `yaml:"login"`
+	Password yaml.Node `yaml:"password"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
@@ -349,13 +347,11 @@ func validateProxyAuth(auth ProxyAuth) error {
 			return fmt.Errorf("proxy.auth.users[%d].login %q is duplicated", i, user.Login)
 		}
 		seen[user.Login] = struct{}{}
-		hasPassword := user.Password != ""
-		hasPasswordEnv := user.PasswordEnv != ""
-		if hasPassword == hasPasswordEnv {
-			return fmt.Errorf("proxy.auth.users[%d]: exactly one of password or password_env is required", i)
+		if user.Password.Kind == 0 {
+			return fmt.Errorf("proxy.auth.users[%d].password is required", i)
 		}
-		if hasPasswordEnv && os.Getenv(user.PasswordEnv) == "" {
-			return fmt.Errorf("proxy.auth.users[%d].password_env %q is not set in the environment", i, user.PasswordEnv)
+		if user.Password.Kind != yaml.MappingNode {
+			return fmt.Errorf("proxy.auth.users[%d].password must be a secret source mapping", i)
 		}
 	}
 	if auth.Required && len(auth.Users) == 0 {

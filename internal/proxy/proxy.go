@@ -84,7 +84,7 @@ type Options struct {
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
 // TLSModeSNIOnly, certCache is unused and may be nil.
-func New(opts Options) *Proxy {
+func New(opts Options) (*Proxy, error) {
 	if opts.TLSMode == "" {
 		opts.TLSMode = config.TLSModeMITM
 	}
@@ -92,6 +92,11 @@ func New(opts Options) *Proxy {
 	guard := opts.Guard
 	if guard == nil {
 		guard, _ = dnsguard.New(nil)
+	}
+	auth, err := newAuthenticatorHolder(context.Background(), opts.Auth, opts.Logger)
+	if err != nil {
+		shutdownCancel()
+		return nil, err
 	}
 	p := &Proxy{
 		httpsAddr:      opts.HTTPSAddr,
@@ -104,7 +109,7 @@ func New(opts Options) *Proxy {
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
-		auth:           newAuthenticatorHolder(opts.Auth),
+		auth:           auth,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -123,14 +128,14 @@ func New(opts Options) *Proxy {
 		},
 	}
 
-	return p
+	return p, nil
 }
 
 // ReloadAuth atomically swaps proxy client authentication config for new
 // HTTP/CONNECT/SOCKS5 handshakes. Existing tunnels keep their authenticated
 // login in TunnelInfo.
-func (p *Proxy) ReloadAuth(auth config.ProxyAuth) {
-	p.auth.Store(auth)
+func (p *Proxy) ReloadAuth(ctx context.Context, auth config.ProxyAuth) error {
+	return p.auth.Store(ctx, auth, p.logger)
 }
 
 // ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners.

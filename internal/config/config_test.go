@@ -204,9 +204,9 @@ proxy:
   auth:
     users:
       - login: ci
-        password: one
+        password: {type: env, var: ONE}
       - login: ci
-        password: two
+        password: {type: env, var: TWO}
 tls:
   ca_cert: "/tmp/ca.crt"
   ca_key: "/tmp/ca.key"
@@ -224,9 +224,7 @@ tls:
 	}
 }
 
-func TestLoad_ProxyAuthPasswordEnv(t *testing.T) {
-	t.Setenv("IRON_PROXY_CI_PASSWORD", "secret")
-
+func TestLoad_ProxyAuthPasswordSource(t *testing.T) {
 	cfg, err := Load(strings.NewReader(`
 dns:
   proxy_ip: "10.0.0.1"
@@ -235,7 +233,9 @@ proxy:
     required: true
     users:
       - login: ci
-        password_env: IRON_PROXY_CI_PASSWORD
+        password:
+          type: env
+          var: IRON_PROXY_CI_PASSWORD
 tls:
   ca_cert: "/tmp/ca.crt"
   ca_key: "/tmp/ca.key"
@@ -243,6 +243,7 @@ tls:
 	require.NoError(t, err)
 	require.True(t, cfg.Proxy.Auth.Required)
 	require.Equal(t, "ci", cfg.Proxy.Auth.Users[0].Login)
+	require.NotZero(t, cfg.Proxy.Auth.Users[0].Password.Kind)
 }
 
 func TestLoad_UnknownFields(t *testing.T) {

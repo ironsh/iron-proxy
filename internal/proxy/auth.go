@@ -1,15 +1,18 @@
 package proxy
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 
 	"github.com/ironsh/iron-proxy/internal/config"
+	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
 const proxyAuthRealm = `Basic realm="iron-proxy"`
@@ -27,37 +30,52 @@ type proxyAuth struct {
 	Login string
 }
 
-func newAuthenticatorHolder(cfg config.ProxyAuth) *authenticatorHolder {
+func newAuthenticatorHolder(ctx context.Context, cfg config.ProxyAuth, logger *slog.Logger) (*authenticatorHolder, error) {
 	h := &authenticatorHolder{}
-	h.Store(cfg)
-	return h
+	if err := h.Store(ctx, cfg, logger); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
-func (h *authenticatorHolder) Store(cfg config.ProxyAuth) {
-	h.value.Store(newAuthenticator(cfg))
+func (h *authenticatorHolder) Store(ctx context.Context, cfg config.ProxyAuth, logger *slog.Logger) error {
+	a, err := newAuthenticator(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	h.value.Store(a)
+	return nil
 }
 
 func (h *authenticatorHolder) Load() *authenticator {
 	v := h.value.Load()
 	if v == nil {
-		return newAuthenticator(config.ProxyAuth{})
+		return emptyAuthenticator()
 	}
 	return v.(*authenticator)
 }
 
-func newAuthenticator(cfg config.ProxyAuth) *authenticator {
+func emptyAuthenticator() *authenticator {
+	return &authenticator{passwords: map[string]string{}}
+}
+
+func newAuthenticator(ctx context.Context, cfg config.ProxyAuth, logger *slog.Logger) (*authenticator, error) {
 	passwords := make(map[string]string, len(cfg.Users))
-	for _, user := range cfg.Users {
-		password := user.Password
-		if user.PasswordEnv != "" {
-			password = os.Getenv(user.PasswordEnv)
+	for i, user := range cfg.Users {
+		source, err := secrets.BuildSource(user.Password, logger)
+		if err != nil {
+			return nil, fmt.Errorf("proxy.auth.users[%d].password: %w", i, err)
+		}
+		password, err := source.Get(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("proxy.auth.users[%d].password from %q: %w", i, source.Name(), err)
 		}
 		passwords[user.Login] = password
 	}
 	return &authenticator{
 		required:  cfg.Required,
 		passwords: passwords,
-	}
+	}, nil
 }
 
 func (a *authenticator) enabled() bool {

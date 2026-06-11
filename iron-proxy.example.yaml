@@ -38,9 +38,13 @@ proxy:
   #   required: true
   #   users:
   #     - login: "ci"
-  #       password_env: "IRON_PROXY_CI_PASSWORD"
+  #       password:
+  #         type: env
+  #         var: "IRON_PROXY_CI_PASSWORD"
   #     - login: "dev"
-  #       password_env: "IRON_PROXY_DEV_PASSWORD"
+  #       password:
+  #         type: file
+  #         path: "/run/secrets/iron_proxy_dev_password"
   # Global body buffer limits for transforms.
   max_request_body_bytes: 1048576   # default: 1 MiB
   # max_response_body_bytes: 0      # default: 0 (uncapped)
