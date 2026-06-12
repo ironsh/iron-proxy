@@ -56,6 +56,7 @@ type Proxy struct {
 	// 443 in production so a client-supplied CONNECT port cannot pivot an
 	// allowlisted hostname onto a different port. Overridable in tests.
 	sniUpstreamPort string
+	ready           func() bool
 }
 
 // Options configures Proxy construction.
@@ -78,6 +79,12 @@ type Options struct {
 	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
 	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
 	UpstreamProxy func(*http.Request) (*url.URL, error)
+	// Ready, when non-nil, gates request handling: while it returns false
+	// every proxied request is rejected with 503. Managed proxies use it to
+	// fail closed until the first control-plane config has been applied, so
+	// requests can never pass through un-transformed (leaking placeholder
+	// credentials upstream) during startup.
+	Ready func() bool
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -92,6 +99,7 @@ func New(opts Options) *Proxy {
 		guard, _ = dnsguard.New(nil)
 	}
 	p := &Proxy{
+		ready:          opts.Ready,
 		httpsAddr:      opts.HTTPSAddr,
 		tlsMode:        opts.TLSMode,
 		tunnelAddr:     opts.TunnelAddr,
@@ -254,6 +262,12 @@ func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 // handleHTTP is the core HTTP request handler. tunnelInfo is non-nil only
 // when r originated inside a CONNECT/SOCKS5 tunnel.
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo) {
+	if p.ready != nil && !p.ready() {
+		// Fail closed: without a control-plane config the pipeline would pass
+		// requests through un-transformed.
+		http.Error(w, "proxy is not ready: awaiting control-plane config", http.StatusServiceUnavailable)
+		return
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
