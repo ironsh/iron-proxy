@@ -47,6 +47,9 @@ func applyEnvOverrides(cfg *Config) error {
 	if v := os.Getenv("IRON_METRICS_LISTEN"); v != "" {
 		cfg.Metrics.Listen = v
 	}
+	if v := os.Getenv("IRON_MANAGEMENT_LISTEN"); v != "" {
+		cfg.Management.Listen = v
+	}
 	if v := os.Getenv("IRON_LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v
 	}

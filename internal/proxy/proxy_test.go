@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -831,4 +832,50 @@ func TestContainsDotSegments(t *testing.T) {
 			require.Equal(t, tc.want, containsDotSegments(tc.path))
 		})
 	}
+}
+
+func TestHTTPProxy_FailsClosedUntilReady(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	caCert, caKey := generateTestCA(t)
+	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
+	require.NoError(t, err)
+
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
+	holder := transform.NewPipelineHolder(pipeline)
+
+	var ready atomic.Bool
+	p := New(Options{
+		HTTPAddr:  "127.0.0.1:0",
+		CertCache: cache,
+		Pipeline:  holder,
+		Logger:    testLogger(),
+		Ready:     ready.Load,
+	})
+
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = p.httpServer.Serve(httpLn) }()
+	t.Cleanup(func() { _ = p.httpServer.Close() })
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpLn.Addr()), nil)
+	require.NoError(t, err)
+	req.Host = upstream.Listener.Addr().String()
+
+	// Not ready: the proxy must reject rather than pass the request through
+	// an un-synced pipeline.
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	// Ready: the same request flows.
+	ready.Store(true)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
