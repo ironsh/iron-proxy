@@ -54,7 +54,7 @@ func startTunnelIntegrationProxy(t *testing.T, allowedHosts []string, logger *sl
 	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
 	holder := transform.NewPipelineHolder(pipeline)
 
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:   "127.0.0.1:0",
 		HTTPSAddr:  "127.0.0.1:0",
 		TunnelAddr: "127.0.0.1:0",
@@ -62,6 +62,7 @@ func startTunnelIntegrationProxy(t *testing.T, allowedHosts []string, logger *sl
 		Pipeline:   holder,
 		Logger:     logger,
 	})
+	require.NoError(t, err)
 
 	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -118,13 +119,14 @@ func TestIntegration_DNSToProxyToUpstream(t *testing.T) {
 	holder := transform.NewPipelineHolder(pipeline)
 
 	// 4. Start proxy with HTTPS
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:  "127.0.0.1:0",
 		HTTPSAddr: "127.0.0.1:0",
 		CertCache: ca.certCache,
 		Pipeline:  holder,
 		Logger:    logger,
 	})
+	require.NoError(t, err)
 
 	// Start HTTP listener
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -493,4 +495,3 @@ func TestIntegration_SOCKS5(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF, "expected proxy to close the connection")
 	})
 }
-

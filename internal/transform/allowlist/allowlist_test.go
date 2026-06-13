@@ -31,6 +31,15 @@ func resultWithMethodAndPath(t *testing.T, a *Allowlist, host, method, path stri
 	return res
 }
 
+func resultWithContext(t *testing.T, a *Allowlist, host string, tctx *transform.TransformContext) *transform.TransformResult {
+	t.Helper()
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	res, err := a.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	return res
+}
+
 // --- Existing tests (backwards compat via New) ---
 
 func TestAllowlist_ExactDomainMatch(t *testing.T) {
@@ -297,6 +306,34 @@ func TestAllowlist_RuleWithCIDR(t *testing.T) {
 	require.Equal(t, transform.ActionContinue, resultWithMethodAndPath(t, a, "10.0.1.5", "GET", "/").Action)
 	require.Equal(t, transform.ActionReject, resultWithMethodAndPath(t, a, "10.0.1.5", "POST", "/").Action)
 	require.Equal(t, transform.ActionReject, resultWithMethodAndPath(t, a, "internal.service", "GET", "/").Action)
+}
+
+func TestAllowlist_ProxyLoginFilter(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Rules: []hostmatch.RuleConfig{{
+			Host:        "api.openai.com",
+			ProxyLogins: []string{"ci"},
+		}},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, transform.ActionContinue, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{ProxyLogin: "ci"}).Action)
+	require.Equal(t, transform.ActionReject, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{ProxyLogin: "dev"}).Action)
+	require.Equal(t, transform.ActionReject, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{}).Action)
+}
+
+func TestAllowlist_SourceCIDRFilter(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Rules: []hostmatch.RuleConfig{{
+			Host:        "api.openai.com",
+			SourceCIDRs: []string{"10.0.0.0/8"},
+		}},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, transform.ActionContinue, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{SourceIP: "10.1.2.3"}).Action)
+	require.Equal(t, transform.ActionReject, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{SourceIP: "192.168.1.5"}).Action)
+	require.Equal(t, transform.ActionReject, resultWithContext(t, a, "api.openai.com", &transform.TransformContext{}).Action)
 }
 
 // --- Warn mode tests ---

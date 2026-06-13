@@ -25,7 +25,7 @@ const (
 // the transform pipeline with a host-only synthetic request, and on accept
 // TCP-passthroughs the connection to the upstream server.
 func (p *Proxy) handleSNIPassthrough(clientConn net.Conn) {
-	if err := p.serveSNIPassthrough(clientConn); err != nil {
+	if err := p.serveSNIPassthrough(clientConn, nil); err != nil {
 		p.logger.Debug("sni passthrough error", slog.String("error", err.Error()))
 	}
 }
@@ -35,7 +35,7 @@ func (p *Proxy) handleSNIPassthrough(clientConn net.Conn) {
 // listener and the CONNECT/SOCKS5 tunnel TLS branch in sni-only mode. The
 // upstream port is fixed at 443 — a client-supplied CONNECT port is ignored
 // so an attacker cannot pivot an allowlisted hostname onto a different port.
-func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
+func (p *Proxy) serveSNIPassthrough(clientConn net.Conn, tunnelInfo *transform.TunnelInfo) error {
 	defer clientConn.Close()
 
 	sni, peeked, err := peekSNI(clientConn, sniPeekTimeout)
@@ -47,8 +47,16 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	result := &transform.PipelineResult{
 		Host:       sni,
 		RemoteAddr: clientConn.RemoteAddr().String(),
+		SourceIP:   sourceIP(clientConn.RemoteAddr().String()),
 		SNI:        sni,
 		Mode:       transform.ModeSNIOnly,
+		Tunnel:     cloneTunnelInfo(tunnelInfo),
+	}
+	if result.Tunnel != nil {
+		result.ProxyLogin = result.Tunnel.ProxyLogin
+		if result.Tunnel.SourceIP != "" {
+			result.SourceIP = result.Tunnel.SourceIP
+		}
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
@@ -59,11 +67,21 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		result.Err = fmt.Errorf("client hello missing sni")
 		return result.Err
 	}
+	authSnapshot := p.auth.Load()
+	if authSnapshot.required && result.ProxyLogin == "" {
+		result.Action = transform.ActionReject
+		result.StatusCode = http.StatusProxyAuthRequired
+		result.Err = fmt.Errorf("proxy auth requires an HTTP proxy or SOCKS5 auth handshake")
+		return result.Err
+	}
 
 	tctx := &transform.TransformContext{
-		Logger: p.logger,
-		SNI:    sni,
-		Mode:   transform.ModeSNIOnly,
+		Logger:     p.logger,
+		SNI:        sni,
+		Mode:       transform.ModeSNIOnly,
+		Tunnel:     cloneTunnelInfo(tunnelInfo),
+		ProxyLogin: result.ProxyLogin,
+		SourceIP:   result.SourceIP,
 	}
 
 	req := &http.Request{

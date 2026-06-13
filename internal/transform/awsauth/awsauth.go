@@ -231,7 +231,7 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
-	if !hostmatch.MatchAnyRule(a.rules, req) {
+	if !hostmatch.MatchAnyRuleContext(a.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

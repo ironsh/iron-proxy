@@ -94,7 +94,7 @@ func parseHeaderMatchers(patterns []string) ([]headerMatcher, error) {
 func (h *HeaderAllowlist) Name() string { return "header_allowlist" }
 
 func (h *HeaderAllowlist) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if len(h.rules) > 0 && !hostmatch.MatchAnyRule(h.rules, req) {
+	if len(h.rules) > 0 && !hostmatch.MatchAnyRuleContext(h.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

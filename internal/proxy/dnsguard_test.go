@@ -54,12 +54,13 @@ func TestUpstreamDenyGuard_HTTP(t *testing.T) {
 		guard, err := dnsguard.New(denyCIDRs)
 		require.NoError(t, err)
 
-		p := New(Options{
+		p, err := New(Options{
 			HTTPAddr: "127.0.0.1:0",
 			Pipeline: transform.NewPipelineHolder(pipeline),
 			Guard:    guard,
 			Logger:   logger,
 		})
+		require.NoError(t, err)
 
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err)
@@ -147,13 +148,14 @@ func TestUpstreamDenyGuard_SNIPassthrough(t *testing.T) {
 	guard, err := dnsguard.New([]string{"127.0.0.0/8"})
 	require.NoError(t, err)
 
-	p := New(Options{
+	p, err := New(Options{
 		HTTPSAddr: "127.0.0.1:0",
 		TLSMode:   "sni-only",
 		Pipeline:  transform.NewPipelineHolder(pipeline),
 		Guard:     guard,
 		Logger:    logger,
 	})
+	require.NoError(t, err)
 	p.sniUpstreamPort = upstreamPort
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

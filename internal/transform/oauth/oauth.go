@@ -394,7 +394,7 @@ func (o *OAuth) TransformRequest(ctx context.Context, tctx *transform.TransformC
 	}
 
 	// First entry whose rules host-match wins; config order is the tie-breaker.
-	entry := o.matchEntry(req)
+	entry := o.matchEntry(req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP})
 	if entry == nil {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
@@ -424,9 +424,9 @@ func (o *OAuth) TransformResponse(context.Context, *transform.TransformContext, 
 }
 
 // matchEntry returns the first entry whose host rules match req, or nil.
-func (o *OAuth) matchEntry(req *http.Request) *tokenEntry {
+func (o *OAuth) matchEntry(req *http.Request, ctx hostmatch.MatchContext) *tokenEntry {
 	for _, e := range o.entries {
-		if hostmatch.MatchAnyRule(e.rules, req) {
+		if hostmatch.MatchAnyRuleContext(e.rules, req, ctx) {
 			return e
 		}
 	}

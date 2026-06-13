@@ -17,10 +17,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy, string, *x509.CertPool) {
+	t.Helper()
+	return startTunnelProxyWithAuth(t, transforms, config.ProxyAuth{})
+}
+
+func startTunnelProxyWithAuth(t *testing.T, transforms []transform.Transformer, auth config.ProxyAuth) (*Proxy, string, *x509.CertPool) {
 	t.Helper()
 
 	caCert, caKey := generateTestCA(t)
@@ -29,14 +35,16 @@ func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy,
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:   "127.0.0.1:0",
 		HTTPSAddr:  "127.0.0.1:0",
 		TunnelAddr: "127.0.0.1:0",
 		CertCache:  cache,
 		Pipeline:   holder,
+		Auth:       auth,
 		Logger:     testLogger(),
 	})
+	require.NoError(t, err)
 
 	// Start tunnel listener
 	tunnelLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -189,6 +197,47 @@ func TestTunnel_CONNECT_MethodNotAllowed(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 }
 
+func TestTunnel_CONNECT_AuthRequired(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	require.NoError(t, err)
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	require.Equal(t, proxyAuthRealm, resp.Header.Get("Proxy-Authenticate"))
+}
+
+func TestTunnel_CONNECT_AuthValid(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic Y2k6c2VjcmV0\r\n\r\n")
+	require.NoError(t, err)
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Socks", "true")
@@ -256,6 +305,76 @@ func TestTunnel_SOCKS5_HTTP(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "hello from socks5", string(body))
+}
+
+func TestTunnel_SOCKS5_AuthRequired(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	require.NoError(t, err)
+
+	resp := make([]byte, 2)
+	_, err = io.ReadFull(conn, resp)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x05, 0xFF}, resp)
+}
+
+func TestTunnel_SOCKS5_UsernamePasswordAuth(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = conn.Write([]byte{0x05, 0x01, 0x02})
+	require.NoError(t, err)
+	method := make([]byte, 2)
+	_, err = io.ReadFull(conn, method)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x05, 0x02}, method)
+
+	_, err = conn.Write([]byte{0x01, 0x02, 'c', 'i', 0x06, 's', 'e', 'c', 'r', 'e', 't'})
+	require.NoError(t, err)
+	authResp := make([]byte, 2)
+	_, err = io.ReadFull(conn, authResp)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x01, 0x00}, authResp)
+
+	upstreamHost, upstreamPortStr, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	ip := net.ParseIP(upstreamHost).To4()
+	require.NotNil(t, ip)
+	var port uint16
+	_, err = fmt.Sscanf(upstreamPortStr, "%d", &port)
+	require.NoError(t, err)
+
+	connectReq := []byte{0x05, 0x01, 0x00, 0x01}
+	connectReq = append(connectReq, ip...)
+	portBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBuf, port)
+	connectReq = append(connectReq, portBuf...)
+	_, err = conn.Write(connectReq)
+	require.NoError(t, err)
+
+	connectResp := make([]byte, 10)
+	_, err = io.ReadFull(conn, connectResp)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x00), connectResp[1])
 }
 
 func TestTunnel_SOCKS5_DomainName(t *testing.T) {

@@ -79,7 +79,7 @@ func New(domains []string, cidrs []string) (*Allowlist, error) {
 func (a *Allowlist) Name() string { return "allowlist" }
 
 func (a *Allowlist) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if hostmatch.MatchAnyRule(a.rules, req) {
+	if hostmatch.MatchAnyRuleContext(a.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 	if a.warn {

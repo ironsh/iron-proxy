@@ -209,7 +209,7 @@ func main() {
 	}
 
 	// Initialize proxy.
-	p := proxy.New(proxy.Options{
+	p, err := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
 		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
 		TunnelAddr:                    cfg.Proxy.TunnelListen,
@@ -219,10 +219,15 @@ func main() {
 		Resolver:                      resolver,
 		Guard:                         guard,
 		MCPPolicy:                     mcpHolder,
+		Auth:                          cfg.Proxy.Auth,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
 	})
+	if err != nil {
+		logger.Error("initializing proxy", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
@@ -233,7 +238,7 @@ func main() {
 		mgmtServer = management.New(management.Options{
 			Addr:   cfg.Management.Listen,
 			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
-			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger),
+			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, p, bodyLimits, logger),
 			Logger: logger,
 			Ctx:    ctx,
 		})
@@ -600,7 +605,7 @@ func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgr
 // wrapped in *management.ValidationError so the management server returns
 // 422 and the existing state is left untouched. Validation runs for every
 // component before any state is mutated.
-func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, p *proxy.Proxy, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
 	return func(ctx context.Context) error {
 		newCfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -619,6 +624,9 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		}
 		newPgListener, err := postgres.LoadFromNode(newCfg.Postgres, logger)
 		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
+		if err := p.ReloadAuth(ctx, newCfg.Proxy.Auth); err != nil {
 			return &management.ValidationError{Err: err}
 		}
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())

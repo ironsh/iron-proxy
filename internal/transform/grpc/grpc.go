@@ -130,7 +130,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 func (g *GRPCTransform) Name() string { return g.name }
 
 func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
+	if len(g.rules) > 0 && !hostmatch.MatchAnyRuleContext(g.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
@@ -167,7 +167,7 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 }
 
 func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.TransformContext, req *http.Request, resp *http.Response) (*transform.TransformResult, error) {
-	if len(g.rules) > 0 && !hostmatch.MatchAnyRule(g.rules, req) {
+	if len(g.rules) > 0 && !hostmatch.MatchAnyRuleContext(g.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

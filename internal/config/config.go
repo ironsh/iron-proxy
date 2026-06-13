@@ -88,11 +88,12 @@ type DNSRecord struct {
 
 // Proxy configures the HTTP/HTTPS listener addresses.
 type Proxy struct {
-	HTTPListen           string `yaml:"http_listen"`
-	HTTPSListen          string `yaml:"https_listen"`
-	TunnelListen         string `yaml:"tunnel_listen"`
-	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
-	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
+	HTTPListen           string    `yaml:"http_listen"`
+	HTTPSListen          string    `yaml:"https_listen"`
+	TunnelListen         string    `yaml:"tunnel_listen"`
+	MaxRequestBodyBytes  int64     `yaml:"max_request_body_bytes"`
+	MaxResponseBodyBytes int64     `yaml:"max_response_body_bytes"`
+	Auth                 ProxyAuth `yaml:"auth"`
 	// UpstreamResponseHeaderTimeout caps how long the proxy waits for an
 	// upstream response's headers before returning 502. Accepts Go duration
 	// syntax: "30s" (default), "5m", "2h". Useful for upstream endpoints
@@ -107,6 +108,20 @@ type Proxy struct {
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.
 	UpstreamProxy UpstreamProxy `yaml:"upstream_proxy"`
+}
+
+// ProxyAuth configures optional client authentication for HTTP proxy,
+// CONNECT, and SOCKS5 proxy modes. Empty config preserves the historical
+// no-auth behavior.
+type ProxyAuth struct {
+	Required bool            `yaml:"required"`
+	Users    []ProxyAuthUser `yaml:"users"`
+}
+
+// ProxyAuthUser is one proxy login. Password is a secrets source.
+type ProxyAuthUser struct {
+	Login    string    `yaml:"login"`
+	Password yaml.Node `yaml:"password"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
@@ -293,6 +308,9 @@ func Validate(cfg *Config) error {
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
 	}
+	if err := validateProxyAuth(cfg.Proxy.Auth); err != nil {
+		return err
+	}
 
 	if cfg.Management.Listen != "" {
 		if cfg.Management.APIKeyEnv == "" {
@@ -316,5 +334,28 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateProxyAuth(auth ProxyAuth) error {
+	seen := make(map[string]struct{}, len(auth.Users))
+	for i, user := range auth.Users {
+		if user.Login == "" {
+			return fmt.Errorf("proxy.auth.users[%d].login is required", i)
+		}
+		if _, ok := seen[user.Login]; ok {
+			return fmt.Errorf("proxy.auth.users[%d].login %q is duplicated", i, user.Login)
+		}
+		seen[user.Login] = struct{}{}
+		if user.Password.Kind == 0 {
+			return fmt.Errorf("proxy.auth.users[%d].password is required", i)
+		}
+		if user.Password.Kind != yaml.MappingNode {
+			return fmt.Errorf("proxy.auth.users[%d].password must be a secret source mapping", i)
+		}
+	}
+	if auth.Required && len(auth.Users) == 0 {
+		return fmt.Errorf("proxy.auth.users is required when proxy.auth.required is true")
+	}
 	return nil
 }
