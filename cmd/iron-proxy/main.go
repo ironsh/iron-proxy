@@ -268,17 +268,32 @@ func main() {
 		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
 	}
 
-	// Wait for shutdown signal or fatal error from any background goroutine.
+	// Wait for reload/shutdown signal or fatal error from any background goroutine.
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	select {
-	case sig := <-sigc:
-		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
-	case err := <-errc:
-		logger.Error("fatal error", slog.String("error", err.Error()))
+	for {
+		select {
+		case sig := <-sigc:
+			if sig == syscall.SIGHUP {
+				if !managed && *configPath != "" {
+					if err := newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger)(context.Background()); err != nil {
+						logger.Error("standalone config reload failed", slog.String("error", err.Error()))
+					}
+				} else {
+					logger.Warn("ignoring SIGHUP in managed mode or without config file")
+				}
+				continue
+			}
+			logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
+			goto shutdown
+		case err := <-errc:
+			logger.Error("fatal error", slog.String("error", err.Error()))
+			goto shutdown
+		}
 	}
 
+shutdown:
 	// Cancel context to stop the poller, then shut down services.
 	cancel()
 
