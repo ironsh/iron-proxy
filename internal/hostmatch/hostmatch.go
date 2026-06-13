@@ -56,6 +56,16 @@ func (m *Matcher) Matches(host string) bool {
 	return false
 }
 
+// MatchesIP returns true if the IP is contained by any configured CIDR.
+func (m *Matcher) MatchesIP(ip net.IP) bool {
+	for _, cidr := range m.cidrs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // MatchGlob matches a domain against a glob pattern.
 // "*" matches any host. "*.example.com" matches any subdomain depth and
 // "example.com" itself.
