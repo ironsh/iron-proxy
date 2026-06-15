@@ -1,0 +1,20 @@
+apiVersion: v2
+name: iron-proxy
+description: A DNS-intercepting MITM egress proxy for securing and governing outbound traffic.
+type: application
+# Chart version. Bump on every chart change, independent of the app version.
+version: 0.1.0
+# Default container image tag. Override image.tag to pin a released version (e.g. v1.2.3).
+appVersion: "latest"
+home: https://iron.sh
+sources:
+  - https://github.com/ironsh/iron-proxy
+keywords:
+  - proxy
+  - egress
+  - mitm
+  - security
+  - dns
+maintainers:
+  - name: iron.sh
+    url: https://iron.sh
