@@ -98,7 +98,8 @@ func buildSNIProxy(t *testing.T, allowed []string, withTunnel bool) (*Proxy, fun
 	if withTunnel {
 		opts.TunnelAddr = "127.0.0.1:0"
 	}
-	p := New(opts)
+	p, err := New(opts)
+	require.NoError(t, err)
 
 	return p, func() []transform.PipelineResult {
 		mu.Lock()
@@ -163,7 +164,7 @@ func startSNIPassthroughProxy(t *testing.T, allowed []string, upstream string) (
 	p, getResults := buildSNIProxy(t, allowed, false)
 	p.sniUpstreamPort = upstreamPort
 
-	addr := startAcceptLoop(t, func(c net.Conn) { _ = p.serveSNIPassthrough(c) })
+	addr := startAcceptLoop(t, func(c net.Conn) { _ = p.serveSNIPassthrough(c, nil) })
 	return addr, getResults
 }
 
@@ -289,7 +290,7 @@ func TestSNIPassthrough_ShutdownClosesInFlight(t *testing.T) {
 
 	done := make(chan struct{})
 	addr := startAcceptLoop(t, func(c net.Conn) {
-		_ = p.serveSNIPassthrough(c)
+		_ = p.serveSNIPassthrough(c, nil)
 		close(done)
 	})
 

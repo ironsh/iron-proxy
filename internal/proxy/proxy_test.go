@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,19 +18,40 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func authUser(t *testing.T, login, password string) config.ProxyAuthUser {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), login)
+	require.NoError(t, os.WriteFile(path, []byte(password), 0o600))
+	return config.ProxyAuthUser{
+		Login: login,
+		Password: yaml.Node{
+			Kind: yaml.MappingNode,
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "type"},
+				{Kind: yaml.ScalarNode, Value: "file"},
+				{Kind: yaml.ScalarNode, Value: "path"},
+				{Kind: yaml.ScalarNode, Value: path},
+			},
+		},
+	}
 }
 
 func generateTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -95,6 +117,11 @@ func (r *replacerTransform) TransformResponse(_ context.Context, _ *transform.Tr
 
 func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) (*Proxy, string, string, *x509.CertPool) {
 	t.Helper()
+	return startProxyWithAuth(t, transforms, config.ProxyAuth{})
+}
+
+func startProxyWithAuth(t *testing.T, transforms []transform.Transformer, auth config.ProxyAuth) (*Proxy, string, string, *x509.CertPool) {
+	t.Helper()
 
 	caCert, caKey := generateTestCA(t)
 	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
@@ -102,13 +129,15 @@ func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) 
 
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr:  "127.0.0.1:0",
 		HTTPSAddr: "127.0.0.1:0",
 		CertCache: cache,
 		Pipeline:  holder,
+		Auth:      auth,
 		Logger:    testLogger(),
 	})
+	require.NoError(t, err)
 
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -159,6 +188,86 @@ func TestHTTPProxy(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "hello from upstream", string(body))
+}
+
+func TestHTTPProxy_AuthRequired(t *testing.T) {
+	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+	require.NoError(t, err)
+	req.Host = "example.com"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	require.Equal(t, proxyAuthRealm, resp.Header.Get("Proxy-Authenticate"))
+}
+
+func TestHTTPProxy_AuthValid(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Empty(t, r.Header.Get("Proxy-Authorization"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	_, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+	require.NoError(t, err)
+	req.Host = upstream.Listener.Addr().String()
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("ci:secret")))
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestHTTPProxy_ReloadAuth(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p, httpAddr, _, _ := startProxyWithAuth(t, nil, config.ProxyAuth{
+		Required: true,
+		Users:    []config.ProxyAuthUser{authUser(t, "ci", "secret")},
+	})
+
+	do := func(login string) int {
+		t.Helper()
+		req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpAddr), nil)
+		require.NoError(t, err)
+		req.Host = upstream.Listener.Addr().String()
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(login+":secret")))
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	require.Equal(t, http.StatusProxyAuthRequired, do("dev"))
+
+	require.NoError(t, p.ReloadAuth(context.Background(), config.ProxyAuth{
+		Required: true,
+		Users: []config.ProxyAuthUser{
+			authUser(t, "ci", "secret"),
+			authUser(t, "dev", "secret"),
+		},
+	}))
+
+	require.Equal(t, http.StatusOK, do("dev"))
 }
 
 func TestHTTPProxy_PostBody(t *testing.T) {
@@ -292,11 +401,12 @@ func TestHTTPProxy_ClientCancel(t *testing.T) {
 		close(done)
 	})
 
-	p := New(Options{
+	p, err := New(Options{
 		HTTPAddr: "127.0.0.1:0",
 		Pipeline: transform.NewPipelineHolder(pipeline),
 		Logger:   testLogger(),
 	})
+	require.NoError(t, err)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() { _ = p.httpServer.Serve(ln) }()

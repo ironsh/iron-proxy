@@ -43,3 +43,27 @@ func TestCompileRules_NoMethodsMatchesAll(t *testing.T) {
 	require.True(t, rules[0].Matches("example.com", "GET", "/"))
 	require.True(t, rules[0].Matches("example.com", "DELETE", "/"))
 }
+
+func TestCompileRules_ProxyLoginFilter(t *testing.T) {
+	rules, err := CompileRules([]RuleConfig{
+		{Host: "example.com", ProxyLogins: []string{"ci", "dev"}},
+	}, "test")
+	require.NoError(t, err)
+
+	require.True(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{ProxyLogin: "ci"}))
+	require.True(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{ProxyLogin: "dev"}))
+	require.False(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{ProxyLogin: "prod"}))
+	require.False(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{}))
+}
+
+func TestCompileRules_SourceCIDRFilter(t *testing.T) {
+	rules, err := CompileRules([]RuleConfig{
+		{Host: "example.com", SourceCIDRs: []string{"10.0.0.0/8", "192.168.1.0/24"}},
+	}, "test")
+	require.NoError(t, err)
+
+	require.True(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{SourceIP: "10.1.2.3"}))
+	require.True(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{SourceIP: "192.168.1.10"}))
+	require.False(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{SourceIP: "172.16.0.1"}))
+	require.False(t, rules[0].MatchesContext("example.com", "GET", "/", MatchContext{}))
+}

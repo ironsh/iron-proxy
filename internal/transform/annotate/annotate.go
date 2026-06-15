@@ -80,7 +80,7 @@ func (a *Annotate) Name() string { return "annotate" }
 
 func (a *Annotate) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	for _, g := range a.groups {
-		if !hostmatch.MatchAnyRule(g.rules, req) {
+		if !hostmatch.MatchAnyRuleContext(g.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 			continue
 		}
 		for _, h := range g.headers {

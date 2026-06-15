@@ -338,7 +338,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	var unavailable []string
 
 	for _, sec := range s.secrets {
-		if !hostmatch.MatchAnyRule(sec.rules, req) {
+		if !hostmatch.MatchAnyRuleContext(sec.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 			continue
 		}
 

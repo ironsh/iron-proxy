@@ -170,7 +170,7 @@ func (j *Judge) TransformResponse(_ context.Context, _ *transform.TransformConte
 // TransformRequest runs the judge over a request. See the package doc-style
 // comment on the judge transform for the full control-flow description.
 func (j *Judge) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if !hostmatch.MatchAnyRule(j.rules, req) {
+	if !hostmatch.MatchAnyRuleContext(j.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 

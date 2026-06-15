@@ -79,7 +79,7 @@ func (b *bodyCapture) Name() string { return "body_capture" }
 // so a misbehaving body reader can't take down the request.
 func (b *bodyCapture) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
 	cont := &transform.TransformResult{Action: transform.ActionContinue}
-	if !hostmatch.MatchAnyRule(b.rules, req) {
+	if !hostmatch.MatchAnyRuleContext(b.rules, req, hostmatch.MatchContext{ProxyLogin: tctx.ProxyLogin, SourceIP: tctx.SourceIP}) {
 		return cont, nil
 	}
 	if req.Body == nil || req.Body == http.NoBody {
