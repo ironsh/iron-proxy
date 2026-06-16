@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -206,4 +207,160 @@ func TestPollerGracefulShutdown(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("poller did not shut down in time")
 	}
+}
+
+func TestPollerPokeTriggersImmediateSync(t *testing.T) {
+	var syncCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := syncCalls.Add(1)
+		resp := SyncResponse{ConfigHash: "sha256:one"}
+		if n > 1 {
+			resp = SyncResponse{
+				ConfigHash:  "sha256:two",
+				Status:      "assigned",
+				PrincipalID: "prn_session",
+				Secrets:     json.RawMessage(`[]`),
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+	poller := NewPoller(client, "", nil, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- poller.Run(ctx) }()
+
+	// The initial sync runs immediately; wait for it.
+	require.Eventually(t, func() bool {
+		return poller.Status().SyncedOnce
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, "sha256:one", poller.Status().ConfigHash)
+
+	// A poke must trigger the second sync long before the 5s poll interval.
+	poller.Poke()
+	require.Eventually(t, func() bool {
+		return poller.Status().ConfigHash == "sha256:two"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	status := poller.Status()
+	require.Equal(t, "prn_session", status.PrincipalID)
+	require.Equal(t, "assigned", status.PrincipalStatus)
+	require.True(t, status.SyncedOnce)
+	require.False(t, status.LastSyncAt.IsZero())
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestPollerStatusRetainsPrincipalOnHashMatch(t *testing.T) {
+	var syncCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := syncCalls.Add(1)
+		resp := SyncResponse{ConfigHash: "sha256:same"}
+		if n == 1 {
+			resp.Status = "assigned"
+			resp.PrincipalID = "prn_keep"
+			resp.Secrets = json.RawMessage(`[]`)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+	poller := NewPoller(client, "", nil, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- poller.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return poller.Status().PrincipalID == "prn_keep"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Hash-match responses omit the assignment fields; they must be retained.
+	poller.Poke()
+	require.Eventually(t, func() bool {
+		return syncCalls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, "prn_keep", poller.Status().PrincipalID)
+	require.Equal(t, "assigned", poller.Status().PrincipalStatus)
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestPollerDoesNotAdvanceStatusWhenApplyFails(t *testing.T) {
+	var syncCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := syncCalls.Add(1)
+		resp := SyncResponse{
+			ConfigHash:  "sha256:one",
+			Status:      "assigned",
+			PrincipalID: "prn_one",
+			Secrets:     json.RawMessage(`[]`),
+		}
+		if n > 1 {
+			resp.ConfigHash = "sha256:two"
+			resp.PrincipalID = "prn_two"
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+	var updates atomic.Int32
+	poller := NewPoller(client, "", func(SyncUpdate) error {
+		if updates.Add(1) > 1 {
+			return errors.New("apply failed")
+		}
+		return nil
+	}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- poller.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return poller.Status().PrincipalID == "prn_one"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	poller.Poke()
+	require.Eventually(t, func() bool {
+		return syncCalls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	status := poller.Status()
+	require.Equal(t, "sha256:one", status.ConfigHash)
+	require.Equal(t, "prn_one", status.PrincipalID)
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestPollerSeedStatus(t *testing.T) {
+	client := NewClient("http://127.0.0.1:0", "irpt_test", testLogger())
+	poller := NewPoller(client, "", nil, testLogger())
+	require.False(t, poller.Status().SyncedOnce)
+
+	poller.SeedStatus(nil)
+	require.False(t, poller.Status().SyncedOnce)
+
+	poller.SeedStatus(&SyncResponse{
+		ConfigHash:  "sha256:seed",
+		Status:      "assigned",
+		PrincipalID: "prn_boot",
+	})
+	status := poller.Status()
+	require.True(t, status.SyncedOnce)
+	require.Equal(t, "sha256:seed", status.ConfigHash)
+	require.Equal(t, "prn_boot", status.PrincipalID)
 }

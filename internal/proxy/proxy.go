@@ -56,7 +56,10 @@ type Proxy struct {
 	// 443 in production so a client-supplied CONNECT port cannot pivot an
 	// allowlisted hostname onto a different port. Overridable in tests.
 	sniUpstreamPort string
+	ready           func() bool
 }
+
+const notReadyMessage = "proxy is not ready: awaiting control-plane config"
 
 // Options configures Proxy construction.
 type Options struct {
@@ -78,6 +81,12 @@ type Options struct {
 	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
 	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
 	UpstreamProxy func(*http.Request) (*url.URL, error)
+	// Ready, when non-nil, gates request handling: while it returns false
+	// every proxied request is rejected with 503. Managed proxies use it to
+	// fail closed until the first control-plane config has been applied, so
+	// requests can never pass through un-transformed (leaking placeholder
+	// credentials upstream) during startup.
+	Ready func() bool
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -92,6 +101,7 @@ func New(opts Options) *Proxy {
 		guard, _ = dnsguard.New(nil)
 	}
 	p := &Proxy{
+		ready:          opts.Ready,
 		httpsAddr:      opts.HTTPSAddr,
 		tlsMode:        opts.TLSMode,
 		tunnelAddr:     opts.TunnelAddr,
@@ -247,6 +257,31 @@ func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.P
 	}
 }
 
+func (p *Proxy) isReady() bool {
+	return p.ready == nil || p.ready()
+}
+
+func markNotReady(result *transform.PipelineResult) {
+	result.Action = transform.ActionReject
+	result.StatusCode = http.StatusServiceUnavailable
+	result.RequestTransforms = append(result.RequestTransforms, transform.TransformTrace{
+		Name:   "ready",
+		Action: transform.ActionReject,
+		Annotations: map[string]any{
+			"reason": "awaiting_control_plane_config",
+		},
+	})
+}
+
+func notReadyResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 " + http.StatusText(http.StatusServiceUnavailable),
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(notReadyMessage + "\n")),
+	}
+}
+
 func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, nil)
 }
@@ -312,6 +347,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
+
+	if !p.isReady() {
+		markNotReady(result)
+		http.Error(w, notReadyMessage, http.StatusServiceUnavailable)
+		return
+	}
 
 	bodyLimits := pl.BodyLimits()
 	// Wrap request body for lazy buffering by transforms.

@@ -23,6 +23,11 @@ type SyncResponse struct {
 	MCP         json.RawMessage `json:"mcp"`
 	Postgres    json.RawMessage `json:"postgres"`
 	IngestToken string          `json:"ingest_token"`
+	// Status and PrincipalID describe the proxy's control-plane assignment as
+	// of this sync. The control plane includes them only on responses that
+	// carry a config payload; hash-match responses leave them empty.
+	Status      string `json:"status"`
+	PrincipalID string `json:"principal_id"`
 }
 
 // Client talks to the iron.sh control plane REST API. Requests are

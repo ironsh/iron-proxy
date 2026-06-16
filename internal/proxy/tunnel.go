@@ -286,6 +286,11 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
 
+	if !p.isReady() {
+		markNotReady(result)
+		return false, notReadyResponse(), nil
+	}
+
 	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &result.RequestTransforms)
 	if err != nil {
 		result.Action = transform.ActionContinue

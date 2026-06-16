@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,6 +222,50 @@ func TestSNIPassthrough_HappyPath(t *testing.T) {
 	require.Equal(t, "", results[0].Method)
 	require.Equal(t, "", results[0].Path)
 	require.Equal(t, transform.ActionContinue, results[0].Action)
+}
+
+func TestSNIPassthrough_FailsClosedUntilReady(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = upstream.Close() })
+
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		accepted <- struct{}{}
+	}()
+
+	_, upstreamPort, err := net.SplitHostPort(upstream.Addr().String())
+	require.NoError(t, err)
+
+	var ready atomic.Bool
+	p, getResults := buildSNIProxy(t, []string{"localhost"}, false)
+	p.ready = ready.Load
+	p.sniUpstreamPort = upstreamPort
+
+	proxyAddr := startAcceptLoop(t, func(c net.Conn) { _ = p.serveSNIPassthrough(c) })
+
+	conn, err := net.Dial("tcp", proxyAddr)
+	require.NoError(t, err)
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: "localhost"})
+	require.Error(t, tlsConn.Handshake())
+	_ = tlsConn.Close()
+
+	require.Eventually(t, func() bool { return len(getResults()) == 1 }, 2*time.Second, 10*time.Millisecond)
+	results := getResults()
+	require.Equal(t, transform.ActionReject, results[0].Action)
+	require.Equal(t, http.StatusServiceUnavailable, results[0].StatusCode)
+	require.Equal(t, "ready", results[0].RequestTransforms[0].Name)
+
+	select {
+	case <-accepted:
+		t.Fatal("sni-only proxy dialed upstream before it was ready")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestSNIPassthrough_AllowlistDeny(t *testing.T) {

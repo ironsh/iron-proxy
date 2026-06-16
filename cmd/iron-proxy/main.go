@@ -83,15 +83,14 @@ func main() {
 	// Managed mode is determined by the presence of a control plane token.
 	managed := proxyToken != ""
 
-	if cfg.Management.Listen != "" {
-		if managed {
-			fmt.Fprintln(os.Stderr, "error: management.listen cannot be used with managed mode; the control plane is the source of truth")
-			os.Exit(1)
-		}
-		if *configPath == "" {
-			fmt.Fprintln(os.Stderr, "error: management.listen requires --config; /v1/reload has no file to re-read")
-			os.Exit(1)
-		}
+	// Standalone mode serves /v1/reload, which re-reads the config file.
+	// Managed mode serves /v1/status and /v1/sync instead: the control plane
+	// stays the source of truth for config, while the sandbox control plane
+	// can verify which principal's config the proxy has actually applied
+	// before routing traffic through it.
+	if cfg.Management.Listen != "" && !managed && *configPath == "" {
+		fmt.Fprintln(os.Stderr, "error: management.listen requires --config in standalone mode; /v1/reload has no file to re-read")
+		os.Exit(1)
 	}
 
 	// Both modes produce a pipeline holder. Managed mode populates the
@@ -121,10 +120,11 @@ func main() {
 	var holder *transform.PipelineHolder
 	var mcpHolder *mcp.PolicyHolder
 	var otelCfg iotel.ExportConfig
+	var poller *controlplane.Poller
 
 	if managed {
 		var ingestToken string
-		holder, mcpHolder, ingestToken, pgListener = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgListener, logger)
+		holder, mcpHolder, ingestToken, pgListener, poller = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgListener, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -222,21 +222,32 @@ func main() {
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
+		// Managed proxies fail closed until the first control-plane config
+		// has been applied; an un-synced pipeline would otherwise pass
+		// requests through with placeholder credentials intact.
+		Ready: managedReady(poller),
 	})
 
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
 
-	// Initialize management server (standalone mode only; guarded above).
+	// Initialize management server: /v1/reload in standalone mode,
+	// /v1/status and /v1/sync in managed mode.
 	var mgmtServer *management.Server
 	if cfg.Management.Listen != "" {
-		mgmtServer = management.New(management.Options{
+		mgmtOpts := management.Options{
 			Addr:   cfg.Management.Listen,
 			APIKey: os.Getenv(cfg.Management.APIKeyEnv),
-			Reload: newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger),
 			Logger: logger,
 			Ctx:    ctx,
-		})
+		}
+		if managed {
+			mgmtOpts.Status = func() any { return poller.Status() }
+			mgmtOpts.SyncNow = poller.Poke
+		} else {
+			mgmtOpts.Reload = newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger)
+		}
+		mgmtServer = management.New(mgmtOpts)
 	}
 
 	// Start services.
@@ -321,7 +332,7 @@ func main() {
 //
 // Initial MCP policy preference: control-plane-supplied mcp block first, then
 // fall back to cfg.MCP from the YAML if the sync did not include one.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgListener *postgres.Listener, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string, *postgres.Listener) {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgListener *postgres.Listener, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string, *postgres.Listener, *controlplane.Poller) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
@@ -391,22 +402,41 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(u controlplane.SyncUpdate) error {
 		if u.Rules != nil || u.Secrets != nil || u.Transforms != nil {
-			applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms)
+			if err := applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms); err != nil {
+				return err
+			}
 		}
 		if u.MCP != nil {
-			applyMCPSync(mcpHolder, logger, u.MCP)
+			if err := applyMCPSync(mcpHolder, logger, u.MCP); err != nil {
+				return err
+			}
 		}
 		if u.Postgres != nil {
-			applyPostgresSync(ctx, pgManager, localPgListener, os.Getenv, logger, u.Postgres)
+			if err := applyPostgresSync(ctx, pgManager, localPgListener, os.Getenv, logger, u.Postgres); err != nil {
+				return err
+			}
 		}
 		return nil
 	}, logger)
+
+	// Seed the poller's status from the startup sync so /v1/status (and the
+	// fail-closed gate) reflect it before the polling loop's first pass.
+	poller.SeedStatus(syncResp)
 
 	go func() {
 		errc <- poller.Run(ctx)
 	}()
 
-	return holder, mcpHolder, ingestToken, pgListener
+	return holder, mcpHolder, ingestToken, pgListener, poller
+}
+
+// managedReady gates the proxy on the first applied control-plane config.
+// A nil poller (standalone mode) means always ready.
+func managedReady(poller *controlplane.Poller) func() bool {
+	if poller == nil {
+		return nil
+	}
+	return func() bool { return poller.Status().SyncedOnce }
 }
 
 // buildInitialMCPHolder picks the initial MCP policy source: a control-plane
@@ -452,20 +482,21 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 // swaps it in. If parsing or pipeline construction fails, the existing pipeline
 // is preserved and an error is logged: an invalid push from the control plane
 // must not take down the proxy.
-func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets, transforms json.RawMessage) {
+func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets, transforms json.RawMessage) error {
 	newTransforms, err := config.TransformsFromSync(rules, secrets, transforms)
 	if err != nil {
 		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("pipeline sync: %w", err)
 	}
 	newPipeline, err := buildPipeline(newTransforms, bodyLimits, logger)
 	if err != nil {
 		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("pipeline sync: %w", err)
 	}
 	newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 	holder.Store(newPipeline)
 	logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
+	return nil
 }
 
 // applyMCPSync compiles a new MCP policy from a sync payload and atomically
@@ -473,20 +504,20 @@ func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.Bo
 // preserved: an invalid push from the control plane must not take down a
 // running proxy. An empty/null mcp block is interpreted by the caller as
 // "no update" and is not delivered here.
-func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMessage) {
+func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMessage) error {
 	node, present, err := config.MCPFromSync(raw)
 	if err != nil {
 		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("mcp sync: %w", err)
 	}
 	if !present {
 		// Should not happen — caller filters absent/null — but treat as no-op.
-		return
+		return nil
 	}
 	policy, err := mcp.LoadFromNode(node)
 	if err != nil {
 		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("mcp sync: %w", err)
 	}
 	holder.Store(policy)
 	if policy == nil {
@@ -494,6 +525,7 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 	} else {
 		logger.Info("mcp policy reloaded")
 	}
+	return nil
 }
 
 // Environment variables that configure the managed postgres listener when the
@@ -585,13 +617,14 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 // applyPostgresSync rebuilds the postgres listener from a sync payload and
 // hot-reloads the manager. An invalid payload is logged and the running
 // listener is preserved.
-func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) {
+func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) error {
 	listener, ok := postgresListenerFromSync(local, getenv, logger, raw)
 	if !ok {
-		return
+		return fmt.Errorf("postgres sync: invalid postgres config")
 	}
 	mgr.Reload(ctx, listener)
 	logger.Info("postgres listener reloaded from sync", slog.Bool("running", listener != nil))
+	return nil
 }
 
 // newReloadFunc returns a management.ReloadFunc that re-reads the YAML config
