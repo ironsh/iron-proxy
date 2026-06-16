@@ -845,6 +845,10 @@ func TestHTTPProxy_FailsClosedUntilReady(t *testing.T) {
 	require.NoError(t, err)
 
 	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
+	audits := make(chan transform.PipelineResult, 2)
+	pipeline.SetAuditFunc(func(r *transform.PipelineResult) {
+		audits <- *r
+	})
 	holder := transform.NewPipelineHolder(pipeline)
 
 	var ready atomic.Bool
@@ -871,6 +875,12 @@ func TestHTTPProxy_FailsClosedUntilReady(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	audit := <-audits
+	require.Equal(t, transform.ActionReject, audit.Action)
+	require.Equal(t, http.StatusServiceUnavailable, audit.StatusCode)
+	require.Len(t, audit.RequestTransforms, 1)
+	require.Equal(t, "ready", audit.RequestTransforms[0].Name)
+	require.Equal(t, transform.ActionReject, audit.RequestTransforms[0].Action)
 
 	// Ready: the same request flows.
 	ready.Store(true)

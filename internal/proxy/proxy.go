@@ -59,6 +59,8 @@ type Proxy struct {
 	ready           func() bool
 }
 
+const notReadyMessage = "proxy is not ready: awaiting control-plane config"
+
 // Options configures Proxy construction.
 type Options struct {
 	HTTPAddr   string
@@ -255,6 +257,31 @@ func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.P
 	}
 }
 
+func (p *Proxy) isReady() bool {
+	return p.ready == nil || p.ready()
+}
+
+func markNotReady(result *transform.PipelineResult) {
+	result.Action = transform.ActionReject
+	result.StatusCode = http.StatusServiceUnavailable
+	result.RequestTransforms = append(result.RequestTransforms, transform.TransformTrace{
+		Name:   "ready",
+		Action: transform.ActionReject,
+		Annotations: map[string]any{
+			"reason": "awaiting_control_plane_config",
+		},
+	})
+}
+
+func notReadyResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 " + http.StatusText(http.StatusServiceUnavailable),
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(notReadyMessage + "\n")),
+	}
+}
+
 func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, nil)
 }
@@ -262,12 +289,6 @@ func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 // handleHTTP is the core HTTP request handler. tunnelInfo is non-nil only
 // when r originated inside a CONNECT/SOCKS5 tunnel.
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo) {
-	if p.ready != nil && !p.ready() {
-		// Fail closed: without a control-plane config the pipeline would pass
-		// requests through un-transformed.
-		http.Error(w, "proxy is not ready: awaiting control-plane config", http.StatusServiceUnavailable)
-		return
-	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -326,6 +347,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
+
+	if !p.isReady() {
+		markNotReady(result)
+		http.Error(w, notReadyMessage, http.StatusServiceUnavailable)
+		return
+	}
 
 	bodyLimits := pl.BodyLimits()
 	// Wrap request body for lazy buffering by transforms.

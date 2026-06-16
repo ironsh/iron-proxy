@@ -402,13 +402,19 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	// Start config poller.
 	poller := controlplane.NewPoller(client, configHash, func(u controlplane.SyncUpdate) error {
 		if u.Rules != nil || u.Secrets != nil || u.Transforms != nil {
-			applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms)
+			if err := applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms); err != nil {
+				return err
+			}
 		}
 		if u.MCP != nil {
-			applyMCPSync(mcpHolder, logger, u.MCP)
+			if err := applyMCPSync(mcpHolder, logger, u.MCP); err != nil {
+				return err
+			}
 		}
 		if u.Postgres != nil {
-			applyPostgresSync(ctx, pgManager, localPgListener, os.Getenv, logger, u.Postgres)
+			if err := applyPostgresSync(ctx, pgManager, localPgListener, os.Getenv, logger, u.Postgres); err != nil {
+				return err
+			}
 		}
 		return nil
 	}, logger)
@@ -476,20 +482,21 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 // swaps it in. If parsing or pipeline construction fails, the existing pipeline
 // is preserved and an error is logged: an invalid push from the control plane
 // must not take down the proxy.
-func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets, transforms json.RawMessage) {
+func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.BodyLimits, logger *slog.Logger, rules, secrets, transforms json.RawMessage) error {
 	newTransforms, err := config.TransformsFromSync(rules, secrets, transforms)
 	if err != nil {
 		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("pipeline sync: %w", err)
 	}
 	newPipeline, err := buildPipeline(newTransforms, bodyLimits, logger)
 	if err != nil {
 		logger.Error("rejecting invalid pipeline config from sync, keeping current pipeline", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("pipeline sync: %w", err)
 	}
 	newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 	holder.Store(newPipeline)
 	logger.Info("pipeline reloaded", slog.String("transforms", newPipeline.Names()))
+	return nil
 }
 
 // applyMCPSync compiles a new MCP policy from a sync payload and atomically
@@ -497,20 +504,20 @@ func applyPipelineSync(holder *transform.PipelineHolder, bodyLimits transform.Bo
 // preserved: an invalid push from the control plane must not take down a
 // running proxy. An empty/null mcp block is interpreted by the caller as
 // "no update" and is not delivered here.
-func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMessage) {
+func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMessage) error {
 	node, present, err := config.MCPFromSync(raw)
 	if err != nil {
 		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("mcp sync: %w", err)
 	}
 	if !present {
 		// Should not happen — caller filters absent/null — but treat as no-op.
-		return
+		return nil
 	}
 	policy, err := mcp.LoadFromNode(node)
 	if err != nil {
 		logger.Error("rejecting invalid mcp policy from sync, keeping current policy", slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("mcp sync: %w", err)
 	}
 	holder.Store(policy)
 	if policy == nil {
@@ -518,6 +525,7 @@ func applyMCPSync(holder *mcp.PolicyHolder, logger *slog.Logger, raw json.RawMes
 	} else {
 		logger.Info("mcp policy reloaded")
 	}
+	return nil
 }
 
 // Environment variables that configure the managed postgres listener when the
@@ -609,13 +617,14 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 // applyPostgresSync rebuilds the postgres listener from a sync payload and
 // hot-reloads the manager. An invalid payload is logged and the running
 // listener is preserved.
-func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) {
+func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgres.Listener, getenv func(string) string, logger *slog.Logger, raw json.RawMessage) error {
 	listener, ok := postgresListenerFromSync(local, getenv, logger, raw)
 	if !ok {
-		return
+		return fmt.Errorf("postgres sync: invalid postgres config")
 	}
 	mgr.Reload(ctx, listener)
 	logger.Info("postgres listener reloaded from sync", slog.Bool("running", listener != nil))
+	return nil
 }
 
 // newReloadFunc returns a management.ReloadFunc that re-reads the YAML config

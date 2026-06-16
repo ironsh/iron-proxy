@@ -166,6 +166,7 @@ func (p *Poller) sync(ctx context.Context) error {
 				Postgres:   resp.Postgres,
 			}); err != nil {
 				p.logger.Error("applying config update", slog.String("error", err.Error()))
+				return err
 			}
 		}
 	}

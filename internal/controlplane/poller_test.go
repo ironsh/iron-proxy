@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -290,6 +291,56 @@ func TestPollerStatusRetainsPrincipalOnHashMatch(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Equal(t, "prn_keep", poller.Status().PrincipalID)
 	require.Equal(t, "assigned", poller.Status().PrincipalStatus)
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestPollerDoesNotAdvanceStatusWhenApplyFails(t *testing.T) {
+	var syncCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := syncCalls.Add(1)
+		resp := SyncResponse{
+			ConfigHash:  "sha256:one",
+			Status:      "assigned",
+			PrincipalID: "prn_one",
+			Secrets:     json.RawMessage(`[]`),
+		}
+		if n > 1 {
+			resp.ConfigHash = "sha256:two"
+			resp.PrincipalID = "prn_two"
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+	var updates atomic.Int32
+	poller := NewPoller(client, "", func(SyncUpdate) error {
+		if updates.Add(1) > 1 {
+			return errors.New("apply failed")
+		}
+		return nil
+	}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- poller.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return poller.Status().PrincipalID == "prn_one"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	poller.Poke()
+	require.Eventually(t, func() bool {
+		return syncCalls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	status := poller.Status()
+	require.Equal(t, "sha256:one", status.ConfigHash)
+	require.Equal(t, "prn_one", status.PrincipalID)
 
 	cancel()
 	require.NoError(t, <-done)
