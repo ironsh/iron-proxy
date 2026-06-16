@@ -656,6 +656,7 @@ func TestInvalidGrantFails502(t *testing.T) {
 	o := buildTransformWith(t, `
 tokens:
   - grant: refresh_token
+    require: true
     refresh_token: {type: env, var: RT}
     client_id: {type: env, var: CID}
     client_secret: {type: env, var: CSECRET}
@@ -688,6 +689,7 @@ func TestCredentialUnavailableFails502(t *testing.T) {
 	o := buildTransformWith(t, `
 tokens:
   - grant: refresh_token
+    require: true
     refresh_token: {type: env, var: RT}
     client_id: {type: env, var: CID}
     token_endpoint: "https://oauth2.example.com/token"
@@ -703,6 +705,66 @@ tokens:
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionReject, res.Action)
 	require.Equal(t, http.StatusBadGateway, res.Response.StatusCode)
+}
+
+// By default (require unset) a mint failure must not take down the request:
+// the proxy forwards it without a token instead of rejecting with a 502.
+func TestMintFailureForwardsWithoutTokenByDefault(t *testing.T) {
+	srv := newTokenServer(t, func(url.Values) (int, map[string]any) {
+		return http.StatusBadRequest, map[string]any{
+			"error":             "invalid_grant",
+			"error_description": "Token has been expired or revoked.",
+		}
+	})
+	o := buildTransformWith(t, `
+tokens:
+  - grant: refresh_token
+    refresh_token: {type: env, var: RT}
+    client_id: {type: env, var: CID}
+    client_secret: {type: env, var: CSECRET}
+    token_endpoint: "`+srv.URL+`/token"
+    rules:
+      - host: "gmail.googleapis.com"
+`, mapBuilder(map[string]secrets.Source{
+		"RT":      &staticSource{name: "rt", value: "test-refresh-token"},
+		"CID":     &staticSource{name: "cid", value: "test-client-id"},
+		"CSECRET": &staticSource{name: "cs", value: "test-client-secret"},
+	}))
+
+	req := newRequest(t, http.MethodGet, "https://gmail.googleapis.com/v1/x")
+	tctx := newContext()
+	res, err := o.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action, "request is forwarded, not rejected")
+	require.Nil(t, res.Response, "no synthetic failure response on fail-open")
+	require.Empty(t, req.Header.Get("Authorization"), "no token is injected when minting fails")
+
+	annotations := tctx.DrainAnnotations()
+	require.Equal(t, "invalid_grant", annotations["error"])
+	require.Equal(t, "token_unavailable", annotations["skipped"])
+	require.NotContains(t, annotations, "rejected")
+}
+
+// A credential source that errors also fails open by default.
+func TestCredentialUnavailableForwardsByDefault(t *testing.T) {
+	o := buildTransformWith(t, `
+tokens:
+  - grant: refresh_token
+    refresh_token: {type: env, var: RT}
+    client_id: {type: env, var: CID}
+    token_endpoint: "https://oauth2.example.com/token"
+    rules:
+      - host: "gmail.googleapis.com"
+`, mapBuilder(map[string]secrets.Source{
+		"RT":  &staticSource{name: "rt", err: io.ErrUnexpectedEOF},
+		"CID": &staticSource{name: "cid", value: "test-client-id"},
+	}))
+
+	req := newRequest(t, http.MethodGet, "https://gmail.googleapis.com/v1/x")
+	res, err := o.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Empty(t, req.Header.Get("Authorization"))
 }
 
 // --- password grant ---

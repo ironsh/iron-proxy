@@ -315,7 +315,10 @@ transforms:
   # Authorization: Bearer on matching requests. Each entry under tokens names
   # a grant type, its credential fields, and the hosts it applies to. Token
   # exchange, caching, and refresh are handled automatically. Requires MITM
-  # mode. On a minting failure the request is rejected with a 502.
+  # mode. By default a minting failure is logged and the request is forwarded
+  # without the token, so one broken credential doesn't take down every request
+  # the entry matches. Set "require: true" on an entry to fail closed instead
+  # and reject those requests with a 502 (same flag as the secrets transform).
   #
   # grant is one of:
   #   refresh_token       RFC 6749 — a refresh token plus a client id
@@ -348,6 +351,7 @@ transforms:
   #     tokens:
   #       # Each field resolved from its own source.
   #       - grant: refresh_token
+  #         require: true        # reject with 502 if minting fails (default: forward without token)
   #         refresh_token:
   #           type: 1password_connect
   #           secret_ref: "op://Engineering/GSUITE-OAUTH/refresh-token"
