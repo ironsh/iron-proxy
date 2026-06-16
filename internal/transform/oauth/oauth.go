@@ -108,6 +108,13 @@ type tokenEntryConfig struct {
 	Header        string                 `yaml:"header,omitempty"`
 	ValuePrefix   string                 `yaml:"value_prefix,omitempty"`
 
+	// Require rejects the request with a 502 when the token cannot be minted.
+	// When false (default), a mint failure is logged and the request is
+	// forwarded without the token so one broken credential doesn't take down
+	// every request the entry matches. Mirrors the secrets transform's
+	// "require" flag.
+	Require bool `yaml:"require,omitempty"`
+
 	// TokenEndpointHeaders is a map of header name to secret source. Each
 	// resolved value is sent as a request header on the token POST itself —
 	// used by vendors that require an api-key header alongside the standard
@@ -134,6 +141,7 @@ type tokenEntry struct {
 	valuePrefix string
 	cfgEndpoint string // config token_endpoint
 	audience    string // JWT "aud" claim, jwt_bearer grant only
+	require     bool   // reject the request when minting fails
 	logger      *slog.Logger
 
 	// sources holds the entry's credential secret sources, keyed by field.
@@ -246,6 +254,7 @@ func buildEntry(tc tokenEntryConfig, logger *slog.Logger, buildSource sourceBuil
 		valuePrefix:           valuePrefix,
 		cfgEndpoint:           tc.TokenEndpoint,
 		audience:              tc.Audience,
+		require:               tc.Require,
 		sources:               sources,
 		endpointHeaderSources: endpointHeaders,
 		logger:                logger,
@@ -404,13 +413,20 @@ func (o *OAuth) TransformRequest(ctx context.Context, tctx *transform.TransformC
 		reason := entry.logMintFailure(err)
 		tctx.Annotate("grant", entry.grant)
 		tctx.Annotate("error", reason)
-		tctx.Annotate("rejected", "token_unavailable")
-		// Fail closed with a 502: forwarding an unauthenticated request would
-		// surface as a confusing upstream 401.
-		return &transform.TransformResult{
-			Action:   transform.ActionReject,
-			Response: mintFailureResponse(req, entry.grant),
-		}, nil
+		if entry.require {
+			tctx.Annotate("rejected", "token_unavailable")
+			// Fail closed with a 502: forwarding an unauthenticated request
+			// would surface as a confusing upstream 401.
+			return &transform.TransformResult{
+				Action:   transform.ActionReject,
+				Response: mintFailureResponse(req, entry.grant),
+			}, nil
+		}
+		// Fail open: forward the request without the token rather than taking
+		// down every request this entry matches. The header is left untouched,
+		// so the upstream sees the request as if no token were configured.
+		tctx.Annotate("skipped", "token_unavailable")
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
 	req.Header.Set(entry.header, entry.valuePrefix+tok)
