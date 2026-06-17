@@ -81,6 +81,9 @@ managed:
   # -- Override the control plane URL (sets IRON_CONTROL_PLANE_URL). Empty uses
   # the binary default (https://api.iron.sh).
   controlPlaneURL: ""
+  # -- Control-plane poll interval (sets IRON_CONTROL_PLANE_POLL_INTERVAL).
+  # Empty uses the binary default (10s).
+  pollInterval: ""
   # -- REQUIRED in managed mode: IP returned for intercepted DNS queries
   # (IRON_DNS_PROXY_IP). Same meaning as config.dns.proxy_ip in standalone mode.
   proxyIP: ""

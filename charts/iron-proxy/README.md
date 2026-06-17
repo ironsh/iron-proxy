@@ -123,6 +123,7 @@ managed:
   existingTokenSecret: iron-proxy-token   # Secret with a "token" key
   # tokenSecretKey: token
   # controlPlaneURL: https://api.iron.sh   # override if self-hosting
+  # pollInterval: 10s                      # -> IRON_CONTROL_PLANE_POLL_INTERVAL
   proxyIP: "203.0.113.10"                  # REQUIRED -> IRON_DNS_PROXY_IP
   # tlsMode: "sni-only"                     # -> IRON_TLS_MODE (set when ca.mode=none)
   # logLevel: "info"                        # -> IRON_LOG_LEVEL
@@ -192,6 +193,7 @@ credentials with:
 | `managed.existingTokenSecret` | `""` | Existing Secret holding the token. |
 | `managed.tokenSecretKey` | `token` | Key within that Secret. |
 | `managed.controlPlaneURL` | `""` | Override `IRON_CONTROL_PLANE_URL`. |
+| `managed.pollInterval` | `""` | Override `IRON_CONTROL_PLANE_POLL_INTERVAL`; binary default is `10s`. |
 | `managed.proxyIP` | `""` | `IRON_DNS_PROXY_IP`. Required in managed mode. |
 | `managed.tlsMode` | `""` | `IRON_TLS_MODE` (`mitm`/`sni-only`). |
 | `managed.logLevel` | `""` | `IRON_LOG_LEVEL`. |

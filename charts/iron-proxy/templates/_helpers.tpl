@@ -144,6 +144,10 @@ from the CA mount. The control-plane token is emitted separately by the Deployme
 - name: IRON_CONTROL_PLANE_URL
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.managed.pollInterval }}
+- name: IRON_CONTROL_PLANE_POLL_INTERVAL
+  value: {{ . | quote }}
+{{- end }}
 {{- with .Values.managed.proxyIP }}
 - name: IRON_DNS_PROXY_IP
   value: {{ . | quote }}

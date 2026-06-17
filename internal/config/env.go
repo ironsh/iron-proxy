@@ -94,5 +94,13 @@ func applyEnvOverrides(cfg *Config) error {
 		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(d)
 	}
 
+	if v := os.Getenv("IRON_CONTROL_PLANE_POLL_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("IRON_CONTROL_PLANE_POLL_INTERVAL: %w", err)
+		}
+		cfg.ControlPlane.PollInterval = Duration(d)
+	}
+
 	return nil
 }

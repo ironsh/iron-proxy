@@ -264,6 +264,39 @@ func TestApplyEnvOverrides_UpstreamResponseHeaderTimeout(t *testing.T) {
 	})
 }
 
+func TestApplyEnvOverrides_ControlPlanePollInterval(t *testing.T) {
+	t.Run("env override applied", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "15s",
+		})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 15*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("env override beats yaml value", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "20s",
+		})
+
+		cfg := Config{ControlPlane: ControlPlane{PollInterval: Duration(time.Minute)}}
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 20*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("invalid duration rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "not-a-duration",
+		})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_CONTROL_PLANE_POLL_INTERVAL")
+	})
+}
+
 func TestApplyEnvOverrides_DNSEnabled(t *testing.T) {
 	t.Run("false disables dns", func(t *testing.T) {
 		setEnvs(t, map[string]string{"IRON_DNS_ENABLED": "false"})

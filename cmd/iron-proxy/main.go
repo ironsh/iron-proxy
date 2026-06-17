@@ -400,7 +400,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	}
 
 	// Start config poller.
-	poller := controlplane.NewPoller(client, configHash, func(u controlplane.SyncUpdate) error {
+	poller := controlplane.NewPollerWithInterval(client, configHash, func(u controlplane.SyncUpdate) error {
 		if u.Rules != nil || u.Secrets != nil || u.Transforms != nil {
 			if err := applyPipelineSync(holder, bodyLimits, logger, u.Rules, u.Secrets, u.Transforms); err != nil {
 				return err
@@ -417,7 +417,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 			}
 		}
 		return nil
-	}, logger)
+	}, logger, time.Duration(cfg.ControlPlane.PollInterval))
 
 	// Seed the poller's status from the startup sync so /v1/status (and the
 	// fail-closed gate) reflect it before the polling loop's first pass.
