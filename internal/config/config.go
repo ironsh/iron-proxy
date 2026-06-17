@@ -12,9 +12,15 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
-// DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
-// proxy waits for upstream response headers before returning 502.
-const DefaultUpstreamResponseHeaderTimeout = 30 * time.Second
+const (
+	// DefaultUpstreamResponseHeaderTimeout is the default cap on how long the
+	// proxy waits for upstream response headers before returning 502.
+	DefaultUpstreamResponseHeaderTimeout = 30 * time.Second
+
+	// DefaultControlPlanePollInterval is the default base interval between
+	// control-plane sync calls. The poller applies jitter around this value.
+	DefaultControlPlanePollInterval = 10 * time.Second
+)
 
 // Duration is a time.Duration that decodes YAML strings using
 // time.ParseDuration ("30s", "5m", "2h"). The zero value indicates "unset"
@@ -46,15 +52,16 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // package stays decoupled from the consumer's typed schema, and validation
 // errors surface where the value is actually used.
 type Config struct {
-	DNS        DNS         `yaml:"dns"`
-	Proxy      Proxy       `yaml:"proxy"`
-	TLS        TLS         `yaml:"tls"`
-	Transforms []Transform `yaml:"transforms"`
-	MCP        yaml.Node   `yaml:"mcp"`
-	Postgres   yaml.Node   `yaml:"postgres"`
-	Metrics    Metrics     `yaml:"metrics"`
-	Management Management  `yaml:"management"`
-	Log        Log         `yaml:"log"`
+	DNS          DNS          `yaml:"dns"`
+	Proxy        Proxy        `yaml:"proxy"`
+	TLS          TLS          `yaml:"tls"`
+	Transforms   []Transform  `yaml:"transforms"`
+	MCP          yaml.Node    `yaml:"mcp"`
+	Postgres     yaml.Node    `yaml:"postgres"`
+	Metrics      Metrics      `yaml:"metrics"`
+	Management   Management   `yaml:"management"`
+	ControlPlane ControlPlane `yaml:"control_plane"`
+	Log          Log          `yaml:"log"`
 }
 
 // DNS configures the built-in DNS server.
@@ -166,6 +173,14 @@ type Management struct {
 	APIKeyEnv string `yaml:"api_key_env"`
 }
 
+// ControlPlane configures managed-mode control-plane behavior.
+type ControlPlane struct {
+	// PollInterval is the base interval between control-plane sync calls.
+	// Accepts Go duration syntax: "10s" (default), "1m", "500ms".
+	// The poller applies jitter around this value.
+	PollInterval Duration `yaml:"poll_interval"`
+}
+
 // Log configures structured logging.
 type Log struct {
 	Level string `yaml:"level"`
@@ -257,6 +272,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Management.Listen != "" && cfg.Management.APIKeyEnv == "" {
 		cfg.Management.APIKeyEnv = "IRON_MANAGEMENT_API_KEY"
 	}
+	if cfg.ControlPlane.PollInterval == 0 {
+		cfg.ControlPlane.PollInterval = Duration(DefaultControlPlanePollInterval)
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -288,6 +306,9 @@ func Validate(cfg *Config) error {
 
 	if cfg.Proxy.UpstreamResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("proxy.upstream_response_header_timeout must be positive; got %s", time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout))
+	}
+	if cfg.ControlPlane.PollInterval <= 0 {
+		return fmt.Errorf("control_plane.poll_interval must be positive; got %s", time.Duration(cfg.ControlPlane.PollInterval))
 	}
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {

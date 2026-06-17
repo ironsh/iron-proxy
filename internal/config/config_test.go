@@ -538,3 +538,63 @@ tls:
 		require.Contains(t, err.Error(), "must be positive")
 	})
 }
+
+func TestLoad_ControlPlanePollInterval(t *testing.T) {
+	t.Run("default applied when unset", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, 10*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("valid duration accepted", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+control_plane:
+  poll_interval: "30s"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		cfg, err := Load(strings.NewReader(yaml))
+		require.NoError(t, err)
+		require.Equal(t, 30*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("invalid duration rejected at parse", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+control_plane:
+  poll_interval: "not-a-duration"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid duration")
+	})
+
+	t.Run("negative duration rejected at validate", func(t *testing.T) {
+		yaml := `
+dns:
+  proxy_ip: "10.0.0.1"
+control_plane:
+  poll_interval: "-5s"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+`
+		_, err := Load(strings.NewReader(yaml))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "control_plane.poll_interval must be positive")
+	})
+}

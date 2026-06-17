@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// PollInterval is the base interval between sync calls.
-const PollInterval = 5 * time.Second
+// DefaultPollInterval is the default base interval between sync calls.
+const DefaultPollInterval = 10 * time.Second
 
 // SyncUpdate is the slice of a SyncResponse passed to the poller's update
 // callback. Fields are nil or JSON null when the control plane did not include
@@ -42,6 +42,7 @@ type Poller struct {
 	configHash string
 	onUpdate   func(SyncUpdate) error
 	logger     *slog.Logger
+	interval   time.Duration
 
 	mu     sync.RWMutex
 	status Status
@@ -50,11 +51,20 @@ type Poller struct {
 
 // NewPoller creates a new sync poller.
 func NewPoller(client *Client, initialConfigHash string, onUpdate func(SyncUpdate) error, logger *slog.Logger) *Poller {
+	return NewPollerWithInterval(client, initialConfigHash, onUpdate, logger, DefaultPollInterval)
+}
+
+// NewPollerWithInterval creates a new sync poller with a custom base interval.
+func NewPollerWithInterval(client *Client, initialConfigHash string, onUpdate func(SyncUpdate) error, logger *slog.Logger, interval time.Duration) *Poller {
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
 	return &Poller{
 		client:     client,
 		configHash: initialConfigHash,
 		onUpdate:   onUpdate,
 		logger:     logger,
+		interval:   interval,
 		poke:       make(chan struct{}, 1),
 	}
 }
@@ -103,7 +113,7 @@ func (p *Poller) recordSync(resp *SyncResponse) {
 }
 
 // Run starts the polling loop. It performs an initial sync immediately, then
-// polls on PollInterval with ±10% jitter; a Poke wakes it early. Returns when
+// polls on the configured interval with ±10% jitter; a Poke wakes it early. Returns when
 // ctx is canceled or a revocation error is received.
 func (p *Poller) Run(ctx context.Context) error {
 	if err := p.sync(ctx); err != nil {
@@ -114,7 +124,7 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 
 	for {
-		delay := jitteredInterval(PollInterval, 0.1)
+		delay := jitteredInterval(p.interval, 0.1)
 		timer := time.NewTimer(delay)
 
 		select {

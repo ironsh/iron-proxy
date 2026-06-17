@@ -169,7 +169,7 @@ func TestPollerContinuesOnTransientError(t *testing.T) {
 
 	poller := NewPoller(client, "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	// Run briefly -- the 30s interval means we won't get past the initial sync in 200ms,
+	// Run briefly. The 10s interval means we won't get past the initial sync in 200ms,
 	// but the initial sync error should be handled gracefully.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -241,7 +241,7 @@ func TestPollerPokeTriggersImmediateSync(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Equal(t, "sha256:one", poller.Status().ConfigHash)
 
-	// A poke must trigger the second sync long before the 5s poll interval.
+	// A poke must trigger the second sync long before the 10s poll interval.
 	poller.Poke()
 	require.Eventually(t, func() bool {
 		return poller.Status().ConfigHash == "sha256:two"
@@ -255,6 +255,35 @@ func TestPollerPokeTriggersImmediateSync(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+func TestPollerCustomIntervalTriggersSync(t *testing.T) {
+	var syncCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		syncCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SyncResponse{ConfigHash: "sha256:ok"})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "irpt_test", testLogger())
+	poller := NewPollerWithInterval(client, "", nil, testLogger(), 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err := poller.Run(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, syncCalls.Load(), int32(2))
+}
+
+func TestJitteredIntervalRange(t *testing.T) {
+	base := time.Second
+	for range 100 {
+		got := jitteredInterval(base, 0.1)
+		require.GreaterOrEqual(t, got, 900*time.Millisecond)
+		require.LessOrEqual(t, got, 1100*time.Millisecond)
+	}
 }
 
 func TestPollerStatusRetainsPrincipalOnHashMatch(t *testing.T) {

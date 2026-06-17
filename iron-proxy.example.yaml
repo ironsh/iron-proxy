@@ -734,6 +734,11 @@ transforms:
 #   # Env var that holds the bearer token. Defaults to IRON_MANAGEMENT_API_KEY.
 #   api_key_env: "IRON_MANAGEMENT_API_KEY"
 
+# Optional managed-mode control-plane settings.
+# control_plane:
+#   # Base interval between sync polls. The poller adds jitter between polls.
+#   poll_interval: "10s"
+
 # Logging
 log:
   level: "info"  # debug, info, warn, error
