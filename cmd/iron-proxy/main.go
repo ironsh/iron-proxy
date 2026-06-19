@@ -21,6 +21,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/management"
 	"github.com/ironsh/iron-proxy/internal/mcp"
+	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/metrics"
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/postgres"
@@ -119,12 +120,13 @@ func main() {
 
 	var holder *transform.PipelineHolder
 	var mcpHolder *mcp.PolicyHolder
+	var gatewayHolder *mcpgateway.Holder
 	var otelCfg iotel.ExportConfig
 	var poller *controlplane.Poller
 
 	if managed {
 		var ingestToken string
-		holder, mcpHolder, ingestToken, pgListener, poller = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgListener, logger)
+		holder, mcpHolder, gatewayHolder, ingestToken, pgListener, poller = initManaged(ctx, cfg, bodyLimits, errc, proxyToken, pgManager, localPgListener, logger)
 		if ingestToken != "" {
 			otelCfg.DefaultEndpoint = "https://ingest.iron.sh/v1/logs"
 			otelCfg.DefaultHeaders = map[string]string{
@@ -132,7 +134,7 @@ func main() {
 			}
 		}
 	} else {
-		holder, mcpHolder = initStandalone(cfg, bodyLimits, logger)
+		holder, mcpHolder, gatewayHolder = initStandalone(cfg, bodyLimits, logger)
 	}
 
 	// 5. Validate the fully-assembled config.
@@ -219,6 +221,7 @@ func main() {
 		Resolver:                      resolver,
 		Guard:                         guard,
 		MCPPolicy:                     mcpHolder,
+		MCPGateway:                    gatewayHolder,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
@@ -245,7 +248,7 @@ func main() {
 			mgmtOpts.Status = func() any { return poller.Status() }
 			mgmtOpts.SyncNow = poller.Poke
 		} else {
-			mgmtOpts.Reload = newReloadFunc(*configPath, holder, mcpHolder, pgManager, bodyLimits, logger)
+			mgmtOpts.Reload = newReloadFunc(*configPath, holder, mcpHolder, gatewayHolder, pgManager, bodyLimits, logger)
 		}
 		mgmtServer = management.New(mgmtOpts)
 	}
@@ -332,7 +335,7 @@ func main() {
 //
 // Initial MCP policy preference: control-plane-supplied mcp block first, then
 // fall back to cfg.MCP from the YAML if the sync did not include one.
-func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgListener *postgres.Listener, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, string, *postgres.Listener, *controlplane.Poller) {
+func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.BodyLimits, errc chan<- error, proxyToken string, pgManager *postgres.Manager, localPgListener *postgres.Listener, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, *mcpgateway.Holder, string, *postgres.Listener, *controlplane.Poller) {
 	cpURL := envOrDefault("IRON_CONTROL_PLANE_URL", "https://api.iron.sh")
 	logger.Info("starting in managed mode", slog.String("control_plane_url", cpURL))
 
@@ -389,6 +392,15 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		logger.Error("building initial mcp policy", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+	gateway, err := mcpgateway.LoadFromNode(cfg.MCPGateway)
+	if err != nil {
+		logger.Error("building initial mcp gateway", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if gateway != nil {
+		logger.Info("mcp gateway enabled")
+	}
+	gatewayHolder := mcpgateway.NewHolder(gateway)
 
 	// Compute the initial postgres listener: the local YAML listener with any
 	// control-plane-synced routes layered on when its env vars are present. If
@@ -427,7 +439,7 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 		errc <- poller.Run(ctx)
 	}()
 
-	return holder, mcpHolder, ingestToken, pgListener, poller
+	return holder, mcpHolder, gatewayHolder, ingestToken, pgListener, poller
 }
 
 // managedReady gates the proxy on the first applied control-plane config.
@@ -461,7 +473,7 @@ func buildInitialMCPHolder(cfg *config.Config, initialMCP json.RawMessage, logge
 }
 
 // initStandalone builds the pipeline and MCP policy from the YAML config.
-func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder) {
+func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger *slog.Logger) (*transform.PipelineHolder, *mcp.PolicyHolder, *mcpgateway.Holder) {
 	pipeline, err := buildPipeline(cfg.Transforms, bodyLimits, logger)
 	if err != nil {
 		logger.Error("building transform pipeline", slog.String("error", err.Error()))
@@ -475,7 +487,15 @@ func initStandalone(cfg *config.Config, bodyLimits transform.BodyLimits, logger 
 	if mcpPolicy != nil {
 		logger.Info("mcp policy enabled")
 	}
-	return transform.NewPipelineHolder(pipeline), mcp.NewPolicyHolder(mcpPolicy)
+	gateway, err := mcpgateway.LoadFromNode(cfg.MCPGateway)
+	if err != nil {
+		logger.Error("loading mcp gateway", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if gateway != nil {
+		logger.Info("mcp gateway enabled")
+	}
+	return transform.NewPipelineHolder(pipeline), mcp.NewPolicyHolder(mcpPolicy), mcpgateway.NewHolder(gateway)
 }
 
 // applyPipelineSync builds a new pipeline from a sync payload and atomically
@@ -633,7 +653,7 @@ func applyPostgresSync(ctx context.Context, mgr *postgres.Manager, local *postgr
 // wrapped in *management.ValidationError so the management server returns
 // 422 and the existing state is left untouched. Validation runs for every
 // component before any state is mutated.
-func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, pgManager *postgres.Manager, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
+func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolder *mcp.PolicyHolder, gatewayHolder *mcpgateway.Holder, pgManager *postgres.Manager, bodyLimits transform.BodyLimits, logger *slog.Logger) management.ReloadFunc {
 	return func(ctx context.Context) error {
 		newCfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -650,6 +670,10 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		if err != nil {
 			return &management.ValidationError{Err: err}
 		}
+		newGateway, err := mcpgateway.LoadFromNode(newCfg.MCPGateway)
+		if err != nil {
+			return &management.ValidationError{Err: err}
+		}
 		newPgListener, err := postgres.LoadFromNode(newCfg.Postgres, logger)
 		if err != nil {
 			return &management.ValidationError{Err: err}
@@ -657,6 +681,7 @@ func newReloadFunc(configPath string, holder *transform.PipelineHolder, mcpHolde
 		newPipeline.SetAuditFunc(holder.Load().AuditFunc())
 		holder.Store(newPipeline)
 		mcpHolder.Store(newPolicy)
+		gatewayHolder.Store(newGateway)
 		pgManager.Reload(ctx, newPgListener)
 		logger.Info("pipeline reloaded via management API",
 			slog.String("transforms", newPipeline.Names()),

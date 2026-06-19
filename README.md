@@ -576,6 +576,44 @@ Behavior:
 
 Pipeline ordering: the MCP interceptor runs after the transform pipeline, so `allowlist` still gates which hosts can be reached and `secrets` has already swapped proxy tokens by the time the interceptor evaluates the body.
 
+### MCP Gateway
+
+`mcp_gateway` routes client-facing MCP hosts to concrete upstream servers after the MCP policy accepts the request. This lets agents call stable internal hosts while iron-proxy forwards to the real upstream and injects credentials that never enter the sandbox.
+
+Gateway routes only apply to requests that matched an MCP server. The MCP policy still enforces the tool allowlist first. If policy denies a `tools/call`, the gateway route is not applied and upstream is not reached.
+
+```yaml
+mcp:
+  servers:
+    - name: github
+      rules:
+        - host: "github.mcp.local"
+          paths: ["/mcp", "/mcp/*"]
+      tools:
+        - name: "search_repositories"
+
+mcp_gateway:
+  routes:
+    - name: github
+      rules:
+        - host: "github.mcp.local"
+          paths: ["/mcp", "/mcp/*"]
+      upstream:
+        scheme: "https"                 # defaults to https
+        host: "mcp.github.com"
+        path_prefix: "/v1"              # optional. Prepended to the client path.
+        preserve_host: false            # default. Sends Host for the upstream.
+      credentials:
+        - source:
+            type: env
+            var: GITHUB_MCP_TOKEN
+          inject:
+            header: Authorization
+            formatter: "Bearer {{ .Value }}"
+```
+
+Credentials use the same secret sources as the `secrets` transform. They are required by default. Set `require: false` on a credential to skip it when unavailable. Audit logs record the route, upstream host, and credential injection locations, but never the injected credential values.
+
 Limitations in v1:
 
 - Only Streamable HTTP transport is supported. The legacy HTTP+SSE transport (separate `/messages` and `/sse` endpoints) is not.

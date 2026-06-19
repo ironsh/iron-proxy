@@ -23,6 +23,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/mcp"
+	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -45,6 +46,7 @@ type Proxy struct {
 	resolver       *net.Resolver
 	guard          *dnsguard.Guard
 	mcpPolicy      *mcp.PolicyHolder
+	mcpGateway     *mcpgateway.Holder
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -72,6 +74,7 @@ type Options struct {
 	Resolver   *net.Resolver
 	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
 	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	MCPGateway *mcpgateway.Holder
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -112,6 +115,7 @@ func New(opts Options) *Proxy {
 		resolver:       opts.Resolver,
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
+		mcpGateway:     opts.MCPGateway,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -421,16 +425,51 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 
+	upstreamScheme := scheme
+	upstreamHost := host
+	upstreamPath := r.URL.Path
+	upstreamRawPath := r.URL.RawPath
+	upstreamPreserveHost := false
+
+	if mcpServer != nil {
+		gateway := p.mcpGateway.Load()
+		if route := gateway.Match(r); route != nil {
+			applied, err := route.Apply(r.Context(), r)
+			if err != nil {
+				if markIfClientCancel(r, err, result) {
+					return
+				}
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			upstreamScheme = applied.UpstreamScheme
+			upstreamHost = applied.UpstreamHost
+			upstreamPath = applied.UpstreamPath
+			upstreamRawPath = applied.UpstreamRawPath
+			upstreamPreserveHost = applied.PreserveHost
+			mcpTrace.SetGateway(map[string]any{
+				"route":                applied.Name,
+				"upstream_scheme":      applied.UpstreamScheme,
+				"upstream_host":        applied.UpstreamHost,
+				"preserve_host":        applied.PreserveHost,
+				"credentials_injected": applied.InjectedCredentialIDs,
+			})
+		}
+	}
+
 	// Build upstream request. Use r.URL (which transforms may have modified)
 	// rather than r.RequestURI (which is immutable). Preserve RawPath so
 	// percent-encoded reserved characters like %2F survive to the upstream —
 	// some APIs (e.g. GCS object names) treat decoded vs encoded slashes as
 	// distinct path segments.
 	upstreamURL := (&url.URL{
-		Scheme:   scheme,
-		Host:     host,
-		Path:     r.URL.Path,
-		RawPath:  r.URL.RawPath,
+		Scheme:   upstreamScheme,
+		Host:     upstreamHost,
+		Path:     upstreamPath,
+		RawPath:  upstreamRawPath,
 		RawQuery: r.URL.RawQuery,
 	}).String()
 
@@ -447,6 +486,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	copyHeaders(upstreamReq.Header, r.Header)
 	sanitizeUpstreamHeaders(upstreamReq.Header)
+	if upstreamPreserveHost {
+		upstreamReq.Host = host
+	}
 	// If a transform buffered the request body, set ContentLength so the
 	// upstream receives a Content-Length header instead of chunked encoding.
 	// Otherwise, preserve the original Content-Length from the client.

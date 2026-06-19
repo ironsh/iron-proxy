@@ -95,6 +95,9 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 				}
 				mcpKVs = append(mcpKVs, log.KeyValue{Key: "messages", Value: log.SliceValue(vals...)})
 			}
+			if gateway := result.MCP.MCPGateway(); len(gateway) > 0 {
+				mcpKVs = append(mcpKVs, log.KeyValue{Key: "gateway", Value: toLogValue(gateway)})
+			}
 			attrs = append(attrs, log.KeyValue{Key: "mcp", Value: log.MapValue(mcpKVs...)})
 		}
 		if result.BodyCapture != nil && result.BodyCapture.RequestBody() != "" {

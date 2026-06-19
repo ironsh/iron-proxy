@@ -175,6 +175,9 @@ type MCPAudit interface {
 	// MCPMessages returns the audit messages in observed order. Each entry
 	// is a flat key/value map suitable for JSON encoding (string-keyed).
 	MCPMessages() []map[string]any
+	// MCPGateway returns gateway route metadata, or nil when no gateway route
+	// was applied.
+	MCPGateway() map[string]any
 }
 
 // BodyCapture is the read-only view of a body_capture transform's per-request
