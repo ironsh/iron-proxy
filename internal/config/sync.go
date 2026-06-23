@@ -17,8 +17,8 @@ import (
 // for the allowlist transform, secrets → {"secrets": [...]} for the secrets
 // transform. The transforms field is the control plane's already-shaped
 // transform array — each element a {name, config} object bundling the
-// gcp_auth, hmac_sign, and oauth_token transforms granted to the proxy's
-// principal.
+// gcp_auth, gcp_id_token, hmac_sign, and oauth_token transforms granted to the
+// proxy's principal.
 //
 // Pipeline order is allowlist, then secrets, then the control-plane transforms
 // in delivered order. Secrets runs before the transforms so a body-mutating
