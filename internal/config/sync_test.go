@@ -283,7 +283,7 @@ func TestTransformsFromSync_GCPIDTokenTransform(t *testing.T) {
 			"config": {
 				"keyfile": {"type": "control_plane", "value": "{\"type\":\"service_account\"}"},
 				"audience": "https://private-service-abc123-uc.a.run.app",
-				"header": "x_serverless_authorization",
+				"header": "x-serverless-authorization",
 				"rules": [{"host": "private-service-abc123-uc.a.run.app"}]
 			}
 		}
@@ -309,7 +309,7 @@ func TestTransformsFromSync_GCPIDTokenTransform(t *testing.T) {
 	require.Equal(t, "control_plane", decoded.Keyfile.Type)
 	require.JSONEq(t, `{"type":"service_account"}`, decoded.Keyfile.Value)
 	require.Equal(t, "https://private-service-abc123-uc.a.run.app", decoded.Audience)
-	require.Equal(t, "x_serverless_authorization", decoded.Header)
+	require.Equal(t, "x-serverless-authorization", decoded.Header)
 	require.Equal(t, "private-service-abc123-uc.a.run.app", decoded.Rules[0].Host)
 }
 

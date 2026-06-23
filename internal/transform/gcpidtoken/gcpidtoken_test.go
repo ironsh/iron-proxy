@@ -237,7 +237,7 @@ func TestGCPIDToken_InjectsServerlessHeader(t *testing.T) {
 	cfg := config{
 		KeyfilePath: path,
 		Audience:    "https://service.run.app",
-		Header:      "x_serverless_authorization",
+		Header:      "x-serverless-authorization",
 		Rules:       []hostmatch.RuleConfig{hostmatchRuleConfig(t, "service.run.app")},
 	}
 	g, err := newFromConfig(cfg, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}))

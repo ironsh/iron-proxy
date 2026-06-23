@@ -147,10 +147,10 @@ func normalizeHeader(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "authorization":
 		return defaultHeader, nil
-	case "x-serverless-authorization", "x_serverless_authorization":
+	case "x-serverless-authorization":
 		return serverlessHeader, nil
 	default:
-		return "", fmt.Errorf("gcp_id_token: \"header\" must be \"authorization\" or \"x_serverless_authorization\"")
+		return "", fmt.Errorf("gcp_id_token: \"header\" must be \"authorization\" or \"x-serverless-authorization\"")
 	}
 }
 

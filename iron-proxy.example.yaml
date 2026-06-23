@@ -330,7 +330,7 @@ transforms:
   #   config:
   #     keyfile_path: "/etc/iron-proxy/cloud-run-caller.json"
   #     audience: "https://my-service-abc123-uc.a.run.app"
-  #     # Optional. Use x_serverless_authorization when the upstream app needs
+  #     # Optional. Use x-serverless-authorization when the upstream app needs
   #     # the Authorization header for its own application auth.
   #     header: authorization
   #     rules:
@@ -343,7 +343,7 @@ transforms:
   #       type: 1password_connect
   #       secret_ref: "op://Engineering/Cloud-Run-Caller/credential"
   #     audience: "https://my-service-abc123-uc.a.run.app"
-  #     header: x_serverless_authorization
+  #     header: x-serverless-authorization
   #     rules:
   #       - host: "my-service-abc123-uc.a.run.app"
 
