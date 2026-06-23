@@ -402,6 +402,20 @@ func TestGCPIDToken_DoesNotStubAccessTokenJWTBearer(t *testing.T) {
 	require.Equal(t, body, string(restored))
 }
 
+func TestGCPIDToken_DoesNotInspectOversizedTokenEndpointBody(t *testing.T) {
+	body := strings.Repeat("x", maxTokenRequestBodyBytes+1)
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(body))
+	require.NoError(t, err)
+
+	g := newStubOnlyTransform(t)
+	res, err := g.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	restored, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(restored))
+}
+
 func TestGCPIDToken_StubsMetadataIdentityEndpoint(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=https%3A%2F%2Fservice.run.app", nil)
 	require.NoError(t, err)
@@ -416,6 +430,16 @@ func TestGCPIDToken_StubsMetadataIdentityEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	claims := decodeJWTClaims(t, string(body))
 	require.Equal(t, "https://service.run.app", claims["aud"])
+}
+
+func TestGCPIDToken_DoesNotStubMetadataIdentityWithoutAudience(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity", nil)
+	require.NoError(t, err)
+
+	g := newStubOnlyTransform(t)
+	res, err := g.TransformRequest(context.Background(), newContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
 }
 
 func TestGCPIDToken_MintFailureRejectsWithSanitizedReason(t *testing.T) {

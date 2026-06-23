@@ -214,7 +214,7 @@ func (g *GCPIDToken) TransformRequest(ctx context.Context, tctx *transform.Trans
 		tctx.Annotate("service_account", g.principal)
 	}
 	tctx.Annotate("audience", g.audience)
-	tctx.Annotate("injected", []string{"header:" + http.CanonicalHeaderKey(g.header)})
+	tctx.Annotate("injected", []string{"header:" + g.header})
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
@@ -301,6 +301,9 @@ func metadataIdentityAudience(req *http.Request) (string, bool) {
 	if req.URL != nil {
 		audience = req.URL.Query().Get("audience")
 	}
+	if audience == "" {
+		return "", false
+	}
 	return audience, true
 }
 
@@ -320,10 +323,10 @@ func jwtBearerIDTokenAudience(req *http.Request) (string, bool) {
 		return "", false
 	}
 
-	body, err := io.ReadAll(req.Body)
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxTokenRequestBodyBytes+1))
 	closeErr := req.Body.Close()
 	req.Body = io.NopCloser(bytes.NewReader(body))
-	if err != nil || closeErr != nil {
+	if err != nil || closeErr != nil || len(body) > maxTokenRequestBodyBytes {
 		return "", false
 	}
 	values, err := url.ParseQuery(string(body))
