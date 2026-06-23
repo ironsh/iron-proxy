@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -402,6 +404,47 @@ rules:
 	require.Equal(t, int64(0), calls.Load(), "real GCP token endpoint must not be hit when stubbing")
 }
 
+func TestGCPAuth_DoesNotStubIDTokenJWTBearer(t *testing.T) {
+	srv, calls := fakeTokenServer(t, "minted-token", 3600)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sa.json")
+	require.NoError(t, os.WriteFile(path, testKeyfileJSON(t, srv.URL, "sa@p.iam.gserviceaccount.com"), 0o600))
+
+	cfgYAML := `
+keyfile_path: ` + path + `
+scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+rules:
+  - host: "bigquery.googleapis.com"
+`
+	var c config
+	node := yamlFromString(t, cfgYAML)
+	require.NoError(t, node.Decode(&c))
+	g, err := newFromConfig(c, slog.Default(), os.ReadFile, staticBuilder(&staticSource{}), errTokenSourceBuilder)
+	require.NoError(t, err)
+
+	form := url.Values{}
+	form.Set("grant_type", gcpjwt.JWTBearerGrantType)
+	form.Set("assertion", unsignedAssertion(t, map[string]any{
+		"iss":             "stub@p.iam.gserviceaccount.com",
+		"aud":             "https://oauth2.googleapis.com/token",
+		"target_audience": "https://service.run.app",
+	}))
+	body := form.Encode()
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(body))
+	require.NoError(t, err)
+	tctx := newContext()
+	res, err := g.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+	require.Empty(t, tctx.DrainAnnotations())
+
+	restored, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(restored))
+	require.Empty(t, req.Header.Get("Authorization"))
+	require.Equal(t, int64(0), calls.Load(), "gcp_auth must not stub or mint for ID-token JWT bearer requests")
+}
+
 func TestGCPAuth_StubsMetadataServerToken(t *testing.T) {
 	srv, _ := fakeTokenServer(t, "minted-token", 3600)
 	dir := t.TempDir()
@@ -503,6 +546,16 @@ func decodeJWTClaims(t *testing.T, assertion string) map[string]any {
 	var claims map[string]any
 	require.NoError(t, json.Unmarshal(raw, &claims))
 	return claims
+}
+
+func unsignedAssertion(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT"})
+	require.NoError(t, err)
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
+	return base64.RawURLEncoding.EncodeToString(header) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
 // TestGCPAuth_Subject verifies that the subject field drives domain-wide

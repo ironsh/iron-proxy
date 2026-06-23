@@ -276,6 +276,43 @@ func TestTransformsFromSync_OAuthTokenTransform(t *testing.T) {
 	require.Equal(t, "slack.com", decoded.Tokens[0].Rules[0].Host)
 }
 
+func TestTransformsFromSync_GCPIDTokenTransform(t *testing.T) {
+	transformsRaw := json.RawMessage(`[
+		{
+			"name": "gcp_id_token",
+			"config": {
+				"keyfile": {"type": "control_plane", "value": "{\"type\":\"service_account\"}"},
+				"audience": "https://private-service-abc123-uc.a.run.app",
+				"header": "x-serverless-authorization",
+				"rules": [{"host": "private-service-abc123-uc.a.run.app"}]
+			}
+		}
+	]`)
+
+	transforms, err := TransformsFromSync(nil, nil, transformsRaw)
+	require.NoError(t, err)
+	require.Len(t, transforms, 1)
+	require.Equal(t, "gcp_id_token", transforms[0].Name)
+
+	var decoded struct {
+		Keyfile struct {
+			Type  string `yaml:"type"`
+			Value string `yaml:"value"`
+		} `yaml:"keyfile"`
+		Audience string `yaml:"audience"`
+		Header   string `yaml:"header"`
+		Rules    []struct {
+			Host string `yaml:"host"`
+		} `yaml:"rules"`
+	}
+	require.NoError(t, transforms[0].Config.Decode(&decoded))
+	require.Equal(t, "control_plane", decoded.Keyfile.Type)
+	require.JSONEq(t, `{"type":"service_account"}`, decoded.Keyfile.Value)
+	require.Equal(t, "https://private-service-abc123-uc.a.run.app", decoded.Audience)
+	require.Equal(t, "x-serverless-authorization", decoded.Header)
+	require.Equal(t, "private-service-abc123-uc.a.run.app", decoded.Rules[0].Host)
+}
+
 func TestTransformsFromSync_TransformsAfterSecrets(t *testing.T) {
 	// allowlist, then secrets, then the control-plane transforms in delivered
 	// order — so a body-mutating secret swap runs before hmac_sign signs.

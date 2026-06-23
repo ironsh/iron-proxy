@@ -194,6 +194,27 @@ func TestApplyPipelineSync_ValidConfig_Swaps(t *testing.T) {
 	require.Contains(t, logBuf.String(), "pipeline reloaded")
 }
 
+func TestApplyPipelineSync_GCPIDTokenTransformFromControlPlane(t *testing.T) {
+	original := transform.NewPipeline(nil, transform.BodyLimits{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	holder := transform.NewPipelineHolder(original)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	transforms := json.RawMessage(`[
+		{
+			"name": "gcp_id_token",
+			"config": {
+				"keyfile_path": "/does/not/read/until/request.json",
+				"audience": "https://private-service-abc123-uc.a.run.app",
+				"rules": [{"host":"private-service-abc123-uc.a.run.app"}]
+			}
+		}
+	]`)
+	require.NoError(t, applyPipelineSync(holder, transform.BodyLimits{}, logger, nil, nil, transforms))
+
+	require.NotSame(t, original, holder.Load(), "pipeline should have been swapped")
+	require.Equal(t, "gcp_id_token", holder.Load().Names())
+}
+
 func TestApplyPipelineSync_InvalidJSON_KeepsExistingPipeline(t *testing.T) {
 	original := transform.NewPipeline(nil, transform.BodyLimits{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	holder := transform.NewPipelineHolder(original)

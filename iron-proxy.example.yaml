@@ -311,6 +311,42 @@ transforms:
   #     rules:
   #       - host: "*.googleapis.com"
 
+  # GCP OIDC ID token authentication. Mints a Google-signed ID token with
+  # the configured audience and sets Authorization: Bearer on matching
+  # requests. This is the token shape required by private Cloud Run services,
+  # Cloud Run functions, IAP, API Gateway, and other audience-authenticated
+  # Google targets. Tokens are cached and refreshed automatically before
+  # expiry. Requires MITM mode (sni-only mode cannot rewrite headers). On
+  # token-minting failure the request is rejected (403).
+  #
+  # The service account JSON can come from disk via keyfile_path, or from any
+  # configured secret source (env, aws_sm, aws_ssm, 1password,
+  # 1password_connect) via a nested keyfile block. Use exactly one.
+  #
+  # Cloud Run checks the aud claim against the receiving service URL or a
+  # configured custom audience. For Cloud Run, custom domains are not valid
+  # audience values.
+  # - name: gcp_id_token
+  #   config:
+  #     keyfile_path: "/etc/iron-proxy/cloud-run-caller.json"
+  #     audience: "https://my-service-abc123-uc.a.run.app"
+  #     # Optional. Use x-serverless-authorization when the upstream app needs
+  #     # the Authorization header for its own application auth.
+  #     header: authorization
+  #     rules:
+  #       - host: "my-service-abc123-uc.a.run.app"
+  #
+  # Same thing, service account JSON sourced from 1Password Connect:
+  # - name: gcp_id_token
+  #   config:
+  #     keyfile:
+  #       type: 1password_connect
+  #       secret_ref: "op://Engineering/Cloud-Run-Caller/credential"
+  #     audience: "https://my-service-abc123-uc.a.run.app"
+  #     header: x-serverless-authorization
+  #     rules:
+  #       - host: "my-service-abc123-uc.a.run.app"
+
   # OAuth2 token injection. Mints short-lived OAuth2 access tokens and sets
   # Authorization: Bearer on matching requests. Each entry under tokens names
   # a grant type, its credential fields, and the hosts it applies to. Token
