@@ -25,6 +25,7 @@ import (
 
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -355,7 +356,7 @@ func TestGCPIDToken_NestedSourceBuildError(t *testing.T) {
 
 func TestGCPIDToken_StubsOAuth2IDTokenEndpoint(t *testing.T) {
 	form := url.Values{}
-	form.Set("grant_type", jwtBearerGrantType)
+	form.Set("grant_type", gcpjwt.JWTBearerGrantType)
 	form.Set("assertion", unsignedAssertion(t, map[string]any{
 		"iss":             "stub@p.iam.gserviceaccount.com",
 		"aud":             "https://oauth2.googleapis.com/token",
@@ -382,7 +383,7 @@ func TestGCPIDToken_StubsOAuth2IDTokenEndpoint(t *testing.T) {
 
 func TestGCPIDToken_DoesNotStubAccessTokenJWTBearer(t *testing.T) {
 	form := url.Values{}
-	form.Set("grant_type", jwtBearerGrantType)
+	form.Set("grant_type", gcpjwt.JWTBearerGrantType)
 	form.Set("assertion", unsignedAssertion(t, map[string]any{
 		"iss":   "stub@p.iam.gserviceaccount.com",
 		"aud":   "https://oauth2.googleapis.com/token",
@@ -403,7 +404,7 @@ func TestGCPIDToken_DoesNotStubAccessTokenJWTBearer(t *testing.T) {
 }
 
 func TestGCPIDToken_DoesNotInspectOversizedTokenEndpointBody(t *testing.T) {
-	body := strings.Repeat("x", maxTokenRequestBodyBytes+1)
+	body := strings.Repeat("x", gcpjwt.MaxTokenRequestBodyBytes+1)
 	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(body))
 	require.NoError(t, err)
 

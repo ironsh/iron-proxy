@@ -25,15 +25,11 @@
 package gcpauth
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +40,7 @@ import (
 
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -53,11 +50,6 @@ import (
 // value here is never sent to Google: it just has to look like an opaque token
 // to the client SDK.
 const stubAccessToken = "iron-proxy-stub-token"
-
-const (
-	jwtBearerGrantType       = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-	maxTokenRequestBodyBytes = 1 << 20
-)
 
 var stubTokenJSON = []byte(`{"access_token":"` + stubAccessToken + `","expires_in":3600,"token_type":"Bearer"}`)
 
@@ -276,44 +268,8 @@ func isTokenEndpoint(req *http.Request) bool {
 }
 
 func isIDTokenJWTBearerRequest(req *http.Request) bool {
-	if req.Body == nil {
-		return false
-	}
-	if req.ContentLength < 0 || req.ContentLength > maxTokenRequestBodyBytes {
-		return false
-	}
-	body, err := io.ReadAll(io.LimitReader(req.Body, maxTokenRequestBodyBytes+1))
-	closeErr := req.Body.Close()
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	if err != nil || closeErr != nil || len(body) > maxTokenRequestBodyBytes {
-		return false
-	}
-	values, err := url.ParseQuery(string(body))
-	if err != nil {
-		return false
-	}
-	if values.Get("grant_type") != jwtBearerGrantType {
-		return false
-	}
-	return assertionHasTargetAudience(values.Get("assertion"))
-}
-
-func assertionHasTargetAudience(assertion string) bool {
-	parts := strings.Split(assertion, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-	var claims struct {
-		TargetAudience string `json:"target_audience"`
-	}
-	if err := json.Unmarshal(raw, &claims); err != nil {
-		return false
-	}
-	return claims.TargetAudience != ""
+	_, ok := gcpjwt.JWTBearerTargetAudience(req)
+	return ok
 }
 
 func stubTokenResponse(req *http.Request) *http.Response {

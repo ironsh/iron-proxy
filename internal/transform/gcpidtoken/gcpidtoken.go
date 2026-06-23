@@ -16,16 +16,13 @@
 package gcpidtoken
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -37,15 +34,14 @@ import (
 
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
 const (
 	defaultHeader              = "Authorization"
 	serverlessHeader           = "X-Serverless-Authorization"
-	jwtBearerGrantType         = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 	stubAudience               = "iron-proxy-stub-audience"
-	maxTokenRequestBodyBytes   = 1 << 20
 	stubIDTokenLifetimeSeconds = 3600
 )
 
@@ -316,45 +312,7 @@ func jwtBearerIDTokenAudience(req *http.Request) (string, bool) {
 	if host != "oauth2.googleapis.com" || path != "/token" {
 		return "", false
 	}
-	if req.Body == nil {
-		return "", false
-	}
-	if req.ContentLength < 0 || req.ContentLength > maxTokenRequestBodyBytes {
-		return "", false
-	}
-
-	body, err := io.ReadAll(io.LimitReader(req.Body, maxTokenRequestBodyBytes+1))
-	closeErr := req.Body.Close()
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	if err != nil || closeErr != nil || len(body) > maxTokenRequestBodyBytes {
-		return "", false
-	}
-	values, err := url.ParseQuery(string(body))
-	if err != nil {
-		return "", false
-	}
-	if values.Get("grant_type") != jwtBearerGrantType {
-		return "", false
-	}
-	return targetAudienceFromAssertion(values.Get("assertion"))
-}
-
-func targetAudienceFromAssertion(assertion string) (string, bool) {
-	parts := strings.Split(assertion, ".")
-	if len(parts) != 3 {
-		return "", false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", false
-	}
-	var claims struct {
-		TargetAudience string `json:"target_audience"`
-	}
-	if err := json.Unmarshal(raw, &claims); err != nil {
-		return "", false
-	}
-	return claims.TargetAudience, claims.TargetAudience != ""
+	return gcpjwt.JWTBearerTargetAudience(req)
 }
 
 func fakeIDToken(audience string) (string, error) {

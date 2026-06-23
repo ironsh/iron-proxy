@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -422,7 +423,7 @@ rules:
 	require.NoError(t, err)
 
 	form := url.Values{}
-	form.Set("grant_type", jwtBearerGrantType)
+	form.Set("grant_type", gcpjwt.JWTBearerGrantType)
 	form.Set("assertion", unsignedAssertion(t, map[string]any{
 		"iss":             "stub@p.iam.gserviceaccount.com",
 		"aud":             "https://oauth2.googleapis.com/token",
