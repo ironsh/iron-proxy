@@ -228,7 +228,7 @@ func TestMCPGatewayRoutesAllowedCallWithCredential(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached <- struct{}{}
 		require.Equal(t, "Bearer real-token", r.Header.Get("Authorization"))
-		require.Equal(t, "/upstream/mcp", r.URL.Path)
+		require.Equal(t, "/upstream", r.URL.Path)
 		require.Equal(t, wantHost, r.Host)
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -253,13 +253,9 @@ func TestMCPGatewayRoutesAllowedCallWithCredential(t *testing.T) {
 	require.NoError(t, err)
 	gateway, err := mcpgateway.Compile(mcpgateway.Config{
 		Routes: []mcpgateway.RouteConfig{{
-			Name:  "github",
-			Rules: []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
-			Upstream: mcpgateway.UpstreamConfig{
-				Scheme:     upstreamURL.Scheme,
-				Host:       upstreamURL.Host,
-				PathPrefix: "/upstream",
-			},
+			Name:     "github",
+			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
+			Upstream: upstreamURL.String() + "/upstream",
 			Credentials: []mcpgateway.CredentialConfig{{
 				Source: mustYAMLNode(t, `type: env
 var: MCP_TOKEN
@@ -313,7 +309,7 @@ func TestMCPGatewayDeniedToolDoesNotReachUpstream(t *testing.T) {
 		Routes: []mcpgateway.RouteConfig{{
 			Name:     "github",
 			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
-			Upstream: mcpgateway.UpstreamConfig{Scheme: upstreamURL.Scheme, Host: upstreamURL.Host},
+			Upstream: upstreamURL.String(),
 		}},
 	})
 	require.NoError(t, err)

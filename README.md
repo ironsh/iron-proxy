@@ -598,11 +598,7 @@ mcp_gateway:
       rules:
         - host: "github.mcp.local"
           paths: ["/mcp", "/mcp/*"]
-      upstream:
-        scheme: "https"                 # defaults to https
-        host: "mcp.github.com"
-        path_prefix: "/v1"              # optional. Prepended to the client path.
-        preserve_host: false            # default. Sends Host for the upstream.
+      upstream: "https://mcp.github.com/v1"
       credentials:
         - source:
             type: env
@@ -612,7 +608,7 @@ mcp_gateway:
             formatter: "Bearer {{ .Value }}"
 ```
 
-Credentials use the same secret sources as the `secrets` transform. They are required by default. Set `require: false` on a credential to skip it when unavailable. Audit logs record the route, upstream host, and credential injection locations, but never the injected credential values.
+Credentials use the same secret sources as the `secrets` transform. They are required by default. Set `require: false` on a credential to skip it when unavailable. Audit logs record the route, upstream URL, and credential injection locations, but never the injected credential values.
 
 Limitations in v1:
 

@@ -20,13 +20,9 @@ func TestCompileAndApply(t *testing.T) {
 
 	g, err := Compile(Config{
 		Routes: []RouteConfig{{
-			Name:  "github",
-			Rules: []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp", "/mcp/*"}}},
-			Upstream: UpstreamConfig{
-				Scheme:     "https",
-				Host:       "mcp.github.com",
-				PathPrefix: "/v1",
-			},
+			Name:     "github",
+			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp", "/mcp/*"}}},
+			Upstream: "https://mcp.github.com/v1",
 			Credentials: []CredentialConfig{{
 				Source: mustYAMLNode(t, `type: env
 var: MCP_TOKEN
@@ -47,12 +43,10 @@ var: MCP_TOKEN
 	applied, err := route.Apply(context.Background(), req)
 	require.NoError(t, err)
 	require.Equal(t, "github", applied.Name)
-	require.Equal(t, "https", applied.UpstreamScheme)
-	require.Equal(t, "mcp.github.com", applied.UpstreamHost)
-	require.Equal(t, "/v1/mcp/tools", applied.UpstreamPath)
+	require.Equal(t, "https://mcp.github.com/v1", applied.Upstream)
+	require.Equal(t, "https://mcp.github.com/v1?existing=1", applied.RequestURL)
 	require.Equal(t, "Bearer real-token", req.Header.Get("Authorization"))
 	require.Equal(t, []string{"MCP_TOKEN:header:Authorization"}, applied.InjectedCredentialIDs)
-	require.Equal(t, "https://mcp.github.com/v1/mcp/tools?existing=1", applied.UpstreamURL(req.URL.RawQuery))
 }
 
 func TestApplyInjectsQueryParam(t *testing.T) {
@@ -62,7 +56,7 @@ func TestApplyInjectsQueryParam(t *testing.T) {
 		Routes: []RouteConfig{{
 			Name:     "github",
 			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-			Upstream: UpstreamConfig{Host: "mcp.github.com"},
+			Upstream: "https://mcp.github.com",
 			Credentials: []CredentialConfig{{
 				Source: mustYAMLNode(t, `type: env
 var: MCP_TOKEN
@@ -77,15 +71,17 @@ var: MCP_TOKEN
 	applied, err := g.Match(req).Apply(context.Background(), req)
 	require.NoError(t, err)
 	require.Equal(t, "real-token", req.URL.Query().Get("access_token"))
+	require.Equal(t, "https://mcp.github.com", applied.Upstream)
+	require.Equal(t, "https://mcp.github.com?access_token=real-token&existing=1", applied.RequestURL)
 	require.Equal(t, []string{"MCP_TOKEN:query:access_token"}, applied.InjectedCredentialIDs)
 }
 
-func TestApplyPathPrefixPreservesTrailingSlash(t *testing.T) {
+func TestApplyUsesFixedUpstreamPath(t *testing.T) {
 	g, err := Compile(Config{
 		Routes: []RouteConfig{{
 			Name:     "github",
 			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-			Upstream: UpstreamConfig{Host: "mcp.github.com", PathPrefix: "/v1/"},
+			Upstream: "https://mcp.github.com/v1/",
 		}},
 	})
 	require.NoError(t, err)
@@ -93,7 +89,8 @@ func TestApplyPathPrefixPreservesTrailingSlash(t *testing.T) {
 	req := newRequest(t, "https://github.mcp.local/mcp/")
 	applied, err := g.Match(req).Apply(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, "/v1/mcp/", applied.UpstreamPath)
+	require.Equal(t, "https://mcp.github.com/v1/", applied.Upstream)
+	require.Equal(t, "https://mcp.github.com/v1/", applied.RequestURL)
 }
 
 func TestApplyRequiredCredentialFailure(t *testing.T) {
@@ -101,7 +98,7 @@ func TestApplyRequiredCredentialFailure(t *testing.T) {
 		Routes: []RouteConfig{{
 			Name:     "github",
 			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-			Upstream: UpstreamConfig{Host: "mcp.github.com"},
+			Upstream: "https://mcp.github.com",
 			Credentials: []CredentialConfig{{
 				Source: mustYAMLNode(t, `type: env
 var: MISSING_MCP_TOKEN
@@ -123,7 +120,7 @@ func TestApplyOptionalCredentialFailure(t *testing.T) {
 		Routes: []RouteConfig{{
 			Name:     "github",
 			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-			Upstream: UpstreamConfig{Host: "mcp.github.com"},
+			Upstream: "https://mcp.github.com",
 			Credentials: []CredentialConfig{{
 				Source: mustYAMLNode(t, `type: env
 var: MISSING_MCP_TOKEN
@@ -150,12 +147,12 @@ func TestCompileValidation(t *testing.T) {
 	}{
 		{
 			name:    "missing name",
-			cfg:     Config{Routes: []RouteConfig{{Upstream: UpstreamConfig{Host: "example.com"}}}},
+			cfg:     Config{Routes: []RouteConfig{{Upstream: "https://example.com"}}},
 			wantErr: "name is required",
 		},
 		{
 			name:    "missing rules",
-			cfg:     Config{Routes: []RouteConfig{{Name: "github", Upstream: UpstreamConfig{Host: "example.com"}}}},
+			cfg:     Config{Routes: []RouteConfig{{Name: "github", Upstream: "https://example.com"}}},
 			wantErr: "at least one rule is required",
 		},
 		{
@@ -163,16 +160,25 @@ func TestCompileValidation(t *testing.T) {
 			cfg: Config{Routes: []RouteConfig{{
 				Name:     "github",
 				Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-				Upstream: UpstreamConfig{Scheme: "ftp", Host: "example.com"},
+				Upstream: "ftp://example.com",
 			}}},
-			wantErr: "upstream.scheme must be http or https",
+			wantErr: "upstream must use http or https",
+		},
+		{
+			name: "missing upstream host",
+			cfg: Config{Routes: []RouteConfig{{
+				Name:     "github",
+				Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
+				Upstream: "https:///v1",
+			}}},
+			wantErr: "upstream must include a host",
 		},
 		{
 			name: "invalid credential injection",
 			cfg: Config{Routes: []RouteConfig{{
 				Name:     "github",
 				Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local"}},
-				Upstream: UpstreamConfig{Host: "example.com"},
+				Upstream: "https://example.com",
 				Credentials: []CredentialConfig{{
 					Source: mustYAMLNode(t, `type: env
 var: MCP_TOKEN

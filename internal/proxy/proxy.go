@@ -429,7 +429,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	upstreamHost := host
 	upstreamPath := r.URL.Path
 	upstreamRawPath := r.URL.RawPath
-	upstreamPreserveHost := false
+	upstreamURL := ""
 
 	if mcpServer != nil {
 		gateway := p.mcpGateway.Load()
@@ -445,16 +445,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 				return
 			}
-			upstreamScheme = applied.UpstreamScheme
-			upstreamHost = applied.UpstreamHost
-			upstreamPath = applied.UpstreamPath
-			upstreamRawPath = applied.UpstreamRawPath
-			upstreamPreserveHost = applied.PreserveHost
+			upstreamURL = applied.RequestURL
 			mcpTrace.SetGateway(map[string]any{
 				"route":                applied.Name,
-				"upstream_scheme":      applied.UpstreamScheme,
-				"upstream_host":        applied.UpstreamHost,
-				"preserve_host":        applied.PreserveHost,
+				"upstream":             applied.Upstream,
 				"credentials_injected": applied.InjectedCredentialIDs,
 			})
 		}
@@ -465,13 +459,15 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	// percent-encoded reserved characters like %2F survive to the upstream —
 	// some APIs (e.g. GCS object names) treat decoded vs encoded slashes as
 	// distinct path segments.
-	upstreamURL := (&url.URL{
-		Scheme:   upstreamScheme,
-		Host:     upstreamHost,
-		Path:     upstreamPath,
-		RawPath:  upstreamRawPath,
-		RawQuery: r.URL.RawQuery,
-	}).String()
+	if upstreamURL == "" {
+		upstreamURL = (&url.URL{
+			Scheme:   upstreamScheme,
+			Host:     upstreamHost,
+			Path:     upstreamPath,
+			RawPath:  upstreamRawPath,
+			RawQuery: r.URL.RawQuery,
+		}).String()
+	}
 
 	reqBody := transform.RequireBufferedBody(r.Body)
 	// Check Len() before StreamingReader(), which clears the original reader.
@@ -486,9 +482,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	copyHeaders(upstreamReq.Header, r.Header)
 	sanitizeUpstreamHeaders(upstreamReq.Header)
-	if upstreamPreserveHost {
-		upstreamReq.Host = host
-	}
 	// If a transform buffered the request body, set ContentLength so the
 	// upstream receives a Content-Length header instead of chunked encoding.
 	// Otherwise, preserve the original Content-Length from the client.

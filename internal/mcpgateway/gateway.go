@@ -26,16 +26,8 @@ type Config struct {
 type RouteConfig struct {
 	Name        string                 `yaml:"name"`
 	Rules       []hostmatch.RuleConfig `yaml:"rules"`
-	Upstream    UpstreamConfig         `yaml:"upstream"`
+	Upstream    string                 `yaml:"upstream"`
 	Credentials []CredentialConfig     `yaml:"credentials"`
-}
-
-// UpstreamConfig declares where a matched request should be forwarded.
-type UpstreamConfig struct {
-	Scheme       string `yaml:"scheme"`
-	Host         string `yaml:"host"`
-	PathPrefix   string `yaml:"path_prefix"`
-	PreserveHost bool   `yaml:"preserve_host"`
 }
 
 // CredentialConfig injects a secret into a matched upstream request.
@@ -62,7 +54,7 @@ type Gateway struct {
 type Route struct {
 	Name        string
 	rules       []hostmatch.Rule
-	upstream    UpstreamConfig
+	upstream    url.URL
 	credentials []credential
 }
 
@@ -77,11 +69,8 @@ type credential struct {
 // AppliedRoute describes the gateway rewrite applied to a request.
 type AppliedRoute struct {
 	Name                  string
-	UpstreamScheme        string
-	UpstreamHost          string
-	UpstreamPath          string
-	UpstreamRawPath       string
-	PreserveHost          bool
+	Upstream              string
+	RequestURL            string
 	InjectedCredentialIDs []string
 }
 
@@ -139,23 +128,24 @@ func Compile(c Config) (*Gateway, error) {
 	return g, nil
 }
 
-func normalizeUpstream(routeName string, u UpstreamConfig) (UpstreamConfig, error) {
-	if u.Scheme == "" {
-		u.Scheme = "https"
+func normalizeUpstream(routeName, raw string) (url.URL, error) {
+	if raw == "" {
+		return url.URL{}, fmt.Errorf("mcp_gateway.routes[%q].upstream is required", routeName)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return url.URL{}, fmt.Errorf("mcp_gateway.routes[%q].upstream must be a valid URL: %w", routeName, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return UpstreamConfig{}, fmt.Errorf("mcp_gateway.routes[%q].upstream.scheme must be http or https", routeName)
+		return url.URL{}, fmt.Errorf("mcp_gateway.routes[%q].upstream must use http or https", routeName)
 	}
 	if u.Host == "" {
-		return UpstreamConfig{}, fmt.Errorf("mcp_gateway.routes[%q].upstream.host is required", routeName)
+		return url.URL{}, fmt.Errorf("mcp_gateway.routes[%q].upstream must include a host", routeName)
 	}
-	if strings.ContainsAny(u.Host, "/?#") {
-		return UpstreamConfig{}, fmt.Errorf("mcp_gateway.routes[%q].upstream.host must be a host or host:port", routeName)
+	if u.Fragment != "" {
+		return url.URL{}, fmt.Errorf("mcp_gateway.routes[%q].upstream must not include a fragment", routeName)
 	}
-	if u.PathPrefix != "" && !strings.HasPrefix(u.PathPrefix, "/") {
-		return UpstreamConfig{}, fmt.Errorf("mcp_gateway.routes[%q].upstream.path_prefix must start with /", routeName)
-	}
-	return u, nil
+	return *u, nil
 }
 
 func compileCredentials(routeName string, configs []CredentialConfig) ([]credential, error) {
@@ -230,15 +220,9 @@ func (r *Route) Apply(ctx context.Context, req *http.Request) (*AppliedRoute, er
 	if r == nil {
 		return nil, nil
 	}
+	upstream := r.upstream
 	applied := &AppliedRoute{
-		Name:           r.Name,
-		UpstreamScheme: r.upstream.Scheme,
-		UpstreamHost:   r.upstream.Host,
-		UpstreamPath:   rewritePath(r.upstream.PathPrefix, req.URL.Path),
-		PreserveHost:   r.upstream.PreserveHost,
-	}
-	if req.URL.RawPath != "" {
-		applied.UpstreamRawPath = rewritePath(r.upstream.PathPrefix, req.URL.RawPath)
+		Name: r.Name,
 	}
 	for _, cred := range r.credentials {
 		value, err := cred.source.Get(ctx)
@@ -262,17 +246,10 @@ func (r *Route) Apply(ctx context.Context, req *http.Request) (*AppliedRoute, er
 		req.URL.RawQuery = q.Encode()
 		applied.InjectedCredentialIDs = append(applied.InjectedCredentialIDs, cred.sourceName+":query:"+cred.inject.QueryParam)
 	}
+	applied.Upstream = upstream.String()
+	upstream.RawQuery = mergeRawQuery(r.upstream.RawQuery, req.URL.RawQuery)
+	applied.RequestURL = upstream.String()
 	return applied, nil
-}
-
-func rewritePath(prefix, escapedPath string) string {
-	if escapedPath == "" {
-		escapedPath = "/"
-	}
-	if prefix == "" || prefix == "/" {
-		return escapedPath
-	}
-	return strings.TrimRight(prefix, "/") + "/" + strings.TrimLeft(escapedPath, "/")
 }
 
 func formatCredential(tmpl *template.Template, value string) (string, error) {
@@ -289,15 +266,12 @@ func formatCredential(tmpl *template.Template, value string) (string, error) {
 	return b.String(), nil
 }
 
-// UpstreamURL returns an absolute URL string for an applied route, preserving
-// the request's query string.
-func (a *AppliedRoute) UpstreamURL(rawQuery string) string {
-	u := url.URL{
-		Scheme:   a.UpstreamScheme,
-		Host:     a.UpstreamHost,
-		Path:     a.UpstreamPath,
-		RawPath:  a.UpstreamRawPath,
-		RawQuery: rawQuery,
+func mergeRawQuery(base, request string) string {
+	if base == "" {
+		return request
 	}
-	return u.String()
+	if request == "" {
+		return base
+	}
+	return base + "&" + request
 }
