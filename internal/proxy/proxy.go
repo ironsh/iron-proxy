@@ -25,6 +25,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"golang.org/x/net/http2"
 )
 
 // Proxy is the HTTP/HTTPS proxy server. When Mode is TLSModeMITM, the HTTPS
@@ -133,6 +134,9 @@ func New(opts Options) *Proxy {
 			GetCertificate: p.getCertificate,
 		},
 	}
+	// Enable HTTP/2 on the HTTPS listener (adds h2 to the TLS ALPN and serves
+	// negotiated conns through the existing handler); zero config never errors.
+	_ = http2.ConfigureServer(p.httpsServer, &http2.Server{})
 
 	return p
 }
@@ -762,6 +766,8 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
+	// Forward upstream trailers (e.g. gRPC status) after the body.
+	defer writeTrailers(w, resp)
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
 		// If a transform buffered the response body, set Content-Length
 		// from the buffered data. Otherwise preserve the upstream header
@@ -809,8 +815,11 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		Proxy:                 proxyFunc,
-		DialContext:           dialer.DialContext,
+		Proxy:       proxyFunc,
+		DialContext: dialer.DialContext,
+		// A custom DialContext disables net/http's automatic HTTP/2; opt back in
+		// so gRPC upstreams negotiate h2 over the same (dnsguard-controlled) dialer.
+		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -850,6 +859,16 @@ func copyHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		for _, v := range vs {
 			dst.Add(k, v)
+		}
+	}
+}
+
+// writeTrailers forwards upstream response trailers (e.g. gRPC status) to the
+// client after the body, via the TrailerPrefix convention.
+func writeTrailers(w http.ResponseWriter, resp *http.Response) {
+	for k, vs := range resp.Trailer {
+		for _, v := range vs {
+			w.Header().Add(http.TrailerPrefix+k, v)
 		}
 	}
 }

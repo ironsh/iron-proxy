@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/transform"
@@ -494,3 +495,179 @@ func TestIntegration_SOCKS5(t *testing.T) {
 	})
 }
 
+// TestIntegration_CONNECT_HTTP2 verifies a gRPC-style HTTP/2 client can tunnel
+// through the MITM proxy: ALPN negotiates h2 on both the client->proxy and
+// proxy->upstream hops, and upstream trailers (where gRPC carries grpc-status)
+// reach the client. This is the regression test for HTTP/2/gRPC MITM support.
+func TestIntegration_CONNECT_HTTP2(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// HTTP/2 upstream that records its negotiated protocol and sends a trailer
+	// after the body, mirroring how gRPC delivers grpc-status.
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "X-Test-Trailer")
+		w.Header().Set("X-Upstream-Proto", r.Proto)
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "h2 integration response")
+		w.Header().Set("X-Test-Trailer", "trailer-value")
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+	upstreamAddr := upstream.Listener.Addr().String()
+
+	const allowedHost = "allowed.example.com"
+	p, tunnelAddr, caPool := startTunnelIntegrationProxy(t, []string{allowedHost}, logger)
+
+	// Route all dials to the h2 upstream. ForceAttemptHTTP2 mirrors the
+	// production buildTransport change so the proxy negotiates h2 upstream.
+	p.transport = &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		ForceAttemptHTTP2: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
+		},
+	}
+
+	// HTTP/2 client that CONNECT-tunnels through the proxy and trusts the MITM CA.
+	client := &http.Client{
+		Transport: &http2.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    caPool,
+				ServerName: allowedHost,
+				NextProtos: []string{"h2"},
+			},
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+				if err != nil {
+					return nil, err
+				}
+				if _, err := fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", allowedHost, allowedHost); err != nil {
+					_ = conn.Close()
+					return nil, err
+				}
+				resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+				if err != nil {
+					_ = conn.Close()
+					return nil, err
+				}
+				if resp.StatusCode != http.StatusOK {
+					_ = conn.Close()
+					return nil, fmt.Errorf("CONNECT failed: %d", resp.StatusCode)
+				}
+				tlsConn := tls.Client(conn, cfg)
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					_ = conn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get(fmt.Sprintf("https://%s/test", allowedHost))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, 2, resp.ProtoMajor, "client<->proxy hop must be HTTP/2")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "h2 integration response", string(body))
+	require.Equal(t, "HTTP/2.0", resp.Header.Get("X-Upstream-Proto"), "proxy<->upstream hop must be HTTP/2")
+	// The trailer must survive proxying — this is where gRPC carries grpc-status.
+	require.Equal(t, "trailer-value", resp.Trailer.Get("X-Test-Trailer"))
+}
+
+// startDirectHTTPSProxy starts a proxy serving its direct HTTPS (MITM) listener
+// (not the CONNECT tunnel) and routes all upstream dials to upstreamAddr.
+// Returns the proxy, the HTTPS listener address, and the CA pool to trust.
+func startDirectHTTPSProxy(t *testing.T, allowedHosts []string, upstreamAddr string, logger *slog.Logger) (*Proxy, string, *x509.CertPool) {
+	t.Helper()
+
+	ca := newIntegrationCA(t)
+	al, err := allowlist.New(allowedHosts, nil)
+	require.NoError(t, err)
+	pipeline := transform.NewPipeline([]transform.Transformer{al}, transform.BodyLimits{}, logger)
+	holder := transform.NewPipelineHolder(pipeline)
+
+	p := New(Options{
+		HTTPAddr:  "127.0.0.1:0",
+		HTTPSAddr: "127.0.0.1:0",
+		CertCache: ca.certCache,
+		Pipeline:  holder,
+		Logger:    logger,
+	})
+
+	httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tlsLn := tls.NewListener(httpsLn, p.httpsServer.TLSConfig)
+	httpsAddr := httpsLn.Addr().String()
+	go func() { _ = p.httpsServer.Serve(tlsLn) }()
+	t.Cleanup(func() { _ = p.httpsServer.Close() })
+
+	p.transport = &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		ForceAttemptHTTP2: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
+		},
+	}
+	return p, httpsAddr, ca.caPool
+}
+
+// trailerUpstream returns an HTTP/2 test server that sends a body followed by a
+// trailer, mirroring how gRPC delivers grpc-status.
+func trailerUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "X-Test-Trailer")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "trailer body")
+		w.Header().Set("X-Test-Trailer", "trailer-value")
+	}))
+	s.EnableHTTP2 = true
+	s.StartTLS()
+	return s
+}
+
+// TestIntegration_DirectHTTPS_HTTP2 verifies the direct HTTPS MITM listener
+// (not the CONNECT tunnel) negotiates h2 and forwards response trailers.
+func TestIntegration_DirectHTTPS_HTTP2(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	upstream := trailerUpstream(t)
+	defer upstream.Close()
+
+	const fakeHost = "direct-h2.example.com"
+	_, httpsAddr, caPool := startDirectHTTPSProxy(t, []string{fakeHost}, upstream.Listener.Addr().String(), logger)
+
+	client := &http.Client{
+		Transport: &http2.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: caPool, ServerName: fakeHost, NextProtos: []string{"h2"}},
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				return (&tls.Dialer{Config: cfg}).DialContext(ctx, "tcp", httpsAddr)
+			},
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get("https://" + fakeHost + "/test")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, 2, resp.ProtoMajor, "direct HTTPS listener must serve HTTP/2")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "trailer body", string(body))
+	require.Equal(t, "trailer-value", resp.Trailer.Get("X-Test-Trailer"))
+}
