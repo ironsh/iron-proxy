@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,9 +20,58 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
+
+func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testing.T) {
+	const body = "same request body"
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotBody, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(gotBody))
+		if r.Header.Get("X-Retry-Token") == "retry-token" {
+			_, err := w.Write([]byte("paid"))
+			require.NoError(t, err)
+			return
+		}
+		w.Header().Set("X-Retry-Challenge", "challenge")
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer upstream.Close()
+
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"retry":true,"headers":{"X-Retry-Token":"retry-token"}}`))
+		require.NoError(t, err)
+	}))
+	defer authorizer.Close()
+	handler, err := responseretry.New(authorizer.URL, "proxy-token", []int{http.StatusConflict}, authorizer.Client())
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
+		MaxRequestBodyBytes:  1 << 20,
+		MaxResponseBodyBytes: 1 << 20,
+	}, logger)
+	p := New(Options{
+		Pipeline:   transform.NewPipelineHolder(pipeline),
+		Logger:     logger,
+		ResponseRetryHandler: handler,
+	})
+	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "paid", recorder.Body.String())
+	require.Equal(t, 2, calls)
+}
 
 // integrationCA bundles the test CA certificate, cert cache, and trust pool.
 type integrationCA struct {

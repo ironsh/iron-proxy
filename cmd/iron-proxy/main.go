@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	iotel "github.com/ironsh/iron-proxy/internal/otel"
 	"github.com/ironsh/iron-proxy/internal/postgres"
 	"github.com/ironsh/iron-proxy/internal/proxy"
+	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/version"
 
@@ -211,6 +215,28 @@ func main() {
 		)
 	}
 
+	var responseRetryHandler *responseretry.Handler
+	if handlerURL := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_URL"); handlerURL != "" {
+		handlerToken := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_TOKEN")
+		if handlerToken == "" {
+			handlerToken = proxyToken
+		}
+		statuses, parseErr := parseResponseRetryStatuses(os.Getenv("IRON_RESPONSE_RETRY_STATUSES"))
+		if parseErr != nil {
+			logger.Error("parsing response retry statuses", slog.String("error", parseErr.Error()))
+			os.Exit(1)
+		}
+		responseRetryHandler, err = responseretry.New(handlerURL, handlerToken, statuses, &http.Client{
+			Transport: &http.Transport{},
+			Timeout:   time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
+		})
+		if err != nil {
+			logger.Error("initializing response retry handler", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.Info("response retry handler enabled", slog.Any("statuses", statuses))
+	}
+
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
@@ -223,6 +249,7 @@ func main() {
 		Guard:                         guard,
 		MCPPolicy:                     mcpHolder,
 		MCPGateway:                    gatewayHolder,
+		ResponseRetryHandler:          responseRetryHandler,
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
@@ -714,4 +741,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseResponseRetryStatuses(value string) ([]int, error) {
+	var statuses []int
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		status, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid status %q", part)
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
 }

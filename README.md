@@ -280,6 +280,21 @@ through the proxy. Exceptions:
   `*.internal.corp`). Traffic to these hosts bypasses the proxy entirely.
 - **`records`:** static A or CNAME records. Highest precedence.
 
+### Response retry handler
+
+Set `IRON_RESPONSE_RETRY_HANDLER_URL` and a comma-separated
+`IRON_RESPONSE_RETRY_STATUSES` list to let a trusted external service decide
+whether selected upstream responses should be retried. The handler receives
+request metadata, the response status, and response headers, then either
+declines or returns request headers for one exact replay. Response bodies are
+never sent to the handler, destinations cannot change, and connection/framing
+headers are rejected.
+
+The request uses the proxy bearer token by default. Set
+`IRON_RESPONSE_RETRY_HANDLER_TOKEN` only when the handler uses a separate
+token. Replay requires a positive `proxy.max_request_body_bytes` limit. The
+handler URL must use HTTPS; loopback HTTP is accepted for local tests.
+
 ### Allowlist
 
 Default-deny. Requests must match at least one domain glob or CIDR to proceed.

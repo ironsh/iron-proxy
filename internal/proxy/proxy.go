@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
+	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"golang.org/x/net/http2"
 )
@@ -48,6 +50,7 @@ type Proxy struct {
 	guard          *dnsguard.Guard
 	mcpPolicy      *mcp.PolicyHolder
 	mcpGateway     *mcpgateway.Holder
+	responseRetryHandler *responseretry.Handler
 	logger         *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
@@ -76,6 +79,9 @@ type Options struct {
 	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
 	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
 	MCPGateway *mcpgateway.Holder
+	// ResponseRetryHandler may add headers and replay the exact transformed
+	// request once after selected upstream response statuses.
+	ResponseRetryHandler *responseretry.Handler
 	Logger     *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
@@ -117,6 +123,7 @@ func New(opts Options) *Proxy {
 		guard:          guard,
 		mcpPolicy:      opts.MCPPolicy,
 		mcpGateway:     opts.MCPGateway,
+		responseRetryHandler: opts.ResponseRetryHandler,
 		logger:         opts.Logger,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
@@ -495,6 +502,27 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		upstreamReq.ContentLength = r.ContentLength
 	}
 
+	var replayBody []byte
+	if p.responseRetryHandler != nil {
+		if bodyLimits.MaxRequestBodyBytes <= 0 {
+			result.Action = transform.ActionContinue
+			result.StatusCode = http.StatusBadGateway
+			result.Err = fmt.Errorf("response retry requires a positive request body limit")
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		replayBody, err = io.ReadAll(io.LimitReader(upstreamReq.Body, bodyLimits.MaxRequestBodyBytes+1))
+		if err != nil || int64(len(replayBody)) > bodyLimits.MaxRequestBodyBytes {
+			result.Action = transform.ActionContinue
+			result.StatusCode = http.StatusRequestEntityTooLarge
+			result.Err = fmt.Errorf("request body exceeds response retry limit")
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		upstreamReq.Body = io.NopCloser(bytes.NewReader(replayBody))
+		upstreamReq.ContentLength = int64(len(replayBody))
+	}
+
 	resp, err := p.doUpstream(upstreamReq)
 	if err != nil {
 		if markIfClientCancel(r, err, result) {
@@ -507,6 +535,42 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 	defer resp.Body.Close()
+
+	if p.responseRetryHandler != nil {
+		retryHeaders, replay, retryErr := p.responseRetryHandler.Decide(r.Context(), upstreamReq, resp)
+		if retryErr != nil {
+			result.Action = transform.ActionContinue
+			result.StatusCode = http.StatusBadGateway
+			result.Err = retryErr
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		if replay {
+			_ = resp.Body.Close() // The 402 body is never returned after authorization.
+			replayReq := upstreamReq.Clone(r.Context())
+			replayReq.Body = io.NopCloser(bytes.NewReader(replayBody))
+			replayReq.ContentLength = int64(len(replayBody))
+			replayReq.Header = upstreamReq.Header.Clone()
+			for name, values := range retryHeaders {
+				replayReq.Header.Del(name)
+				for _, value := range values {
+					replayReq.Header.Add(name, value)
+				}
+			}
+			resp, err = p.doUpstream(replayReq)
+			if err != nil {
+				if markIfClientCancel(r, err, result) {
+					return
+				}
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+		}
+	}
 
 	// Wrap response body for lazy buffering by transforms.
 	resp.Body = transform.NewBufferedBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
