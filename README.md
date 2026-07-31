@@ -300,7 +300,8 @@ if challenged, their original response is returned. Handler failures also
 preserve the original response. Handler URLs must use HTTPS unless loopback or
 `IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP=true` is explicitly configured for a
 trusted internal network. Redirects are rejected, and the response retry token
-must be configured independently from the control-plane token.
+must be configured independently from the control-plane token. WebSocket,
+gRPC, and unknown-length streaming requests bypass response retry handling.
 
 ### Allowlist
 

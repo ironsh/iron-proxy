@@ -1016,6 +1016,38 @@ func TestPrepareReplayBodyBoundaries(t *testing.T) {
 	}
 }
 
+func TestResponseRetryEligible(t *testing.T) {
+	cases := []struct {
+		name          string
+		contentType   string
+		contentLength int64
+		websocket     bool
+		want          bool
+	}{
+		{name: "ordinary GET", contentLength: 0, want: true},
+		{name: "ordinary known body", contentType: "application/json", contentLength: 4, want: true},
+		{name: "unknown length", contentType: "application/json", contentLength: -1, want: false},
+		{name: "gRPC", contentType: "application/grpc", contentLength: 4, want: false},
+		{name: "gRPC proto", contentType: "application/grpc+proto", contentLength: 4, want: false},
+		{name: "gRPC web parameters", contentType: "Application/GRPC-Web+Proto; charset=utf-8", contentLength: 4, want: false},
+		{name: "WebSocket", contentLength: 0, websocket: true, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://service.example/", strings.NewReader("body"))
+			req.ContentLength = tc.contentLength
+			req.Header.Set("Content-Type", tc.contentType)
+			if tc.websocket {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+			}
+
+			require.Equal(t, tc.want, responseRetryEligible(req))
+		})
+	}
+}
+
 func TestHTTPProxy_FailsClosedUntilReady(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

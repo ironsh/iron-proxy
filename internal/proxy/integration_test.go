@@ -150,6 +150,59 @@ func TestIntegration_ResponseHandlerReturnsOriginalChallengeForOversizedRequest(
 	require.Equal(t, 1, authorizeCalls)
 }
 
+func TestIntegration_ResponseHandlerBypassesStreamingRequests(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		unknownSize bool
+	}{
+		{name: "gRPC", contentType: "application/grpc+proto"},
+		{name: "unknown length", contentType: "application/octet-stream", unknownSize: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const body = "streamed request body"
+			upstreamCalls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamCalls++
+				gotBody, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.Equal(t, body, string(gotBody))
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, err = io.WriteString(w, "original challenge")
+				require.NoError(t, err)
+			}))
+			defer upstream.Close()
+
+			authorizeCalls := 0
+			authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				authorizeCalls++
+				http.Error(w, "unexpected", http.StatusInternalServerError)
+			}))
+			defer authorizer.Close()
+			p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 1<<20)
+			var requestBody io.Reader = strings.NewReader(body)
+			if tc.unknownSize {
+				requestBody = struct{ io.Reader }{Reader: requestBody}
+			}
+			req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", requestBody)
+			req.Header.Set("Content-Type", tc.contentType)
+			if tc.unknownSize {
+				require.Equal(t, int64(-1), req.ContentLength)
+			}
+			recorder := httptest.NewRecorder()
+
+			p.handleDirectHTTP(recorder, req)
+
+			require.Equal(t, http.StatusPaymentRequired, recorder.Code)
+			require.Equal(t, "original challenge", recorder.Body.String())
+			require.Equal(t, 1, upstreamCalls)
+			require.Zero(t, authorizeCalls)
+		})
+	}
+}
+
 func TestIntegration_ResponseHandlerFailureReturnsOriginalChallenge(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)

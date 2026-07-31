@@ -504,7 +504,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 
 	var replayBody []byte
 	replayable := false
-	if p.responseRetryHandler != nil {
+	responseRetryEnabled := p.responseRetryHandler != nil && responseRetryEligible(upstreamReq)
+	if responseRetryEnabled {
 		upstreamReq.Body, replayBody, replayable, err = prepareReplayBody(
 			upstreamReq.Body,
 			upstreamReq.ContentLength,
@@ -535,7 +536,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	defer resp.Body.Close()
 
-	if p.responseRetryHandler != nil {
+	if responseRetryEnabled {
 		chargeStarted := time.Now()
 		decision, replay, retryErr := p.responseRetryHandler.Decide(r.Context(), upstreamReq, resp, replayable)
 		if retryErr != nil {
@@ -662,6 +663,14 @@ func prepareReplayBody(body io.ReadCloser, contentLength, limit int64) (io.ReadC
 		return nil, nil, false, err
 	}
 	return io.NopCloser(bytes.NewReader(replayBody)), replayBody, true, nil
+}
+
+func responseRetryEligible(req *http.Request) bool {
+	if req.ContentLength < 0 || isWebSocketUpgrade(req) {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(req.Header.Get("Content-Type"), ";", 2)[0]))
+	return !strings.HasPrefix(contentType, "application/grpc")
 }
 
 func (p *Proxy) completeResponseRetry(ctx context.Context, attemptID string, resp *http.Response, transportError, traceparent string, replayDuration, chargeDuration time.Duration) {
