@@ -1019,29 +1019,44 @@ func TestPrepareReplayBodyBoundaries(t *testing.T) {
 func TestResponseRetryEligible(t *testing.T) {
 	cases := []struct {
 		name          string
+		method        string
 		contentType   string
 		contentLength int64
-		websocket     bool
+		connection    string
+		upgrade       string
 		want          bool
 	}{
-		{name: "ordinary GET", contentLength: 0, want: true},
-		{name: "ordinary known body", contentType: "application/json", contentLength: 4, want: true},
-		{name: "unknown length", contentType: "application/json", contentLength: -1, want: false},
-		{name: "gRPC", contentType: "application/grpc", contentLength: 4, want: false},
-		{name: "gRPC proto", contentType: "application/grpc+proto", contentLength: 4, want: false},
-		{name: "gRPC web parameters", contentType: "Application/GRPC-Web+Proto; charset=utf-8", contentLength: 4, want: false},
-		{name: "WebSocket", contentLength: 0, websocket: true, want: false},
+		{name: "ordinary GET", method: http.MethodGet, contentLength: 0, want: true},
+		{name: "ordinary HEAD", method: http.MethodHead, contentLength: 0, want: true},
+		{name: "ordinary known body", method: http.MethodPost, contentType: "application/json", contentLength: 4, want: true},
+		{name: "known body with content type parameters", method: http.MethodPost, contentType: "application/json; charset=utf-8", contentLength: 4, want: true},
+		{name: "known body without content type", method: http.MethodPost, contentLength: 4, want: true},
+		{name: "unknown length with content type", method: http.MethodPost, contentType: "application/json", contentLength: -1, want: false},
+		{name: "unknown length without content type", method: http.MethodPost, contentLength: -1, want: false},
+		{name: "gRPC", method: http.MethodPost, contentType: "application/grpc", contentLength: 4, want: false},
+		{name: "gRPC proto", method: http.MethodPost, contentType: "application/grpc+proto", contentLength: 4, want: false},
+		{name: "gRPC JSON", method: http.MethodPost, contentType: "application/grpc+json", contentLength: 4, want: false},
+		{name: "gRPC web", method: http.MethodPost, contentType: "application/grpc-web", contentLength: 4, want: false},
+		{name: "gRPC web text", method: http.MethodPost, contentType: "application/grpc-web-text", contentLength: 4, want: false},
+		{name: "gRPC web mixed case and parameters", method: http.MethodPost, contentType: " Application/GRPC-Web+Proto ; charset=utf-8", contentLength: 4, want: false},
+		{name: "gRPC prefix is conservative", method: http.MethodPost, contentType: "application/grpcish", contentLength: 4, want: false},
+		{name: "WebSocket", method: http.MethodGet, contentLength: 0, connection: "Upgrade", upgrade: "websocket", want: false},
+		{name: "WebSocket mixed case and connection tokens", method: http.MethodGet, contentLength: 0, connection: "keep-alive, UpGrAdE", upgrade: "WebSocket", want: false},
+		{name: "upgrade without connection header", method: http.MethodGet, contentLength: 0, upgrade: "websocket", want: true},
+		{name: "connection upgrade without protocol", method: http.MethodGet, contentLength: 0, connection: "Upgrade", want: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "https://service.example/", strings.NewReader("body"))
+			var body io.Reader
+			if tc.contentLength != 0 {
+				body = strings.NewReader("body")
+			}
+			req := httptest.NewRequest(tc.method, "https://service.example/", body)
 			req.ContentLength = tc.contentLength
 			req.Header.Set("Content-Type", tc.contentType)
-			if tc.websocket {
-				req.Header.Set("Connection", "Upgrade")
-				req.Header.Set("Upgrade", "websocket")
-			}
+			req.Header.Set("Connection", tc.connection)
+			req.Header.Set("Upgrade", tc.upgrade)
 
 			require.Equal(t, tc.want, responseRetryEligible(req))
 		})
