@@ -10,19 +10,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 var forbiddenRetryHeaders = map[string]struct{}{
 	"Connection":          {},
 	"Content-Length":      {},
 	"Host":                {},
+	"Keep-Alive":          {},
 	"Proxy-Authorization": {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Connection":    {},
+	"Te":                  {},
+	"Trailer":             {},
 	"Transfer-Encoding":   {},
+	"Upgrade":             {},
 }
+
+const defaultClientTimeout = 10 * time.Second
 
 // Handler asks a trusted service whether a bounded upstream response should
 // be retried and reports the result of the one permitted replay.
@@ -32,7 +43,20 @@ type Handler struct {
 	token             string
 	sandboxID         string
 	statuses          map[int]struct{}
+	completionHeaders map[string]struct{}
 	client            *http.Client
+}
+
+// Options configures a response retry handler.
+type Options struct {
+	AuthorizeEndpoint string
+	CompleteEndpoint  string
+	Token             string
+	SandboxID         string
+	Statuses          []int
+	AllowHTTP         bool
+	CompletionHeaders []string
+	Client            *http.Client
 }
 
 // DecisionRequest describes the completed request and response. Request and
@@ -57,7 +81,7 @@ type DecisionResponse struct {
 }
 
 // CompletionRequest reports the replay result without any request or response
-// body and includes only the payment receipt response header.
+// body and includes only explicitly selected response headers.
 type CompletionRequest struct {
 	AttemptID        string              `json:"attempt_id"`
 	ReplayStatus     *int                `json:"replay_status"`
@@ -76,23 +100,23 @@ type Decision struct {
 }
 
 // New creates a Handler for the configured response status codes.
-func New(authorizeEndpoint, completeEndpoint, token, sandboxID string, statuses []int, allowHTTP bool, client *http.Client) (*Handler, error) {
-	authorizeURL, err := parseEndpoint(authorizeEndpoint, allowHTTP)
+func New(opts Options) (*Handler, error) {
+	authorizeURL, err := parseEndpoint(opts.AuthorizeEndpoint, opts.AllowHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("authorize endpoint: %w", err)
 	}
-	completeURL, err := parseEndpoint(completeEndpoint, allowHTTP)
+	completeURL, err := parseEndpoint(opts.CompleteEndpoint, opts.AllowHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("complete endpoint: %w", err)
 	}
-	if token == "" {
+	if opts.Token == "" {
 		return nil, fmt.Errorf("response retry handler token is required")
 	}
-	if sandboxID == "" {
+	if opts.SandboxID == "" {
 		return nil, fmt.Errorf("response retry handler sandbox identity is required")
 	}
-	statusSet := make(map[int]struct{}, len(statuses))
-	for _, status := range statuses {
+	statusSet := make(map[int]struct{}, len(opts.Statuses))
+	for _, status := range opts.Statuses {
 		if status < 100 || status > 599 {
 			return nil, fmt.Errorf("invalid response retry status %s", strconv.Itoa(status))
 		}
@@ -101,16 +125,21 @@ func New(authorizeEndpoint, completeEndpoint, token, sandboxID string, statuses 
 	if len(statusSet) == 0 {
 		return nil, fmt.Errorf("at least one response retry status is required")
 	}
-	if client == nil {
-		client = http.DefaultClient
+	completionHeaders := make(map[string]struct{}, len(opts.CompletionHeaders))
+	for _, name := range opts.CompletionHeaders {
+		if !httpguts.ValidHeaderFieldName(name) {
+			return nil, fmt.Errorf("invalid completion response header %q", name)
+		}
+		completionHeaders[http.CanonicalHeaderKey(name)] = struct{}{}
 	}
 	return &Handler{
 		authorizeEndpoint: authorizeURL,
 		completeEndpoint:  completeURL,
-		token:             token,
-		sandboxID:         sandboxID,
+		token:             opts.Token,
+		sandboxID:         opts.SandboxID,
 		statuses:          statusSet,
-		client:            client,
+		completionHeaders: completionHeaders,
+		client:            hardenedClient(opts.Client),
 	}, nil
 }
 
@@ -168,12 +197,18 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 	}
 	headers := make(http.Header, len(decision.Headers))
 	for name, value := range decision.Headers {
-		canonical := http.CanonicalHeaderKey(name)
-		if canonical == "" {
+		if !httpguts.ValidHeaderFieldName(name) {
 			return nil, false, fmt.Errorf("response retry handler returned an invalid header name")
 		}
+		if !httpguts.ValidHeaderFieldValue(value) {
+			return nil, false, fmt.Errorf("response retry handler returned an invalid value for header %s", name)
+		}
+		canonical := http.CanonicalHeaderKey(name)
 		if _, forbidden := forbiddenRetryHeaders[canonical]; forbidden {
 			return nil, false, fmt.Errorf("response retry handler returned forbidden header %s", canonical)
+		}
+		if _, duplicate := headers[canonical]; duplicate {
+			return nil, false, fmt.Errorf("response retry handler returned duplicate header %s", canonical)
 		}
 		headers.Set(canonical, value)
 	}
@@ -191,7 +226,7 @@ func (h *Handler) Complete(ctx context.Context, attemptID string, resp *http.Res
 	if resp != nil {
 		value := resp.StatusCode
 		status = &value
-		headers = receiptHeaders(resp.Header)
+		headers = selectedHeaders(resp.Header, h.completionHeaders)
 	}
 	payload, err := json.Marshal(CompletionRequest{
 		AttemptID:        attemptID,
@@ -205,20 +240,34 @@ func (h *Handler) Complete(ctx context.Context, attemptID string, resp *http.Res
 	if err != nil {
 		return fmt.Errorf("encode response retry completion request: %w", err)
 	}
-	req, err := h.newRequest(ctx, h.completeEndpoint, payload)
-	if err != nil {
-		return fmt.Errorf("create response retry completion request: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := h.newRequest(ctx, h.completeEndpoint, payload)
+		if err != nil {
+			return fmt.Errorf("create response retry completion request: %w", err)
+		}
+		completionResp, err := h.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request response retry completion: %w", err)
+			continue
+		}
+		_, copyErr := io.Copy(io.Discard, io.LimitReader(completionResp.Body, 64<<10))
+		closeErr := completionResp.Body.Close()
+		if copyErr != nil {
+			return fmt.Errorf("read response retry completion: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close response retry completion: %w", closeErr)
+		}
+		if completionResp.StatusCode >= 200 && completionResp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("response retry completion returned status %d", completionResp.StatusCode)
+		if completionResp.StatusCode < 500 {
+			break
+		}
 	}
-	completionResp, err := h.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("request response retry completion: %w", err)
-	}
-	defer completionResp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(completionResp.Body, 64<<10))
-	if completionResp.StatusCode < 200 || completionResp.StatusCode >= 300 {
-		return fmt.Errorf("response retry completion returned status %d", completionResp.StatusCode)
-	}
-	return nil
+	return lastErr
 }
 
 func (h *Handler) newRequest(ctx context.Context, endpoint *url.URL, payload []byte) (*http.Request, error) {
@@ -242,10 +291,24 @@ func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
 	return u, nil
 }
 
-func receiptHeaders(headers http.Header) http.Header {
+func hardenedClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: defaultClientTimeout}
+	}
+	result := *client
+	if result.Timeout <= 0 {
+		result.Timeout = defaultClientTimeout
+	}
+	result.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &result
+}
+
+func selectedHeaders(headers http.Header, allowed map[string]struct{}) http.Header {
 	result := make(http.Header)
-	for name, values := range headers {
-		if strings.EqualFold(name, "Payment-Receipt") {
+	for name := range allowed {
+		if values := headers.Values(name); len(values) > 0 {
 			result[name] = append([]string(nil), values...)
 		}
 	}
@@ -253,7 +316,11 @@ func receiptHeaders(headers http.Header) http.Header {
 }
 
 func isLoopback(host string) bool {
-	return host == "localhost" || strings.HasPrefix(host, "127.") || host == "::1"
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.Unmap().IsLoopback()
 }
 
 func validTraceparent(value string) bool {

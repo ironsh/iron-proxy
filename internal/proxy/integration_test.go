@@ -26,15 +26,47 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
 
+func newResponseRetryTestProxy(
+	t *testing.T,
+	authorizer *httptest.Server,
+	status int,
+	transforms []transform.Transformer,
+	maxRequestBodyBytes int64,
+) *Proxy {
+	t.Helper()
+	handler, err := responseretry.New(responseretry.Options{
+		AuthorizeEndpoint: authorizer.URL + "/authorize",
+		CompleteEndpoint:  authorizer.URL + "/complete",
+		Token:             "proxy-token",
+		SandboxID:         "sandbox-1",
+		Statuses:          []int{status},
+		CompletionHeaders: []string{"Payment-Receipt"},
+		Client:            authorizer.Client(),
+	})
+	require.NoError(t, err)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{
+		MaxRequestBodyBytes:  maxRequestBodyBytes,
+		MaxResponseBodyBytes: 1 << 20,
+	}, logger)
+	return New(Options{
+		Pipeline:             transform.NewPipelineHolder(pipeline),
+		Logger:               logger,
+		ResponseRetryHandler: handler,
+	})
+}
+
 func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testing.T) {
-	const body = "same request body"
+	const originalBody = "original request body"
+	const transformedBody = "transformed request body"
 	const chargeTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		gotBody, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		require.Equal(t, body, string(gotBody))
+		require.Equal(t, transformedBody, string(gotBody))
+		require.Equal(t, "transformed", r.Header.Get("X-Transformed"))
 		if r.Header.Get("X-Retry-Token") == "retry-token" {
 			require.Equal(t, chargeTraceparent, r.Header.Get("Traceparent"))
 			_, err := w.Write([]byte("paid"))
@@ -62,28 +94,17 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 		require.NoError(t, err)
 	}))
 	defer authorizer.Close()
-	handler, err := responseretry.New(
-		authorizer.URL+"/authorize",
-		authorizer.URL+"/complete",
-		"proxy-token",
-		"sandbox-1",
-		[]int{http.StatusConflict},
-		false,
-		authorizer.Client(),
+	p := newResponseRetryTestProxy(
+		t,
+		authorizer,
+		http.StatusConflict,
+		[]transform.Transformer{&replacerTransform{
+			reqBody:    []byte(transformedBody),
+			reqHeaders: http.Header{"X-Transformed": {"transformed"}},
+		}},
+		1<<20,
 	)
-	require.NoError(t, err)
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
-		MaxRequestBodyBytes:  1 << 20,
-		MaxResponseBodyBytes: 1 << 20,
-	}, logger)
-	p := New(Options{
-		Pipeline:             transform.NewPipelineHolder(pipeline),
-		Logger:               logger,
-		ResponseRetryHandler: handler,
-	})
-	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(originalBody))
 	recorder := httptest.NewRecorder()
 
 	p.handleDirectHTTP(recorder, req)
@@ -117,27 +138,7 @@ func TestIntegration_ResponseHandlerReturnsOriginalChallengeForOversizedRequest(
 		_, _ = w.Write([]byte(`{"retry":false,"headers":{}}`))
 	}))
 	defer authorizer.Close()
-	handler, err := responseretry.New(
-		authorizer.URL,
-		authorizer.URL,
-		"proxy-token",
-		"sandbox-1",
-		[]int{http.StatusPaymentRequired},
-		false,
-		authorizer.Client(),
-	)
-	require.NoError(t, err)
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
-		MaxRequestBodyBytes:  8,
-		MaxResponseBodyBytes: 1 << 20,
-	}, logger)
-	p := New(Options{
-		Pipeline:             transform.NewPipelineHolder(pipeline),
-		Logger:               logger,
-		ResponseRetryHandler: handler,
-	})
+	p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 8)
 	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(body))
 	recorder := httptest.NewRecorder()
 
@@ -159,27 +160,7 @@ func TestIntegration_ResponseHandlerFailureReturnsOriginalChallenge(t *testing.T
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer authorizer.Close()
-	handler, err := responseretry.New(
-		authorizer.URL,
-		authorizer.URL,
-		"proxy-token",
-		"sandbox-1",
-		[]int{http.StatusPaymentRequired},
-		false,
-		authorizer.Client(),
-	)
-	require.NoError(t, err)
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
-		MaxRequestBodyBytes:  1 << 20,
-		MaxResponseBodyBytes: 1 << 20,
-	}, logger)
-	p := New(Options{
-		Pipeline:             transform.NewPipelineHolder(pipeline),
-		Logger:               logger,
-		ResponseRetryHandler: handler,
-	})
+	p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 1<<20)
 	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/paid", nil)
 	recorder := httptest.NewRecorder()
 
@@ -187,6 +168,121 @@ func TestIntegration_ResponseHandlerFailureReturnsOriginalChallenge(t *testing.T
 
 	require.Equal(t, http.StatusPaymentRequired, recorder.Code)
 	require.Equal(t, "original challenge", recorder.Body.String())
+}
+
+func TestIntegration_ResponseHandlerNeverRetriesAReplay(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, err := fmt.Fprintf(w, "challenge %d", upstreamCalls)
+		require.NoError(t, err)
+	}))
+	defer upstream.Close()
+
+	authorizeCalls := 0
+	completionCalls := 0
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/authorize":
+			authorizeCalls++
+			_, err := io.WriteString(w, `{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","headers":{"X-Retry-Token":"retry-token"}}`)
+			require.NoError(t, err)
+		case "/complete":
+			completionCalls++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer authorizer.Close()
+	p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 1<<20)
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/paid", nil)
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusPaymentRequired, recorder.Code)
+	require.Equal(t, "challenge 2", recorder.Body.String())
+	require.Equal(t, 2, upstreamCalls)
+	require.Equal(t, 1, authorizeCalls)
+	require.Equal(t, 1, completionCalls)
+}
+
+func TestIntegration_ResponseHandlerReportsReplayTransportFailure(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		if upstreamCalls == 1 {
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	}))
+	defer upstream.Close()
+
+	completionCalls := 0
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/complete" {
+			completionCalls++
+			var payload responseretry.CompletionRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+			require.Nil(t, payload.ReplayStatus)
+			require.Equal(t, "upstream_transport_error", payload.TransportError)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, err := io.WriteString(w, `{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","headers":{"X-Retry-Token":"retry-token"}}`)
+		require.NoError(t, err)
+	}))
+	defer authorizer.Close()
+	p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 1<<20)
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/paid", nil)
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusBadGateway, recorder.Code)
+	require.Equal(t, 2, upstreamCalls)
+	require.Equal(t, 1, completionCalls)
+}
+
+func TestIntegration_ResponseHandlerCompletionFailureDoesNotHideReplay(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		if upstreamCalls == 1 {
+			w.WriteHeader(http.StatusPaymentRequired)
+			return
+		}
+		_, err := io.WriteString(w, "paid")
+		require.NoError(t, err)
+	}))
+	defer upstream.Close()
+
+	completionCalls := 0
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/complete" {
+			completionCalls++
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, err := io.WriteString(w, `{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","headers":{"X-Retry-Token":"retry-token"}}`)
+		require.NoError(t, err)
+	}))
+	defer authorizer.Close()
+	p := newResponseRetryTestProxy(t, authorizer, http.StatusPaymentRequired, nil, 1<<20)
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/paid", nil)
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "paid", recorder.Body.String())
+	require.Equal(t, 2, upstreamCalls)
+	require.Equal(t, 2, completionCalls)
 }
 
 // integrationCA bundles the test CA certificate, cert cache, and trust pool.

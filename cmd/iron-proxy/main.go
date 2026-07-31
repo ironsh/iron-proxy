@@ -215,37 +215,16 @@ func main() {
 		)
 	}
 
-	var responseRetryHandler *responseretry.Handler
-	if handlerURL := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_URL"); handlerURL != "" {
-		completeURL := os.Getenv("IRON_RESPONSE_RETRY_COMPLETE_URL")
-		sandboxID := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID")
-		handlerToken := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_TOKEN")
-		if handlerToken == "" {
-			handlerToken = proxyToken
-		}
-		allowHTTPValue := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP")
-		if allowHTTPValue == "" {
-			allowHTTPValue = "false"
-		}
-		allowHTTP, parseErr := strconv.ParseBool(allowHTTPValue)
-		if parseErr != nil {
-			logger.Error("parsing response retry HTTP allowance", slog.String("error", parseErr.Error()))
-			os.Exit(1)
-		}
-		statuses, parseErr := parseResponseRetryStatuses(os.Getenv("IRON_RESPONSE_RETRY_STATUSES"))
-		if parseErr != nil {
-			logger.Error("parsing response retry statuses", slog.String("error", parseErr.Error()))
-			os.Exit(1)
-		}
-		responseRetryHandler, err = responseretry.New(handlerURL, completeURL, handlerToken, sandboxID, statuses, allowHTTP, &http.Client{
-			Transport: &http.Transport{},
-			Timeout:   time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
-		})
-		if err != nil {
-			logger.Error("initializing response retry handler", slog.String("error", err.Error()))
-			os.Exit(1)
-		}
-		logger.Info("response retry handler enabled", slog.Any("statuses", statuses))
+	responseRetryHandler, responseRetryStatuses, err := responseRetryHandlerFromEnv(
+		os.Getenv,
+		time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
+	)
+	if err != nil {
+		logger.Error("initializing response retry handler", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if responseRetryHandler != nil {
+		logger.Info("response retry handler enabled", slog.Any("statuses", responseRetryStatuses))
 	}
 
 	// Initialize proxy.
@@ -756,11 +735,7 @@ func envOrDefault(key, def string) string {
 
 func parseResponseRetryStatuses(value string) ([]int, error) {
 	var statuses []int
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
+	for _, part := range splitCommaSeparated(value) {
 		status, err := strconv.Atoi(part)
 		if err != nil {
 			return nil, fmt.Errorf("invalid status %q", part)
@@ -768,4 +743,54 @@ func parseResponseRetryStatuses(value string) ([]int, error) {
 		statuses = append(statuses, status)
 	}
 	return statuses, nil
+}
+
+func responseRetryHandlerFromEnv(getenv func(string) string, timeout time.Duration) (*responseretry.Handler, []int, error) {
+	handlerURL := getenv("IRON_RESPONSE_RETRY_HANDLER_URL")
+	if handlerURL == "" {
+		return nil, nil, nil
+	}
+	allowHTTPValue := getenv("IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP")
+	if allowHTTPValue == "" {
+		allowHTTPValue = "false"
+	}
+	allowHTTP, err := strconv.ParseBool(allowHTTPValue)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse HTTP allowance: %w", err)
+	}
+	statuses, err := parseResponseRetryStatuses(getenv("IRON_RESPONSE_RETRY_STATUSES"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse statuses: %w", err)
+	}
+	completionHeaders := getenv("IRON_RESPONSE_RETRY_COMPLETION_HEADERS")
+	if completionHeaders == "" {
+		completionHeaders = "Payment-Receipt"
+	}
+	handler, err := responseretry.New(responseretry.Options{
+		AuthorizeEndpoint: handlerURL,
+		CompleteEndpoint:  getenv("IRON_RESPONSE_RETRY_COMPLETE_URL"),
+		Token:             getenv("IRON_RESPONSE_RETRY_HANDLER_TOKEN"),
+		SandboxID:         getenv("IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID"),
+		Statuses:          statuses,
+		AllowHTTP:         allowHTTP,
+		CompletionHeaders: splitCommaSeparated(completionHeaders),
+		Client: &http.Client{
+			Transport: &http.Transport{},
+			Timeout:   timeout,
+		},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return handler, statuses, nil
+}
+
+func splitCommaSeparated(value string) []string {
+	var values []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
 }

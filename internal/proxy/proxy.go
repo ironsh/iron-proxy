@@ -505,28 +505,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	var replayBody []byte
 	replayable := false
 	if p.responseRetryHandler != nil {
-		limit := bodyLimits.MaxRequestBodyBytes
-		if limit > 0 && (upstreamReq.ContentLength < 0 || upstreamReq.ContentLength <= limit) {
-			originalBody := upstreamReq.Body
-			replayBody, err = io.ReadAll(io.LimitReader(originalBody, limit+1))
-			if err != nil {
-				result.Action = transform.ActionContinue
-				result.StatusCode = http.StatusBadGateway
-				result.Err = err
-				http.Error(w, "bad gateway", http.StatusBadGateway)
-				return
-			}
-			if int64(len(replayBody)) <= limit {
-				replayable = true
-				_ = originalBody.Close()
-				upstreamReq.Body = io.NopCloser(bytes.NewReader(replayBody))
-				upstreamReq.ContentLength = int64(len(replayBody))
-			} else {
-				upstreamReq.Body = &multiReadCloser{
-					Reader: io.MultiReader(bytes.NewReader(replayBody), originalBody),
-					Closer: originalBody,
-				}
-			}
+		upstreamReq.Body, replayBody, replayable, err = prepareReplayBody(
+			upstreamReq.Body,
+			upstreamReq.ContentLength,
+			bodyLimits.MaxRequestBodyBytes,
+		)
+		if err != nil {
+			result.Action = transform.ActionContinue
+			result.StatusCode = http.StatusBadGateway
+			result.Err = err
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		if replayable {
+			upstreamReq.ContentLength = int64(len(replayBody))
 		}
 	}
 
@@ -647,6 +639,29 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 type multiReadCloser struct {
 	io.Reader
 	io.Closer
+}
+
+func prepareReplayBody(body io.ReadCloser, contentLength, limit int64) (io.ReadCloser, []byte, bool, error) {
+	if limit <= 0 || contentLength > limit {
+		return body, nil, false, nil
+	}
+	replayBody, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		if closeErr := body.Close(); closeErr != nil {
+			return nil, nil, false, errors.Join(err, closeErr)
+		}
+		return nil, nil, false, err
+	}
+	if int64(len(replayBody)) > limit {
+		return &multiReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(replayBody), body),
+			Closer: body,
+		}, nil, false, nil
+	}
+	if err := body.Close(); err != nil {
+		return nil, nil, false, err
+	}
+	return io.NopCloser(bytes.NewReader(replayBody)), replayBody, true, nil
 }
 
 func (p *Proxy) completeResponseRetry(ctx context.Context, attemptID string, resp *http.Response, transportError, traceparent string, replayDuration, chargeDuration time.Duration) {

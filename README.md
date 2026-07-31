@@ -290,7 +290,8 @@ retries. The authorization handler receives the exact authority, method,
 path/query, replayability, response status and headers, trace context, and
 sandbox identity. It may return request headers plus an attempt ID for one
 exact replay. The completion handler then receives the replay status and
-receipt header.
+response headers selected by `IRON_RESPONSE_RETRY_COMPLETION_HEADERS`, which
+defaults to `Payment-Receipt`.
 
 Response bodies are never sent to either handler, destinations cannot change,
 and connection/framing headers are rejected. Requests over
@@ -298,7 +299,8 @@ and connection/framing headers are rejected. Requests over
 if challenged, their original response is returned. Handler failures also
 preserve the original response. Handler URLs must use HTTPS unless loopback or
 `IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP=true` is explicitly configured for a
-trusted internal network.
+trusted internal network. Redirects are rejected, and the response retry token
+must be configured independently from the control-plane token.
 
 ### Allowlist
 

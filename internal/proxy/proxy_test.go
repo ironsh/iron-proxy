@@ -69,8 +69,9 @@ func startProxy(t *testing.T) (*Proxy, string, string, *x509.CertPool) {
 
 // replacerTransform replaces request and response bodies with fixed-size padding.
 type replacerTransform struct {
-	reqBody  []byte
-	respBody []byte
+	reqBody    []byte
+	reqHeaders http.Header
+	respBody   []byte
 }
 
 func (r *replacerTransform) Name() string { return "replacer" }
@@ -84,6 +85,7 @@ func (r *replacerTransform) TransformRequest(_ context.Context, _ *transform.Tra
 		req.Body = transform.NewBufferedBodyFromBytes(r.reqBody)
 		req.ContentLength = int64(len(r.reqBody))
 	}
+	copyHeaders(req.Header, r.reqHeaders)
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
@@ -972,6 +974,44 @@ func TestContainsDotSegments(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
 			require.Equal(t, tc.want, containsDotSegments(tc.path))
+		})
+	}
+}
+
+func TestPrepareReplayBodyBoundaries(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		contentLength int64
+		limit         int64
+		wantReplay    bool
+	}{
+		{name: "below limit", body: "1234", contentLength: 4, limit: 5, wantReplay: true},
+		{name: "at limit", body: "12345", contentLength: 5, limit: 5, wantReplay: true},
+		{name: "known over limit", body: "123456", contentLength: 6, limit: 5, wantReplay: false},
+		{name: "unknown at limit", body: "12345", contentLength: -1, limit: 5, wantReplay: true},
+		{name: "unknown over limit", body: "123456", contentLength: -1, limit: 5, wantReplay: false},
+		{name: "disabled", body: "12345", contentLength: 5, limit: 0, wantReplay: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared, replayBody, replayable, err := prepareReplayBody(
+				io.NopCloser(strings.NewReader(tc.body)),
+				tc.contentLength,
+				tc.limit,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantReplay, replayable)
+			if tc.wantReplay {
+				require.Equal(t, []byte(tc.body), replayBody)
+			} else {
+				require.Nil(t, replayBody)
+			}
+			got, err := io.ReadAll(prepared)
+			require.NoError(t, err)
+			require.NoError(t, prepared.Close())
+			require.Equal(t, tc.body, string(got))
 		})
 	}
 }
