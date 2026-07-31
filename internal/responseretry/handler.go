@@ -5,6 +5,7 @@ package responseretry
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,9 +50,10 @@ type DecisionRequest struct {
 
 // DecisionResponse authorizes at most one replay with additional headers.
 type DecisionResponse struct {
-	Retry     bool              `json:"retry"`
-	Headers   map[string]string `json:"headers"`
-	AttemptID string            `json:"attempt_id"`
+	Retry       bool              `json:"retry"`
+	Headers     map[string]string `json:"headers"`
+	AttemptID   string            `json:"attempt_id"`
+	Traceparent string            `json:"traceparent,omitempty"`
 }
 
 // CompletionRequest reports the replay result without any request or response
@@ -68,8 +70,9 @@ type CompletionRequest struct {
 
 // Decision contains the validated result of an authorization call.
 type Decision struct {
-	Headers   http.Header
-	AttemptID string
+	Headers     http.Header
+	AttemptID   string
+	Traceparent string
 }
 
 // New creates a Handler for the configured response status codes.
@@ -160,6 +163,9 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 	if decision.AttemptID == "" {
 		return nil, false, fmt.Errorf("response retry handler omitted attempt id")
 	}
+	if decision.Traceparent != "" && !validTraceparent(decision.Traceparent) {
+		return nil, false, fmt.Errorf("response retry handler returned invalid traceparent")
+	}
 	headers := make(http.Header, len(decision.Headers))
 	for name, value := range decision.Headers {
 		canonical := http.CanonicalHeaderKey(name)
@@ -171,7 +177,11 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 		}
 		headers.Set(canonical, value)
 	}
-	return &Decision{Headers: headers, AttemptID: decision.AttemptID}, true, nil
+	return &Decision{
+		Headers:     headers,
+		AttemptID:   decision.AttemptID,
+		Traceparent: decision.Traceparent,
+	}, true, nil
 }
 
 // Complete reports the replay outcome. It is idempotent at the handler.
@@ -244,4 +254,25 @@ func receiptHeaders(headers http.Header) http.Header {
 
 func isLoopback(host string) bool {
 	return host == "localhost" || strings.HasPrefix(host, "127.") || host == "::1"
+}
+
+func validTraceparent(value string) bool {
+	parts := strings.Split(value, "-")
+	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return false
+	}
+	traceID, traceErr := hex.DecodeString(parts[1])
+	spanID, spanErr := hex.DecodeString(parts[2])
+	_, flagsErr := hex.DecodeString(parts[3])
+	return traceErr == nil && spanErr == nil && flagsErr == nil &&
+		!allZero(traceID) && !allZero(spanID)
+}
+
+func allZero(value []byte) bool {
+	for _, current := range value {
+		if current != 0 {
+			return false
+		}
+	}
+	return true
 }

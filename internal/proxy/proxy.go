@@ -561,15 +561,22 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 					replayReq.Header.Add(name, value)
 				}
 			}
+			if decision.Traceparent != "" {
+				replayReq.Header.Set("Traceparent", decision.Traceparent)
+			}
 			replayStarted := time.Now()
 			resp, err = p.doUpstream(replayReq)
+			completionTraceparent := decision.Traceparent
+			if completionTraceparent == "" {
+				completionTraceparent = upstreamReq.Header.Get("Traceparent")
+			}
 			if err != nil {
 				p.completeResponseRetry(
 					r.Context(),
 					decision.AttemptID,
 					nil,
 					"upstream_transport_error",
-					upstreamReq.Header.Get("Traceparent"),
+					completionTraceparent,
 					time.Since(replayStarted),
 					time.Since(chargeStarted),
 				)
@@ -588,7 +595,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 				decision.AttemptID,
 				resp,
 				"",
-				upstreamReq.Header.Get("Traceparent"),
+				completionTraceparent,
 				time.Since(replayStarted),
 				time.Since(chargeStarted),
 			)

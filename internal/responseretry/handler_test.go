@@ -25,7 +25,7 @@ func TestHandlerAuthorizeAndComplete(t *testing.T) {
 		require.Equal(t, "00-trace-span-01", request.Traceparent)
 		require.True(t, request.Replayable)
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","headers":{"Authorization":"credential"}}`))
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","headers":{"Authorization":"credential"}}`))
 		require.NoError(t, err)
 	})
 	mux.HandleFunc("/complete", func(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +60,7 @@ func TestHandlerAuthorizeAndComplete(t *testing.T) {
 	require.True(t, retry)
 	require.Equal(t, "credential", decision.Headers.Get("Authorization"))
 	require.Equal(t, testAttemptID, decision.AttemptID)
+	require.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", decision.Traceparent)
 
 	replayResp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -130,4 +131,20 @@ func TestHandlerRejectsAuthorizedNonReplayableRequest(t *testing.T) {
 	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, false)
 
 	require.ErrorContains(t, err, "non-replayable")
+}
+
+func TestHandlerRejectsInvalidReturnedTraceparent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","traceparent":"invalid","headers":{"Authorization":"credential"}}`))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+	handler, err := New(server.URL, server.URL, "proxy-token", "sandbox-1", []int{http.StatusPaymentRequired}, false, server.Client())
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
+	require.NoError(t, err)
+
+	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
+
+	require.ErrorContains(t, err, "invalid traceparent")
 }

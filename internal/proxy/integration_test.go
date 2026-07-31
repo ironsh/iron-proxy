@@ -28,6 +28,7 @@ import (
 
 func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testing.T) {
 	const body = "same request body"
+	const chargeTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -35,6 +36,7 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 		require.NoError(t, err)
 		require.Equal(t, body, string(gotBody))
 		if r.Header.Get("X-Retry-Token") == "retry-token" {
+			require.Equal(t, chargeTraceparent, r.Header.Get("Traceparent"))
 			_, err := w.Write([]byte("paid"))
 			require.NoError(t, err)
 			return
@@ -49,11 +51,14 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
 		if r.URL.Path == "/complete" {
 			completions++
+			var payload responseretry.CompletionRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+			require.Equal(t, chargeTraceparent, payload.Traceparent)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","headers":{"X-Retry-Token":"retry-token"}}`))
+		_, err := fmt.Fprintf(w, `{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","traceparent":%q,"headers":{"X-Retry-Token":"retry-token"}}`, chargeTraceparent)
 		require.NoError(t, err)
 	}))
 	defer authorizer.Close()
