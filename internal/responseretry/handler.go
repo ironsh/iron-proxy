@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var forbiddenRetryHeaders = map[string]struct{}{
@@ -23,42 +24,69 @@ var forbiddenRetryHeaders = map[string]struct{}{
 }
 
 // Handler asks a trusted service whether a bounded upstream response should
-// be retried and which request headers to add. It does not interpret response
-// protocols or credentials.
+// be retried and reports the result of the one permitted replay.
 type Handler struct {
-	endpoint *url.URL
-	token    string
-	statuses map[int]struct{}
-	client   *http.Client
+	authorizeEndpoint *url.URL
+	completeEndpoint  *url.URL
+	token             string
+	sandboxID         string
+	statuses          map[int]struct{}
+	client            *http.Client
 }
 
-// DecisionRequest describes the completed request and response. Response
-// bodies are deliberately excluded.
+// DecisionRequest describes the completed request and response. Request and
+// response bodies are deliberately excluded.
 type DecisionRequest struct {
 	Host            string              `json:"host"`
 	Method          string              `json:"method"`
 	Path            string              `json:"path"`
+	Replayable      bool                `json:"replayable"`
 	Status          int                 `json:"status"`
 	ResponseHeaders map[string][]string `json:"response_headers"`
+	SandboxID       string              `json:"sandbox_id"`
+	Traceparent     string              `json:"traceparent,omitempty"`
 }
 
 // DecisionResponse authorizes at most one replay with additional headers.
 type DecisionResponse struct {
-	Retry   bool              `json:"retry"`
-	Headers map[string]string `json:"headers"`
+	Retry     bool              `json:"retry"`
+	Headers   map[string]string `json:"headers"`
+	AttemptID string            `json:"attempt_id"`
+}
+
+// CompletionRequest reports the replay result without any request or response
+// body and includes only the payment receipt response header.
+type CompletionRequest struct {
+	AttemptID        string              `json:"attempt_id"`
+	ReplayStatus     *int                `json:"replay_status"`
+	ResponseHeaders  map[string][]string `json:"response_headers"`
+	TransportError   string              `json:"transport_error,omitempty"`
+	Traceparent      string              `json:"traceparent,omitempty"`
+	ReplayDurationMS int64               `json:"replay_duration_ms,omitempty"`
+	ChargeDurationMS int64               `json:"charge_duration_ms,omitempty"`
+}
+
+// Decision contains the validated result of an authorization call.
+type Decision struct {
+	Headers   http.Header
+	AttemptID string
 }
 
 // New creates a Handler for the configured response status codes.
-func New(endpoint, token string, statuses []int, client *http.Client) (*Handler, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil || !u.IsAbs() || u.Host == "" {
-		return nil, fmt.Errorf("response retry handler URL must be absolute")
+func New(authorizeEndpoint, completeEndpoint, token, sandboxID string, statuses []int, allowHTTP bool, client *http.Client) (*Handler, error) {
+	authorizeURL, err := parseEndpoint(authorizeEndpoint, allowHTTP)
+	if err != nil {
+		return nil, fmt.Errorf("authorize endpoint: %w", err)
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
-		return nil, fmt.Errorf("response retry handler URL must use HTTPS unless it is loopback")
+	completeURL, err := parseEndpoint(completeEndpoint, allowHTTP)
+	if err != nil {
+		return nil, fmt.Errorf("complete endpoint: %w", err)
 	}
 	if token == "" {
 		return nil, fmt.Errorf("response retry handler token is required")
+	}
+	if sandboxID == "" {
+		return nil, fmt.Errorf("response retry handler sandbox identity is required")
 	}
 	statusSet := make(map[int]struct{}, len(statuses))
 	for _, status := range statuses {
@@ -73,31 +101,43 @@ func New(endpoint, token string, statuses []int, client *http.Client) (*Handler,
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Handler{endpoint: u, token: token, statuses: statusSet, client: client}, nil
+	return &Handler{
+		authorizeEndpoint: authorizeURL,
+		completeEndpoint:  completeURL,
+		token:             token,
+		sandboxID:         sandboxID,
+		statuses:          statusSet,
+		client:            client,
+	}, nil
 }
 
-// Decide returns request headers for one replay. retry is false when the
-// response status is outside the configured set or the handler declines.
-func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Response) (headers http.Header, retry bool, err error) {
+// Decide returns authorization metadata for one replay. The caller passes
+// replayable=false when the exact request body cannot be replayed safely.
+func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Response, replayable bool) (*Decision, bool, error) {
 	if _, ok := h.statuses[resp.StatusCode]; !ok {
 		return nil, false, nil
+	}
+	path := req.URL.EscapedPath()
+	if req.URL.RawQuery != "" {
+		path += "?" + req.URL.RawQuery
 	}
 	payload, err := json.Marshal(DecisionRequest{
 		Host:            req.URL.Host,
 		Method:          req.Method,
-		Path:            req.URL.EscapedPath(),
+		Path:            path,
+		Replayable:      replayable,
 		Status:          resp.StatusCode,
 		ResponseHeaders: resp.Header,
+		SandboxID:       h.sandboxID,
+		Traceparent:     req.Header.Get("Traceparent"),
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("encode response retry decision request: %w", err)
 	}
-	decisionReq, err := http.NewRequestWithContext(ctx, http.MethodPost, h.endpoint.String(), bytes.NewReader(payload))
+	decisionReq, err := h.newRequest(ctx, h.authorizeEndpoint, payload)
 	if err != nil {
 		return nil, false, fmt.Errorf("create response retry decision request: %w", err)
 	}
-	decisionReq.Header.Set("Authorization", "Bearer "+h.token)
-	decisionReq.Header.Set("Content-Type", "application/json")
 	decisionResp, err := h.client.Do(decisionReq)
 	if err != nil {
 		return nil, false, fmt.Errorf("request response retry decision: %w", err)
@@ -114,7 +154,13 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 	if !decision.Retry {
 		return nil, false, nil
 	}
-	headers = make(http.Header, len(decision.Headers))
+	if !replayable {
+		return nil, false, fmt.Errorf("response retry handler authorized a non-replayable request")
+	}
+	if decision.AttemptID == "" {
+		return nil, false, fmt.Errorf("response retry handler omitted attempt id")
+	}
+	headers := make(http.Header, len(decision.Headers))
 	for name, value := range decision.Headers {
 		canonical := http.CanonicalHeaderKey(name)
 		if canonical == "" {
@@ -125,7 +171,75 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 		}
 		headers.Set(canonical, value)
 	}
-	return headers, true, nil
+	return &Decision{Headers: headers, AttemptID: decision.AttemptID}, true, nil
+}
+
+// Complete reports the replay outcome. It is idempotent at the handler.
+func (h *Handler) Complete(ctx context.Context, attemptID string, resp *http.Response, transportError, traceparent string, replayDuration, chargeDuration time.Duration) error {
+	var status *int
+	headers := make(http.Header)
+	if resp != nil {
+		value := resp.StatusCode
+		status = &value
+		headers = receiptHeaders(resp.Header)
+	}
+	payload, err := json.Marshal(CompletionRequest{
+		AttemptID:        attemptID,
+		ReplayStatus:     status,
+		ResponseHeaders:  headers,
+		TransportError:   transportError,
+		Traceparent:      traceparent,
+		ReplayDurationMS: replayDuration.Milliseconds(),
+		ChargeDurationMS: chargeDuration.Milliseconds(),
+	})
+	if err != nil {
+		return fmt.Errorf("encode response retry completion request: %w", err)
+	}
+	req, err := h.newRequest(ctx, h.completeEndpoint, payload)
+	if err != nil {
+		return fmt.Errorf("create response retry completion request: %w", err)
+	}
+	completionResp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request response retry completion: %w", err)
+	}
+	defer completionResp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(completionResp.Body, 64<<10))
+	if completionResp.StatusCode < 200 || completionResp.StatusCode >= 300 {
+		return fmt.Errorf("response retry completion returned status %d", completionResp.StatusCode)
+	}
+	return nil
+}
+
+func (h *Handler) newRequest(ctx context.Context, endpoint *url.URL, payload []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
+		return nil, fmt.Errorf("response retry handler URL must be absolute without credentials")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && (allowHTTP || isLoopback(u.Hostname()))) {
+		return nil, fmt.Errorf("response retry handler URL must use HTTPS unless HTTP is explicitly allowed")
+	}
+	return u, nil
+}
+
+func receiptHeaders(headers http.Header) http.Header {
+	result := make(http.Header)
+	for name, values := range headers {
+		if strings.EqualFold(name, "Payment-Receipt") {
+			result[name] = append([]string(nil), values...)
+		}
+	}
+	return result
 }
 
 func isLoopback(host string) bool {

@@ -217,16 +217,27 @@ func main() {
 
 	var responseRetryHandler *responseretry.Handler
 	if handlerURL := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_URL"); handlerURL != "" {
+		completeURL := os.Getenv("IRON_RESPONSE_RETRY_COMPLETE_URL")
+		sandboxID := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID")
 		handlerToken := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_TOKEN")
 		if handlerToken == "" {
 			handlerToken = proxyToken
+		}
+		allowHTTPValue := os.Getenv("IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP")
+		if allowHTTPValue == "" {
+			allowHTTPValue = "false"
+		}
+		allowHTTP, parseErr := strconv.ParseBool(allowHTTPValue)
+		if parseErr != nil {
+			logger.Error("parsing response retry HTTP allowance", slog.String("error", parseErr.Error()))
+			os.Exit(1)
 		}
 		statuses, parseErr := parseResponseRetryStatuses(os.Getenv("IRON_RESPONSE_RETRY_STATUSES"))
 		if parseErr != nil {
 			logger.Error("parsing response retry statuses", slog.String("error", parseErr.Error()))
 			os.Exit(1)
 		}
-		responseRetryHandler, err = responseretry.New(handlerURL, handlerToken, statuses, &http.Client{
+		responseRetryHandler, err = responseretry.New(handlerURL, completeURL, handlerToken, sandboxID, statuses, allowHTTP, &http.Client{
 			Transport: &http.Transport{},
 			Timeout:   time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		})

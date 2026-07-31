@@ -2,59 +2,132 @@ package responseretry
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestHandlerDecide(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
-		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"retry":true,"headers":{"Authorization":"credential"}}`))
-		require.NoError(t, err)
-	}))
-	defer server.Close()
-	handler, err := New(server.URL, "proxy-token", []int{409}, server.Client())
-	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, "https://service.example/v1/search", nil)
-	require.NoError(t, err)
-	resp := &http.Response{StatusCode: 409, Header: http.Header{"Www-Authenticate": {"challenge"}}}
+const testAttemptID = "8ace71a1-4e12-47e5-9df4-f2f660db6a82"
 
-	headers, retry, err := handler.Decide(context.Background(), req, resp)
+func TestHandlerAuthorizeAndComplete(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
+		var request DecisionRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.Equal(t, "service.example", request.Host)
+		require.Equal(t, "/v1/search?q=one", request.Path)
+		require.Equal(t, "sandbox-1", request.SandboxID)
+		require.Equal(t, "00-trace-span-01", request.Traceparent)
+		require.True(t, request.Replayable)
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","headers":{"Authorization":"credential"}}`))
+		require.NoError(t, err)
+	})
+	mux.HandleFunc("/complete", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
+		var request CompletionRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.Equal(t, testAttemptID, request.AttemptID)
+		require.NotNil(t, request.ReplayStatus)
+		require.Equal(t, http.StatusOK, *request.ReplayStatus)
+		require.Equal(t, []string{"receipt"}, request.ResponseHeaders["Payment-Receipt"])
+		require.Empty(t, request.ResponseHeaders["Set-Cookie"])
+		require.Equal(t, "00-trace-span-01", request.Traceparent)
+		require.EqualValues(t, 25, request.ReplayDurationMS)
+		require.EqualValues(t, 50, request.ChargeDurationMS)
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	handler, err := New(server.URL+"/authorize", server.URL+"/complete", "proxy-token", "sandbox-1", []int{http.StatusPaymentRequired}, false, server.Client())
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/v1/search?q=one", nil)
+	require.NoError(t, err)
+	req.Header.Set("Traceparent", "00-trace-span-01")
+	resp := &http.Response{
+		StatusCode: http.StatusPaymentRequired,
+		Header:     http.Header{"Www-Authenticate": {"Payment challenge"}},
+	}
+
+	decision, retry, err := handler.Decide(context.Background(), req, resp, true)
 
 	require.NoError(t, err)
 	require.True(t, retry)
-	require.Equal(t, "credential", headers.Get("Authorization"))
+	require.Equal(t, "credential", decision.Headers.Get("Authorization"))
+	require.Equal(t, testAttemptID, decision.AttemptID)
+
+	replayResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Payment-Receipt": {"receipt"},
+			"Set-Cookie":      {"secret"},
+		},
+	}
+	require.NoError(t, handler.Complete(
+		context.Background(),
+		decision.AttemptID,
+		replayResp,
+		"",
+		"00-trace-span-01",
+		25*time.Millisecond,
+		50*time.Millisecond,
+	))
 }
 
 func TestHandlerSkipsUnconfiguredStatus(t *testing.T) {
-	handler, err := New("http://127.0.0.1/decide", "proxy-token", []int{409}, nil)
+	handler, err := New(
+		"http://127.0.0.1/authorize",
+		"http://127.0.0.1/complete",
+		"proxy-token",
+		"sandbox-1",
+		[]int{http.StatusPaymentRequired},
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
 	require.NoError(t, err)
 
-	headers, retry, err := handler.Decide(context.Background(), req, &http.Response{StatusCode: 429})
+	decision, retry, err := handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusTooManyRequests}, true)
 
 	require.NoError(t, err)
 	require.False(t, retry)
-	require.Nil(t, headers)
+	require.Nil(t, decision)
 }
 
 func TestHandlerRejectsForbiddenReplayHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, err := w.Write([]byte(`{"retry":true,"headers":{"Host":"other.example"}}`))
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","headers":{"Host":"other.example"}}`))
 		require.NoError(t, err)
 	}))
 	defer server.Close()
-	handler, err := New(server.URL, "proxy-token", []int{409}, server.Client())
+	handler, err := New(server.URL, server.URL, "proxy-token", "sandbox-1", []int{http.StatusPaymentRequired}, false, server.Client())
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
 	require.NoError(t, err)
 
-	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: 409})
+	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
 
 	require.ErrorContains(t, err, "forbidden header Host")
+}
+
+func TestHandlerRejectsAuthorizedNonReplayableRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"` + testAttemptID + `","headers":{"Authorization":"credential"}}`))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+	handler, err := New(server.URL, server.URL, "proxy-token", "sandbox-1", []int{http.StatusPaymentRequired}, false, server.Client())
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
+	require.NoError(t, err)
+
+	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, false)
+
+	require.ErrorContains(t, err, "non-replayable")
 }

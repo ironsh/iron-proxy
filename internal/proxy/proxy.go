@@ -35,23 +35,23 @@ import (
 // listener peeks the SNI from the ClientHello and TCP-passthroughs to the
 // upstream without terminating TLS.
 type Proxy struct {
-	httpServer     *http.Server
-	httpsServer    *http.Server
-	httpsAddr      string
-	tlsMode        string
-	tlsListener    net.Listener
-	tunnelAddr     string
-	tunnelListener net.Listener
-	tunnelDone     chan struct{}
-	certCache      *certcache.Cache
-	pipeline       *transform.PipelineHolder
-	transport      *http.Transport
-	resolver       *net.Resolver
-	guard          *dnsguard.Guard
-	mcpPolicy      *mcp.PolicyHolder
-	mcpGateway     *mcpgateway.Holder
+	httpServer           *http.Server
+	httpsServer          *http.Server
+	httpsAddr            string
+	tlsMode              string
+	tlsListener          net.Listener
+	tunnelAddr           string
+	tunnelListener       net.Listener
+	tunnelDone           chan struct{}
+	certCache            *certcache.Cache
+	pipeline             *transform.PipelineHolder
+	transport            *http.Transport
+	resolver             *net.Resolver
+	guard                *dnsguard.Guard
+	mcpPolicy            *mcp.PolicyHolder
+	mcpGateway           *mcpgateway.Holder
 	responseRetryHandler *responseretry.Handler
-	logger         *slog.Logger
+	logger               *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
 	// connections that would otherwise sit on blocking Reads.
@@ -82,7 +82,7 @@ type Options struct {
 	// ResponseRetryHandler may add headers and replay the exact transformed
 	// request once after selected upstream response statuses.
 	ResponseRetryHandler *responseretry.Handler
-	Logger     *slog.Logger
+	Logger               *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
 	// config.DefaultUpstreamResponseHeaderTimeout.
@@ -111,22 +111,22 @@ func New(opts Options) *Proxy {
 		guard, _ = dnsguard.New(nil)
 	}
 	p := &Proxy{
-		ready:          opts.Ready,
-		httpsAddr:      opts.HTTPSAddr,
-		tlsMode:        opts.TLSMode,
-		tunnelAddr:     opts.TunnelAddr,
-		tunnelDone:     make(chan struct{}),
-		certCache:      opts.CertCache,
-		pipeline:       opts.Pipeline,
-		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
-		resolver:       opts.Resolver,
-		guard:          guard,
-		mcpPolicy:      opts.MCPPolicy,
-		mcpGateway:     opts.MCPGateway,
+		ready:                opts.Ready,
+		httpsAddr:            opts.HTTPSAddr,
+		tlsMode:              opts.TLSMode,
+		tunnelAddr:           opts.TunnelAddr,
+		tunnelDone:           make(chan struct{}),
+		certCache:            opts.CertCache,
+		pipeline:             opts.Pipeline,
+		transport:            buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
+		resolver:             opts.Resolver,
+		guard:                guard,
+		mcpPolicy:            opts.MCPPolicy,
+		mcpGateway:           opts.MCPGateway,
 		responseRetryHandler: opts.ResponseRetryHandler,
-		logger:         opts.Logger,
-		shutdownCtx:    shutdownCtx,
-		shutdownCancel: shutdownCancel,
+		logger:               opts.Logger,
+		shutdownCtx:          shutdownCtx,
+		shutdownCancel:       shutdownCancel,
 	}
 
 	p.httpServer = &http.Server{
@@ -503,24 +503,31 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 
 	var replayBody []byte
+	replayable := false
 	if p.responseRetryHandler != nil {
-		if bodyLimits.MaxRequestBodyBytes <= 0 {
-			result.Action = transform.ActionContinue
-			result.StatusCode = http.StatusBadGateway
-			result.Err = fmt.Errorf("response retry requires a positive request body limit")
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
+		limit := bodyLimits.MaxRequestBodyBytes
+		if limit > 0 && (upstreamReq.ContentLength < 0 || upstreamReq.ContentLength <= limit) {
+			originalBody := upstreamReq.Body
+			replayBody, err = io.ReadAll(io.LimitReader(originalBody, limit+1))
+			if err != nil {
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			if int64(len(replayBody)) <= limit {
+				replayable = true
+				_ = originalBody.Close()
+				upstreamReq.Body = io.NopCloser(bytes.NewReader(replayBody))
+				upstreamReq.ContentLength = int64(len(replayBody))
+			} else {
+				upstreamReq.Body = &multiReadCloser{
+					Reader: io.MultiReader(bytes.NewReader(replayBody), originalBody),
+					Closer: originalBody,
+				}
+			}
 		}
-		replayBody, err = io.ReadAll(io.LimitReader(upstreamReq.Body, bodyLimits.MaxRequestBodyBytes+1))
-		if err != nil || int64(len(replayBody)) > bodyLimits.MaxRequestBodyBytes {
-			result.Action = transform.ActionContinue
-			result.StatusCode = http.StatusRequestEntityTooLarge
-			result.Err = fmt.Errorf("request body exceeds response retry limit")
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		upstreamReq.Body = io.NopCloser(bytes.NewReader(replayBody))
-		upstreamReq.ContentLength = int64(len(replayBody))
 	}
 
 	resp, err := p.doUpstream(upstreamReq)
@@ -537,13 +544,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	defer resp.Body.Close()
 
 	if p.responseRetryHandler != nil {
-		retryHeaders, replay, retryErr := p.responseRetryHandler.Decide(r.Context(), upstreamReq, resp)
+		chargeStarted := time.Now()
+		decision, replay, retryErr := p.responseRetryHandler.Decide(r.Context(), upstreamReq, resp, replayable)
 		if retryErr != nil {
-			result.Action = transform.ActionContinue
-			result.StatusCode = http.StatusBadGateway
-			result.Err = retryErr
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
+			p.logger.Warn("response retry authorization failed", slog.String("error", retryErr.Error()))
 		}
 		if replay {
 			_ = resp.Body.Close() // The 402 body is never returned after authorization.
@@ -551,14 +555,24 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 			replayReq.Body = io.NopCloser(bytes.NewReader(replayBody))
 			replayReq.ContentLength = int64(len(replayBody))
 			replayReq.Header = upstreamReq.Header.Clone()
-			for name, values := range retryHeaders {
+			for name, values := range decision.Headers {
 				replayReq.Header.Del(name)
 				for _, value := range values {
 					replayReq.Header.Add(name, value)
 				}
 			}
+			replayStarted := time.Now()
 			resp, err = p.doUpstream(replayReq)
 			if err != nil {
+				p.completeResponseRetry(
+					r.Context(),
+					decision.AttemptID,
+					nil,
+					"upstream_transport_error",
+					upstreamReq.Header.Get("Traceparent"),
+					time.Since(replayStarted),
+					time.Since(chargeStarted),
+				)
 				if markIfClientCancel(r, err, result) {
 					return
 				}
@@ -569,6 +583,15 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 				return
 			}
 			defer resp.Body.Close()
+			p.completeResponseRetry(
+				r.Context(),
+				decision.AttemptID,
+				resp,
+				"",
+				upstreamReq.Header.Get("Traceparent"),
+				time.Since(replayStarted),
+				time.Since(chargeStarted),
+			)
 		}
 	}
 
@@ -612,6 +635,19 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 
 	p.writeResponse(w, finalResp)
+}
+
+type multiReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func (p *Proxy) completeResponseRetry(ctx context.Context, attemptID string, resp *http.Response, transportError, traceparent string, replayDuration, chargeDuration time.Duration) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := p.responseRetryHandler.Complete(ctx, attemptID, resp, transportError, traceparent, replayDuration, chargeDuration); err != nil {
+		p.logger.Warn("response retry completion failed", slog.String("error", err.Error()))
+	}
 }
 
 // isWebSocketUpgrade detects a WebSocket upgrade request. Connection is

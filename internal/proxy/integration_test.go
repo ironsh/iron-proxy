@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,14 +44,28 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 	}))
 	defer upstream.Close()
 
+	completions := 0
 	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
+		if r.URL.Path == "/complete" {
+			completions++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"retry":true,"headers":{"X-Retry-Token":"retry-token"}}`))
+		_, err := w.Write([]byte(`{"retry":true,"attempt_id":"8ace71a1-4e12-47e5-9df4-f2f660db6a82","headers":{"X-Retry-Token":"retry-token"}}`))
 		require.NoError(t, err)
 	}))
 	defer authorizer.Close()
-	handler, err := responseretry.New(authorizer.URL, "proxy-token", []int{http.StatusConflict}, authorizer.Client())
+	handler, err := responseretry.New(
+		authorizer.URL+"/authorize",
+		authorizer.URL+"/complete",
+		"proxy-token",
+		"sandbox-1",
+		[]int{http.StatusConflict},
+		false,
+		authorizer.Client(),
+	)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -59,8 +74,8 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 		MaxResponseBodyBytes: 1 << 20,
 	}, logger)
 	p := New(Options{
-		Pipeline:   transform.NewPipelineHolder(pipeline),
-		Logger:     logger,
+		Pipeline:             transform.NewPipelineHolder(pipeline),
+		Logger:               logger,
 		ResponseRetryHandler: handler,
 	})
 	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(body))
@@ -71,6 +86,102 @@ func TestIntegration_ResponseHandlerReplaysExactTransformedRequestOnce(t *testin
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, "paid", recorder.Body.String())
 	require.Equal(t, 2, calls)
+	require.Equal(t, 1, completions)
+}
+
+func TestIntegration_ResponseHandlerReturnsOriginalChallengeForOversizedRequest(t *testing.T) {
+	const body = "request is larger than the replay limit"
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		gotBody, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(gotBody))
+		w.Header().Set("Www-Authenticate", "Payment challenge")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte("original challenge"))
+	}))
+	defer upstream.Close()
+
+	authorizeCalls := 0
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizeCalls++
+		var payload responseretry.DecisionRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		require.False(t, payload.Replayable)
+		_, _ = w.Write([]byte(`{"retry":false,"headers":{}}`))
+	}))
+	defer authorizer.Close()
+	handler, err := responseretry.New(
+		authorizer.URL,
+		authorizer.URL,
+		"proxy-token",
+		"sandbox-1",
+		[]int{http.StatusPaymentRequired},
+		false,
+		authorizer.Client(),
+	)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
+		MaxRequestBodyBytes:  8,
+		MaxResponseBodyBytes: 1 << 20,
+	}, logger)
+	p := New(Options{
+		Pipeline:             transform.NewPipelineHolder(pipeline),
+		Logger:               logger,
+		ResponseRetryHandler: handler,
+	})
+	req := httptest.NewRequest(http.MethodPost, upstream.URL+"/paid", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusPaymentRequired, recorder.Code)
+	require.Equal(t, "original challenge", recorder.Body.String())
+	require.Equal(t, 1, upstreamCalls)
+	require.Equal(t, 1, authorizeCalls)
+}
+
+func TestIntegration_ResponseHandlerFailureReturnsOriginalChallenge(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte("original challenge"))
+	}))
+	defer upstream.Close()
+	authorizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer authorizer.Close()
+	handler, err := responseretry.New(
+		authorizer.URL,
+		authorizer.URL,
+		"proxy-token",
+		"sandbox-1",
+		[]int{http.StatusPaymentRequired},
+		false,
+		authorizer.Client(),
+	)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{
+		MaxRequestBodyBytes:  1 << 20,
+		MaxResponseBodyBytes: 1 << 20,
+	}, logger)
+	p := New(Options{
+		Pipeline:             transform.NewPipelineHolder(pipeline),
+		Logger:               logger,
+		ResponseRetryHandler: handler,
+	})
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/paid", nil)
+	recorder := httptest.NewRecorder()
+
+	p.handleDirectHTTP(recorder, req)
+
+	require.Equal(t, http.StatusPaymentRequired, recorder.Code)
+	require.Equal(t, "original challenge", recorder.Body.String())
 }
 
 // integrationCA bundles the test CA certificate, cert cache, and trust pool.
