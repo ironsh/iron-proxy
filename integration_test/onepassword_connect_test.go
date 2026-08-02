@@ -11,6 +11,8 @@ import (
 // server and verifies that proxy tokens in request headers are swapped for the
 // resolved value. Reuses the same vault and item as TestOnePassword.
 func TestOnePasswordConnect(t *testing.T) {
+	requireEnv(t, "OP_CONNECT_TOKEN")
+
 	upstreamHost := echoHeadersUpstream(t, "X-OP-Connect-Secret")
 
 	cfgPath := renderConfig(t, t.TempDir(), "onepassword_connect.yaml", nil)

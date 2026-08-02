@@ -10,6 +10,8 @@ import (
 // TestOnePassword boots the proxy with a real 1Password secret and verifies
 // that proxy tokens in request headers are swapped for the resolved value.
 func TestOnePassword(t *testing.T) {
+	requireEnv(t, "OP_SERVICE_ACCOUNT_TOKEN")
+
 	upstreamHost := echoHeadersUpstream(t, "X-OP-Secret")
 
 	cfgPath := renderConfig(t, t.TempDir(), "onepassword.yaml", nil)

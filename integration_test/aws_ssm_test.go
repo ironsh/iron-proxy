@@ -10,6 +10,9 @@ import (
 // TestAWSSystemsManagerParameterStore boots the proxy with real AWS SSM
 // Parameter Store parameters and verifies proxy token replacement.
 func TestAWSSystemsManagerParameterStore(t *testing.T) {
+	requireEnv(t, "AWS_ACCESS_KEY_ID")
+	requireEnv(t, "AWS_SECRET_ACCESS_KEY")
+
 	cases := []struct {
 		name, header, sent, want string
 	}{

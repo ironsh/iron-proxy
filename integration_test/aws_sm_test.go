@@ -10,6 +10,9 @@ import (
 // TestAWSSecretsManager boots the proxy with real AWS Secrets Manager secrets
 // and verifies that proxy tokens in request headers are swapped for real values.
 func TestAWSSecretsManager(t *testing.T) {
+	requireEnv(t, "AWS_ACCESS_KEY_ID")
+	requireEnv(t, "AWS_SECRET_ACCESS_KEY")
+
 	cases := []struct {
 		name, header, sent, want string
 	}{

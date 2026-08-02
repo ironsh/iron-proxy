@@ -285,7 +285,7 @@ func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
 		return nil, fmt.Errorf("response retry handler URL must be absolute without credentials")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && (allowHTTP || isLoopback(u.Hostname()))) {
+	if u.Scheme != "https" && (u.Scheme != "http" || (!allowHTTP && !isLoopback(u.Hostname()))) {
 		return nil, fmt.Errorf("response retry handler URL must use HTTPS unless HTTP is explicitly allowed")
 	}
 	return u, nil
