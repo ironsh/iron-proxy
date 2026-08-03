@@ -3,8 +3,10 @@ package responseretry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -409,13 +412,73 @@ func TestHandlerCompleteDoesNotRetryClientFailure(t *testing.T) {
 func TestHardenedClientDoesNotMutateInputClient(t *testing.T) {
 	originalRedirect := func(_ *http.Request, _ []*http.Request) error { return fmt.Errorf("original") }
 	client := &http.Client{CheckRedirect: originalRedirect}
-	hardened := hardenedClient(client)
+	hardened := hardenedClient(client, nil, nil, 0)
 
 	require.NotSame(t, client, hardened)
 	require.Zero(t, client.Timeout)
 	require.Equal(t, defaultClientTimeout, hardened.Timeout)
 	require.ErrorContains(t, client.CheckRedirect(nil, nil), "original")
 	require.ErrorIs(t, hardened.CheckRedirect(nil, nil), http.ErrUseLastResponse)
+}
+
+func TestHandlerClientUsesConfiguredResolver(t *testing.T) {
+	resolverErr := errors.New("configured resolver used")
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			return nil, resolverErr
+		},
+	}
+	opts := testOptions("http://handler.invalid/authorize", nil)
+	opts.AllowHTTP = true
+	opts.Resolver = resolver
+	handler, err := New(opts)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
+	require.NoError(t, err)
+
+	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
+
+	require.ErrorContains(t, err, resolverErr.Error())
+}
+
+func TestHandlerClientEnforcesUpstreamDenyGuard(t *testing.T) {
+	guard, err := dnsguard.New([]string{"169.254.169.254/32"})
+	require.NoError(t, err)
+	opts := testOptions("http://169.254.169.254/authorize", nil)
+	opts.AllowHTTP = true
+	opts.Guard = guard
+	handler, err := New(opts)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
+	require.NoError(t, err)
+
+	_, _, err = handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
+
+	require.Error(t, err)
+	require.True(t, dnsguard.IsDenyError(err))
+}
+
+func TestHandlerClientAllowsExplicitLoopbackDespiteGuard(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := io.WriteString(w, `{"retry":false}`)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+	guard, err := dnsguard.New([]string{"127.0.0.0/8", "::1/128"})
+	require.NoError(t, err)
+	opts := testOptions(server.URL, nil)
+	opts.Guard = guard
+	handler, err := New(opts)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://service.example/", nil)
+	require.NoError(t, err)
+
+	decision, retry, err := handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
+
+	require.NoError(t, err)
+	require.False(t, retry)
+	require.Nil(t, decision)
 }
 
 func TestSelectedHeadersIsCaseInsensitive(t *testing.T) {

@@ -5,17 +5,21 @@ package responseretry
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -56,6 +60,9 @@ type Options struct {
 	Statuses          []int
 	AllowHTTP         bool
 	CompletionHeaders []string
+	Resolver          *net.Resolver
+	Guard             *dnsguard.Guard
+	ClientTimeout     time.Duration
 	Client            *http.Client
 }
 
@@ -139,7 +146,7 @@ func New(opts Options) (*Handler, error) {
 		sandboxID:         opts.SandboxID,
 		statuses:          statusSet,
 		completionHeaders: completionHeaders,
-		client:            hardenedClient(opts.Client),
+		client:            hardenedClient(opts.Client, opts.Resolver, opts.Guard, opts.ClientTimeout),
 	}, nil
 }
 
@@ -285,24 +292,83 @@ func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
 		return nil, fmt.Errorf("response retry handler URL must be absolute without credentials")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && (allowHTTP || isLoopback(u.Hostname()))) {
+	httpAllowed := u.Scheme == "http" && (allowHTTP || isLoopback(u.Hostname()))
+	if u.Scheme != "https" && !httpAllowed {
 		return nil, fmt.Errorf("response retry handler URL must use HTTPS unless HTTP is explicitly allowed")
 	}
 	return u, nil
 }
 
-func hardenedClient(client *http.Client) *http.Client {
+func hardenedClient(client *http.Client, resolver *net.Resolver, guard *dnsguard.Guard, timeout time.Duration) *http.Client {
 	if client == nil {
-		client = &http.Client{Timeout: defaultClientTimeout}
+		client = &http.Client{Transport: newHandlerTransport(resolver, guard)}
 	}
 	result := *client
 	if result.Timeout <= 0 {
-		result.Timeout = defaultClientTimeout
+		result.Timeout = timeout
+		if result.Timeout <= 0 {
+			result.Timeout = defaultClientTimeout
+		}
 	}
 	result.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return &result
+}
+
+type handlerTransport struct {
+	guarded  http.RoundTripper
+	loopback http.RoundTripper
+}
+
+func newHandlerTransport(resolver *net.Resolver, guard *dnsguard.Guard) http.RoundTripper {
+	guardedDialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Resolver:  resolver,
+		Control:   guard.DialControl,
+	}
+	loopbackDialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   loopbackOnlyDialControl,
+	}
+	return &handlerTransport{
+		guarded:  newHTTPTransport(guardedDialer),
+		loopback: newHTTPTransport(loopbackDialer),
+	}
+}
+
+func (t *handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if isLoopback(req.URL.Hostname()) {
+		return t.loopback.RoundTrip(req)
+	}
+	return t.guarded.RoundTrip(req)
+}
+
+func newHTTPTransport(dialer *net.Dialer) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		DialContext:         dialer.DialContext,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+}
+
+func loopbackOnlyDialControl(_ string, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.Unmap().IsLoopback() {
+		return fmt.Errorf("response retry loopback endpoint resolved to non-loopback address %q", host)
+	}
+	return nil
 }
 
 func selectedHeaders(headers http.Header, allowed map[string]struct{}) http.Header {

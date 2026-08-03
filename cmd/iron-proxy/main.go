@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -218,6 +217,8 @@ func main() {
 	responseRetryHandler, responseRetryStatuses, err := responseRetryHandlerFromEnv(
 		os.Getenv,
 		time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
+		resolver,
+		guard,
 	)
 	if err != nil {
 		logger.Error("initializing response retry handler", slog.String("error", err.Error()))
@@ -745,7 +746,7 @@ func parseResponseRetryStatuses(value string) ([]int, error) {
 	return statuses, nil
 }
 
-func responseRetryHandlerFromEnv(getenv func(string) string, timeout time.Duration) (*responseretry.Handler, []int, error) {
+func responseRetryHandlerFromEnv(getenv func(string) string, timeout time.Duration, resolver *net.Resolver, guard *dnsguard.Guard) (*responseretry.Handler, []int, error) {
 	handlerURL := getenv("IRON_RESPONSE_RETRY_HANDLER_URL")
 	if handlerURL == "" {
 		return nil, nil, nil
@@ -774,10 +775,9 @@ func responseRetryHandlerFromEnv(getenv func(string) string, timeout time.Durati
 		Statuses:          statuses,
 		AllowHTTP:         allowHTTP,
 		CompletionHeaders: splitCommaSeparated(completionHeaders),
-		Client: &http.Client{
-			Transport: &http.Transport{},
-			Timeout:   timeout,
-		},
+		Resolver:          resolver,
+		Guard:             guard,
+		ClientTimeout:     timeout,
 	})
 	if err != nil {
 		return nil, nil, err

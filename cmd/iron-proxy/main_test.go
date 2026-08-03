@@ -73,7 +73,7 @@ func TestResponseRetryHandlerFromEnv(t *testing.T) {
 		"IRON_RESPONSE_RETRY_COMPLETION_HEADERS": "X-Receipt",
 	}
 
-	handler, statuses, err := responseRetryHandlerFromEnv(mapEnv(base), time.Second)
+	handler, statuses, err := responseRetryHandlerFromEnv(mapEnv(base), time.Second, nil, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, handler)
@@ -81,7 +81,7 @@ func TestResponseRetryHandlerFromEnv(t *testing.T) {
 }
 
 func TestResponseRetryHandlerFromEnvDisabled(t *testing.T) {
-	handler, statuses, err := responseRetryHandlerFromEnv(mapEnv(nil), time.Second)
+	handler, statuses, err := responseRetryHandlerFromEnv(mapEnv(nil), time.Second, nil, nil)
 
 	require.NoError(t, err)
 	require.Nil(t, handler)
@@ -97,7 +97,7 @@ func TestResponseRetryHandlerFromEnvRequiresDedicatedToken(t *testing.T) {
 		"IRON_PROXY_TOKEN":                       "control-plane-token",
 	}
 
-	handler, _, err := responseRetryHandlerFromEnv(mapEnv(env), time.Second)
+	handler, _, err := responseRetryHandlerFromEnv(mapEnv(env), time.Second, nil, nil)
 
 	require.Nil(t, handler)
 	require.ErrorContains(t, err, "handler token is required")
