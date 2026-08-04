@@ -39,6 +39,16 @@ var forbiddenRetryHeaders = map[string]struct{}{
 
 const defaultClientTimeout = 10 * time.Second
 
+var (
+	privateNetworks = []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("fc00::/7"),
+	}
+	ipv6MetadataAddress = netip.MustParseAddr("fd00:ec2::254")
+)
+
 // Handler asks a trusted service whether a bounded upstream response should
 // be retried and reports the result of the one permitted replay.
 type Handler struct {
@@ -60,6 +70,7 @@ type Options struct {
 	Statuses          []int
 	AllowHTTP         bool
 	CompletionHeaders []string
+	AllowCIDRs        []string
 	Resolver          *net.Resolver
 	Guard             *dnsguard.Guard
 	ClientTimeout     time.Duration
@@ -132,6 +143,10 @@ func New(opts Options) (*Handler, error) {
 	if len(statusSet) == 0 {
 		return nil, fmt.Errorf("at least one response retry status is required")
 	}
+	allowCIDRs, err := parsePrivateCIDRs(opts.AllowCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("response retry handler allow CIDRs: %w", err)
+	}
 	completionHeaders := make(map[string]struct{}, len(opts.CompletionHeaders))
 	for _, name := range opts.CompletionHeaders {
 		if !httpguts.ValidHeaderFieldName(name) {
@@ -146,7 +161,14 @@ func New(opts Options) (*Handler, error) {
 		sandboxID:         opts.SandboxID,
 		statuses:          statusSet,
 		completionHeaders: completionHeaders,
-		client:            hardenedClient(opts.Client, opts.Resolver, opts.Guard, opts.ClientTimeout),
+		client: hardenedClient(
+			opts.Client,
+			opts.Resolver,
+			opts.Guard,
+			opts.ClientTimeout,
+			allowCIDRs,
+			[]*url.URL{authorizeURL, completeURL},
+		),
 	}, nil
 }
 
@@ -292,6 +314,9 @@ func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
 		return nil, fmt.Errorf("response retry handler URL must be absolute without credentials")
 	}
+	if u.Fragment != "" {
+		return nil, fmt.Errorf("response retry handler URL must not contain a fragment")
+	}
 	httpAllowed := u.Scheme == "http" && (allowHTTP || isLoopback(u.Hostname()))
 	if u.Scheme != "https" && !httpAllowed {
 		return nil, fmt.Errorf("response retry handler URL must use HTTPS unless HTTP is explicitly allowed")
@@ -299,9 +324,16 @@ func parseEndpoint(endpoint string, allowHTTP bool) (*url.URL, error) {
 	return u, nil
 }
 
-func hardenedClient(client *http.Client, resolver *net.Resolver, guard *dnsguard.Guard, timeout time.Duration) *http.Client {
+func hardenedClient(
+	client *http.Client,
+	resolver *net.Resolver,
+	guard *dnsguard.Guard,
+	timeout time.Duration,
+	allowCIDRs []netip.Prefix,
+	endpoints []*url.URL,
+) *http.Client {
 	if client == nil {
-		client = &http.Client{Transport: newHandlerTransport(resolver, guard)}
+		client = &http.Client{Transport: newHandlerTransport(resolver, guard, allowCIDRs, endpoints)}
 	}
 	result := *client
 	if result.Timeout <= 0 {
@@ -317,33 +349,123 @@ func hardenedClient(client *http.Client, resolver *net.Resolver, guard *dnsguard
 }
 
 type handlerTransport struct {
-	guarded  http.RoundTripper
-	loopback http.RoundTripper
+	guarded          http.RoundTripper
+	loopback         http.RoundTripper
+	allowedEndpoints map[string]struct{}
 }
 
-func newHandlerTransport(resolver *net.Resolver, guard *dnsguard.Guard) http.RoundTripper {
+func newHandlerTransport(
+	resolver *net.Resolver,
+	guard *dnsguard.Guard,
+	allowCIDRs []netip.Prefix,
+	endpoints []*url.URL,
+) http.RoundTripper {
 	guardedDialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Resolver:  resolver,
-		Control:   guard.DialControl,
+		Control:   handlerDialControl(guard, allowCIDRs),
 	}
 	loopbackDialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Control:   loopbackOnlyDialControl,
 	}
+	allowedEndpoints := make(map[string]struct{}, len(endpoints))
+	for _, endpoint := range endpoints {
+		allowedEndpoints[handlerEndpointKey(endpoint)] = struct{}{}
+	}
 	return &handlerTransport{
-		guarded:  newHTTPTransport(guardedDialer),
-		loopback: newHTTPTransport(loopbackDialer),
+		guarded:          newHTTPTransport(guardedDialer),
+		loopback:         newHTTPTransport(loopbackDialer),
+		allowedEndpoints: allowedEndpoints,
 	}
 }
 
 func (t *handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if _, allowed := t.allowedEndpoints[handlerEndpointKey(req.URL)]; !allowed || req.Method != http.MethodPost {
+		return nil, fmt.Errorf("response retry transport rejected unconfigured request")
+	}
 	if isLoopback(req.URL.Hostname()) {
 		return t.loopback.RoundTrip(req)
 	}
 	return t.guarded.RoundTrip(req)
+}
+
+func handlerEndpointKey(endpoint *url.URL) string {
+	port := endpoint.Port()
+	if port == "" {
+		if strings.EqualFold(endpoint.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	path := endpoint.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return strings.ToLower(endpoint.Scheme) + "\x00" +
+		net.JoinHostPort(strings.ToLower(endpoint.Hostname()), port) + "\x00" +
+		path + "\x00" + endpoint.RawQuery
+}
+
+func handlerDialControl(guard *dnsguard.Guard, allowCIDRs []netip.Prefix) func(string, string, syscall.RawConn) error {
+	return func(network string, address string, connection syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			host = address
+		}
+		addr, err := netip.ParseAddr(host)
+		if err == nil {
+			addr = addr.Unmap()
+			if guard.IsDenied(addr) && prefixContains(allowCIDRs, addr) {
+				return nil
+			}
+		}
+		return guard.DialControl(network, address, connection)
+	}
+}
+
+func parsePrivateCIDRs(cidrs []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+	for _, raw := range cidrs {
+		value := strings.TrimSpace(raw)
+		if value == "" || !strings.Contains(value, "/") {
+			return nil, fmt.Errorf("invalid CIDR %q: must use CIDR notation", raw)
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", raw, err)
+		}
+		prefix = prefix.Masked()
+		if !prefixWithin(prefix, privateNetworks) {
+			return nil, fmt.Errorf("CIDR %q must be within a private address range", raw)
+		}
+		if prefix.Contains(ipv6MetadataAddress) {
+			return nil, fmt.Errorf("CIDR %q includes a metadata address", raw)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+func prefixWithin(prefix netip.Prefix, networks []netip.Prefix) bool {
+	for _, network := range networks {
+		if prefix.Bits() >= network.Bits() && network.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixContains(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func newHTTPTransport(dialer *net.Dialer) *http.Transport {

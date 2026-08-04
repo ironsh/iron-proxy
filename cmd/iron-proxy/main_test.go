@@ -65,12 +65,13 @@ func TestSplitCommaSeparated(t *testing.T) {
 
 func TestResponseRetryHandlerFromEnv(t *testing.T) {
 	base := map[string]string{
-		"IRON_RESPONSE_RETRY_HANDLER_URL":        "http://127.0.0.1/authorize",
-		"IRON_RESPONSE_RETRY_COMPLETE_URL":       "http://127.0.0.1/complete",
-		"IRON_RESPONSE_RETRY_HANDLER_TOKEN":      "handler-token",
-		"IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID": "sandbox-1",
-		"IRON_RESPONSE_RETRY_STATUSES":           "402,409",
-		"IRON_RESPONSE_RETRY_COMPLETION_HEADERS": "X-Receipt",
+		"IRON_RESPONSE_RETRY_HANDLER_URL":         "http://127.0.0.1/authorize",
+		"IRON_RESPONSE_RETRY_COMPLETE_URL":        "http://127.0.0.1/complete",
+		"IRON_RESPONSE_RETRY_HANDLER_TOKEN":       "handler-token",
+		"IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID":  "sandbox-1",
+		"IRON_RESPONSE_RETRY_STATUSES":            "402,409",
+		"IRON_RESPONSE_RETRY_COMPLETION_HEADERS":  "X-Receipt",
+		"IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS": "10.43.0.0/16",
 	}
 
 	handler, statuses, err := responseRetryHandlerFromEnv(mapEnv(base), time.Second, nil, nil)
@@ -78,6 +79,37 @@ func TestResponseRetryHandlerFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, handler)
 	require.Equal(t, []int{402, 409}, statuses)
+}
+
+func TestResponseRetryHandlerFromEnvRejectsUnsafeAllowCIDRs(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "missing prefix", value: "10.43.0.1", want: "must use CIDR notation"},
+		{name: "public range", value: "203.0.113.0/24", want: "private address range"},
+		{name: "link local", value: "169.254.0.0/16", want: "private address range"},
+		{name: "IPv6 metadata", value: "fd00::/8", want: "metadata address"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{
+				"IRON_RESPONSE_RETRY_HANDLER_URL":         "http://127.0.0.1/authorize",
+				"IRON_RESPONSE_RETRY_COMPLETE_URL":        "http://127.0.0.1/complete",
+				"IRON_RESPONSE_RETRY_HANDLER_TOKEN":       "handler-token",
+				"IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID":  "sandbox-1",
+				"IRON_RESPONSE_RETRY_STATUSES":            "402",
+				"IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS": tc.value,
+			}
+
+			handler, _, err := responseRetryHandlerFromEnv(mapEnv(env), time.Second, nil, nil)
+
+			require.Nil(t, handler)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 func TestResponseRetryHandlerFromEnvDisabled(t *testing.T) {

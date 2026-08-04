@@ -303,6 +303,13 @@ trusted internal network. Redirects are rejected, and the response retry token
 must be configured independently from the control-plane token. WebSocket,
 gRPC, and unknown-length streaming requests bypass response retry handling.
 
+When a trusted handler resolves inside `proxy.upstream_deny_cidrs`, set
+`IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS` to a comma-separated list of the
+narrow private CIDRs it may use. This exception applies only to the exact
+configured authorize and complete endpoints; ordinary proxied traffic remains
+subject to the full upstream deny list. Public, loopback, link-local, and cloud
+metadata ranges cannot be added through this setting.
+
 ### Allowlist
 
 Default-deny. Requests must match at least one domain glob or CIDR to proceed.

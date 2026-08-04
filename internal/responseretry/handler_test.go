@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +21,12 @@ import (
 )
 
 const testAttemptID = "8ace71a1-4e12-47e5-9df4-f2f660db6a82"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func testOptions(endpoint string, client *http.Client) Options {
 	return Options{
@@ -185,6 +193,13 @@ func TestNewValidatesConfiguration(t *testing.T) {
 			want: "without credentials",
 		},
 		{
+			name: "URL fragment",
+			mutate: func(opts *Options) {
+				opts.AuthorizeEndpoint = "https://handler.example/authorize#fragment"
+			},
+			want: "must not contain a fragment",
+		},
+		{
 			name: "missing token",
 			mutate: func(opts *Options) {
 				opts.Token = ""
@@ -218,6 +233,41 @@ func TestNewValidatesConfiguration(t *testing.T) {
 				opts.CompletionHeaders = []string{"Bad Header"}
 			},
 			want: "invalid completion response header",
+		},
+		{
+			name: "allow address without prefix",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"10.43.0.1"}
+			},
+			want: "must use CIDR notation",
+		},
+		{
+			name: "malformed allow CIDR",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"10.43.0.0/99"}
+			},
+			want: "invalid CIDR",
+		},
+		{
+			name: "public allow CIDR",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"203.0.113.0/24"}
+			},
+			want: "must be within a private address range",
+		},
+		{
+			name: "link-local allow CIDR",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"169.254.0.0/16"}
+			},
+			want: "must be within a private address range",
+		},
+		{
+			name: "IPv6 metadata allow CIDR",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"fd00::/8"}
+			},
+			want: "includes a metadata address",
 		},
 	}
 
@@ -412,7 +462,7 @@ func TestHandlerCompleteDoesNotRetryClientFailure(t *testing.T) {
 func TestHardenedClientDoesNotMutateInputClient(t *testing.T) {
 	originalRedirect := func(_ *http.Request, _ []*http.Request) error { return fmt.Errorf("original") }
 	client := &http.Client{CheckRedirect: originalRedirect}
-	hardened := hardenedClient(client, nil, nil, 0)
+	hardened := hardenedClient(client, nil, nil, 0, nil, nil)
 
 	require.NotSame(t, client, hardened)
 	require.Zero(t, client.Timeout)
@@ -479,6 +529,137 @@ func TestHandlerClientAllowsExplicitLoopbackDespiteGuard(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, retry)
 	require.Nil(t, decision)
+}
+
+func TestParsePrivateCIDRs(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  netip.Prefix
+	}{
+		{name: "ten", value: "10.43.0.1/16", want: netip.MustParsePrefix("10.43.0.0/16")},
+		{name: "172", value: "172.20.0.0/16", want: netip.MustParsePrefix("172.20.0.0/16")},
+		{name: "192", value: "192.168.10.0/24", want: netip.MustParsePrefix("192.168.10.0/24")},
+		{name: "IPv6 ULA", value: "fd12:3456::/48", want: netip.MustParsePrefix("fd12:3456::/48")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prefixes, err := parsePrivateCIDRs([]string{tc.value})
+			require.NoError(t, err)
+			require.Equal(t, []netip.Prefix{tc.want}, prefixes)
+		})
+	}
+}
+
+func TestHandlerDialControlAllowsOnlyConfiguredPrivateCIDRs(t *testing.T) {
+	guard, err := dnsguard.New([]string{
+		"10.42.0.0/16",
+		"10.43.0.0/16",
+		"169.254.0.0/16",
+		"203.0.113.0/24",
+		"fd00::/8",
+	})
+	require.NoError(t, err)
+	allowCIDRs, err := parsePrivateCIDRs([]string{"10.43.0.0/16", "fd12:3456::/48"})
+	require.NoError(t, err)
+	control := handlerDialControl(guard, allowCIDRs)
+
+	cases := []struct {
+		name    string
+		address string
+		allowed bool
+	}{
+		{name: "configured service CIDR", address: "10.43.5.10:8090", allowed: true},
+		{name: "mapped configured service CIDR", address: "[::ffff:10.43.5.10]:8090", allowed: true},
+		{name: "configured IPv6 ULA", address: "[fd12:3456::10]:8090", allowed: true},
+		{name: "ordinary allowed address", address: "8.8.8.8:443", allowed: true},
+		{name: "malformed address deferred to dialer", address: "not-an-address", allowed: true},
+		{name: "different private CIDR", address: "10.42.5.10:8090", allowed: false},
+		{name: "IPv4 metadata", address: "169.254.169.254:80", allowed: false},
+		{name: "IPv6 metadata", address: "[fd00:ec2::254]:80", allowed: false},
+		{name: "denied public CIDR", address: "203.0.113.10:443", allowed: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := control("tcp", tc.address, nil)
+			if tc.allowed {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				require.True(t, dnsguard.IsDenyError(err))
+			}
+		})
+	}
+
+	err = guard.DialControl("tcp", "10.43.5.10:8090", nil)
+	require.Error(t, err)
+	require.True(t, dnsguard.IsDenyError(err), "the handler exception must not modify the shared guard")
+}
+
+func TestHandlerTransportAllowsOnlyConfiguredEndpoints(t *testing.T) {
+	authorizeEndpoint, err := url.Parse("https://handler.internal/authorize?realm=payments")
+	require.NoError(t, err)
+	completeEndpoint, err := url.Parse("https://handler.internal/complete")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name    string
+		method  string
+		request string
+		allowed bool
+	}{
+		{name: "authorize", request: "https://handler.internal/authorize?realm=payments", allowed: true},
+		{name: "complete", request: "https://handler.internal/complete", allowed: true},
+		{name: "explicit default port", request: "https://handler.internal:443/complete", allowed: true},
+		{name: "different authority", request: "https://other.internal/authorize?realm=payments", allowed: false},
+		{name: "different port", request: "https://handler.internal:8443/complete", allowed: false},
+		{name: "downgraded scheme", request: "http://handler.internal/complete", allowed: false},
+		{name: "different path", request: "https://handler.internal/admin", allowed: false},
+		{name: "missing query", request: "https://handler.internal/authorize", allowed: false},
+		{name: "different query", request: "https://handler.internal/authorize?realm=other", allowed: false},
+		{name: "different method", method: http.MethodGet, request: "https://handler.internal/complete", allowed: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			roundTripper := roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			})
+			transport := &handlerTransport{
+				guarded:  roundTripper,
+				loopback: roundTripper,
+				allowedEndpoints: map[string]struct{}{
+					handlerEndpointKey(authorizeEndpoint): {},
+					handlerEndpointKey(completeEndpoint):  {},
+				},
+			}
+			method := tc.method
+			if method == "" {
+				method = http.MethodPost
+			}
+			req, err := http.NewRequest(method, tc.request, nil)
+			require.NoError(t, err)
+
+			resp, err := transport.RoundTrip(req)
+			if tc.allowed {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				require.NoError(t, resp.Body.Close())
+				require.EqualValues(t, 1, calls.Load())
+			} else {
+				require.ErrorContains(t, err, "unconfigured request")
+				require.Nil(t, resp)
+				require.Zero(t, calls.Load())
+			}
+		})
+	}
 }
 
 func TestSelectedHeadersIsCaseInsensitive(t *testing.T) {

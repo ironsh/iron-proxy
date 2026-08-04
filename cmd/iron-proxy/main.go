@@ -775,6 +775,7 @@ func responseRetryHandlerFromEnv(getenv func(string) string, timeout time.Durati
 		Statuses:          statuses,
 		AllowHTTP:         allowHTTP,
 		CompletionHeaders: splitCommaSeparated(completionHeaders),
+		AllowCIDRs:        splitCommaSeparated(getenv("IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS")),
 		Resolver:          resolver,
 		Guard:             guard,
 		ClientTimeout:     timeout,
