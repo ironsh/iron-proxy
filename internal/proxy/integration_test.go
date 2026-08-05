@@ -134,6 +134,7 @@ func TestIntegration_ResponseHandlerReturnsOriginalChallengeForOversizedRequest(
 		authorizeCalls++
 		var payload responseretry.DecisionRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		require.Equal(t, "http", payload.Scheme)
 		require.False(t, payload.Replayable)
 		_, _ = w.Write([]byte(`{"retry":false,"headers":{}}`))
 	}))

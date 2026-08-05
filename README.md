@@ -287,7 +287,7 @@ Set `IRON_RESPONSE_RETRY_HANDLER_URL`,
 `IRON_RESPONSE_RETRY_COMPLETE_URL`, `IRON_RESPONSE_RETRY_HANDLER_TOKEN`,
 `IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID`, and a comma-separated
 `IRON_RESPONSE_RETRY_STATUSES` list to enable externally authorized response
-retries. The authorization handler receives the exact authority, method,
+retries. The authorization handler receives the exact upstream scheme, authority, method,
 path/query, replayability, response status and headers, trace context, and
 sandbox identity. It may return request headers plus an attempt ID for one
 exact replay. The completion handler then receives the replay status and

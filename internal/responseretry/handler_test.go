@@ -46,6 +46,7 @@ func TestHandlerAuthorizeAndComplete(t *testing.T) {
 		require.Equal(t, "Bearer proxy-token", r.Header.Get("Authorization"))
 		var request DecisionRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.Equal(t, "https", request.Scheme)
 		require.Equal(t, "service.example", request.Host)
 		require.Equal(t, "/v1/search?q=one", request.Path)
 		require.Equal(t, "sandbox-1", request.SandboxID)
@@ -107,6 +108,40 @@ func TestHandlerAuthorizeAndComplete(t *testing.T) {
 		25*time.Millisecond,
 		50*time.Millisecond,
 	))
+}
+
+func TestHandlerReportsExactUpstreamScheme(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "HTTPS", target: "https://service.example/paid", want: "https"},
+		{name: "HTTP", target: "http://service.example/paid", want: "http"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request DecisionRequest
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				require.Equal(t, tc.want, request.Scheme)
+				_, err := w.Write([]byte(`{"retry":false,"headers":{}}`))
+				require.NoError(t, err)
+			}))
+			defer server.Close()
+			handler, err := New(testOptions(server.URL, server.Client()))
+			require.NoError(t, err)
+			req, err := http.NewRequest(http.MethodGet, tc.target, nil)
+			require.NoError(t, err)
+
+			decision, retry, err := handler.Decide(context.Background(), req, &http.Response{StatusCode: http.StatusPaymentRequired}, true)
+
+			require.NoError(t, err)
+			require.False(t, retry)
+			require.Nil(t, decision)
+		})
+	}
 }
 
 func TestHandlerSkipsUnconfiguredStatus(t *testing.T) {

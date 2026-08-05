@@ -79,6 +79,7 @@ type Options struct {
 // DecisionRequest describes the completed request and response. Request and
 // response bodies are deliberately excluded.
 type DecisionRequest struct {
+	Scheme          string              `json:"scheme"`
 	Host            string              `json:"host"`
 	Method          string              `json:"method"`
 	Path            string              `json:"path"`
@@ -182,6 +183,7 @@ func (h *Handler) Decide(ctx context.Context, req *http.Request, resp *http.Resp
 		path += "?" + req.URL.RawQuery
 	}
 	payload, err := json.Marshal(DecisionRequest{
+		Scheme:          req.URL.Scheme,
 		Host:            req.URL.Host,
 		Method:          req.Method,
 		Path:            path,
