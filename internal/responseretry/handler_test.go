@@ -263,9 +263,16 @@ func TestNewValidatesConfiguration(t *testing.T) {
 			want: "must be within a private address range",
 		},
 		{
-			name: "IPv6 metadata allow CIDR",
+			name: "AWS IPv6 metadata allow CIDR",
 			mutate: func(opts *Options) {
 				opts.AllowCIDRs = []string{"fd00::/8"}
+			},
+			want: "includes a metadata address",
+		},
+		{
+			name: "GCP IPv6 metadata allow CIDR",
+			mutate: func(opts *Options) {
+				opts.AllowCIDRs = []string{"fd20:ce::/64"}
 			},
 			want: "includes a metadata address",
 		},

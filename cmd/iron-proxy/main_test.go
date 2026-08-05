@@ -90,7 +90,8 @@ func TestResponseRetryHandlerFromEnvRejectsUnsafeAllowCIDRs(t *testing.T) {
 		{name: "missing prefix", value: "10.43.0.1", want: "must use CIDR notation"},
 		{name: "public range", value: "203.0.113.0/24", want: "private address range"},
 		{name: "link local", value: "169.254.0.0/16", want: "private address range"},
-		{name: "IPv6 metadata", value: "fd00::/8", want: "metadata address"},
+		{name: "AWS IPv6 metadata", value: "fd00::/8", want: "metadata address"},
+		{name: "GCP IPv6 metadata", value: "fd20:ce::/64", want: "metadata address"},
 	}
 
 	for _, tc := range cases {

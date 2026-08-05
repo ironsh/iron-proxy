@@ -29,8 +29,9 @@ Single binary. Single YAML config.
 - **Upstream IP deny list.** Even when a host is allowed, the proxy refuses
   to dial it if its resolved address falls inside a denied CIDR — closing
   the SSRF/DNS-rebinding gap where an allowlisted hostname points at IMDS
-  or loopback. Cloud metadata endpoints (`169.254.169.254`) and loopback are
-  denied by default; override via `proxy.upstream_deny_cidrs` or
+  or loopback. Cloud metadata endpoints (`169.254.169.254`,
+  `fd00:ec2::254`, and `fd20:ce::254`) and loopback are denied by default;
+  override via `proxy.upstream_deny_cidrs` or
   `IRON_PROXY_UPSTREAM_DENY_CIDRS`.
 - **Boundary-level secret injection.** Workloads send proxy tokens; iron-proxy
   replaces them with real secrets before the request leaves. If the sandbox is

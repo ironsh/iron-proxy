@@ -46,7 +46,6 @@ var (
 		netip.MustParsePrefix("192.168.0.0/16"),
 		netip.MustParsePrefix("fc00::/7"),
 	}
-	ipv6MetadataAddress = netip.MustParseAddr("fd00:ec2::254")
 )
 
 // Handler asks a trusted service whether a bounded upstream response should
@@ -442,7 +441,7 @@ func parsePrivateCIDRs(cidrs []string) ([]netip.Prefix, error) {
 		if !prefixWithin(prefix, privateNetworks) {
 			return nil, fmt.Errorf("CIDR %q must be within a private address range", raw)
 		}
-		if prefix.Contains(ipv6MetadataAddress) {
+		if dnsguard.ContainsMetadataAddress(prefix) {
 			return nil, fmt.Errorf("CIDR %q includes a metadata address", raw)
 		}
 		prefixes = append(prefixes, prefix)
