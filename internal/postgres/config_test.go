@@ -90,9 +90,17 @@ func TestCompile(t *testing.T) {
 		require.ErrorContains(t, err, "at least one upstream is required")
 	})
 
-	t.Run("duplicate upstream database rejected", func(t *testing.T) {
+	t.Run("duplicate upstream route rejected", func(t *testing.T) {
 		_, err := Compile(cfg(upstream("dup"), upstream("dup")), logger, stubSource)
-		require.ErrorContains(t, err, `duplicate upstream database "dup"`)
+		require.ErrorContains(t, err, `duplicate upstream route "dup"`)
+	})
+
+	t.Run("multiple routes require selectors", func(t *testing.T) {
+		legacy := upstream("shared")
+		named := upstream("shared")
+		named.Route = "reader"
+		_, err := Compile(cfg(legacy, named), logger, stubSource)
+		require.ErrorContains(t, err, `database "shared" has multiple upstreams`)
 	})
 
 	t.Run("upstream database is required", func(t *testing.T) {
@@ -151,4 +159,44 @@ func TestCompile(t *testing.T) {
 		_, err := Compile(cfg(u), logger, stubSource)
 		require.ErrorContains(t, err, "duplicate setting")
 	})
+}
+
+func TestLoadFromNodeAllowsDistinctRoutesForOneDatabase(t *testing.T) {
+	t.Setenv("PG_PW", "secret")
+	t.Setenv("PG_DSN", "host=127.0.0.1 port=1 dbname=appdb")
+
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(`
+listen: "127.0.0.1:0"
+client:
+  user: app
+  password_env: PG_PW
+upstreams:
+  - database: appdb
+    route: audit
+    dsn:
+      type: env
+      var: PG_DSN
+  - database: appdb
+    route: company-context
+    dsn:
+      type: env
+      var: PG_DSN
+    role: company_context_reader
+`), &node))
+
+	listener, err := LoadFromNode(*node.Content[0], slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Len(t, listener.Upstreams(), 2)
+	require.Nil(t, listener.Upstream("appdb"))
+	audit, err := listener.SelectUpstream("appdb", "audit")
+	require.NoError(t, err)
+	require.Empty(t, audit.Role())
+	companyContext, err := listener.SelectUpstream("appdb", "company-context")
+	require.NoError(t, err)
+	require.Equal(t, "company_context_reader", companyContext.Role())
+	_, err = listener.SelectUpstream("appdb", "")
+	require.ErrorIs(t, err, ErrRouteRequired)
+	_, err = listener.SelectUpstream("appdb", "unknown")
+	require.ErrorIs(t, err, ErrUnknownRoute)
 }

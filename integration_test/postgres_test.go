@@ -459,19 +459,23 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 
 	pgAddr := proxy.AddrFor(t, "postgres proxy starting")
 
-	// connStrTo selects an upstream by the database name the client requests.
-	// Every upstream lives on the same listener; only the database differs.
-	connStrTo := func(database string) string {
+	connConfigTo := func(t *testing.T, database, route string) *pgconn.Config {
+		t.Helper()
 		host, port, _ := net.SplitHostPort(pgAddr)
-		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-			pgClientUser, pgClientPassword, host, port, database)
+		config, err := pgconn.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+			pgClientUser, pgClientPassword, host, port, database))
+		require.NoError(t, err)
+		if route != "" {
+			config.RuntimeParams["iron.route"] = route
+		}
+		return config
 	}
 
-	queryScalar := func(t *testing.T, database, sql string) string {
+	queryScalar := func(t *testing.T, database, route, sql string) string {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		conn, err := pgconn.Connect(ctx, connStrTo(database))
+		conn, err := pgconn.ConnectConfig(ctx, connConfigTo(t, database, route))
 		require.NoError(t, err)
 		defer func() { _ = conn.Close(context.Background()) }()
 		results, err := conn.Exec(ctx, sql).ReadAll()
@@ -482,11 +486,13 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 	}
 
 	t.Run("each upstream routes to its own database and role", func(t *testing.T) {
-		require.Equal(t, "appdb", queryScalar(t, "appdb", "SELECT current_database()"))
-		require.Equal(t, "tenant_role", queryScalar(t, "appdb", "SELECT current_role"))
+		require.Equal(t, "appdb", queryScalar(t, "appdb", "tenant", "SELECT current_database()"))
+		require.Equal(t, "tenant_role", queryScalar(t, "appdb", "tenant", "SELECT current_role"))
+		require.Equal(t, "appdb", queryScalar(t, "appdb", "other-role", "SELECT current_database()"))
+		require.Equal(t, "other_role", queryScalar(t, "appdb", "other-role", "SELECT current_role"))
 
-		require.Equal(t, "otherdb", queryScalar(t, "otherdb", "SELECT current_database()"))
-		require.Equal(t, "other_role", queryScalar(t, "otherdb", "SELECT current_role"))
+		require.Equal(t, "otherdb", queryScalar(t, "otherdb", "", "SELECT current_database()"))
+		require.Equal(t, "other_role", queryScalar(t, "otherdb", "", "SELECT current_role"))
 	})
 
 	t.Run("role scopes rows via rls on the appdb upstream", func(t *testing.T) {
@@ -495,12 +501,38 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 
 		// The appdb upstream injects tenant_role, so RLS scopes the client to
 		// tenant_role's rows.
-		client, err := pgx.Connect(ctx, connStrTo("appdb"))
+		host, port, _ := net.SplitHostPort(pgAddr)
+		config, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+			pgClientUser, pgClientPassword, host, port, "appdb"))
+		require.NoError(t, err)
+		config.RuntimeParams["iron.route"] = "tenant"
+		client, err := pgx.ConnectConfig(ctx, config)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = client.Close(ctx) })
 		var count int
 		require.NoError(t, client.QueryRow(ctx, "SELECT count(*) FROM items").Scan(&count))
 		require.Equal(t, 2, count, "appdb upstream should see only tenant_role's rows")
+	})
+
+	t.Run("ambiguous database without route is rejected", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := pgconn.ConnectConfig(ctx, connConfigTo(t, "appdb", ""))
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)
+		require.Equal(t, "3D000", pgErr.Code)
+		require.Contains(t, pgErr.Message, "iron.route")
+	})
+
+	t.Run("unknown route is rejected", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := pgconn.ConnectConfig(ctx, connConfigTo(t, "appdb", "unknown"))
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)
+		require.Equal(t, "3D000", pgErr.Code)
 	})
 
 	t.Run("database not matching the dsn is rejected", func(t *testing.T) {
@@ -509,7 +541,7 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 		// the client on appdb.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := pgconn.Connect(ctx, connStrTo("mismatch"))
+		_, err := pgconn.ConnectConfig(ctx, connConfigTo(t, "mismatch", ""))
 		require.Error(t, err, "an upstream whose DSN database differs from its route database must be rejected")
 		var pgErr *pgconn.PgError
 		require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)
@@ -520,7 +552,7 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 	t.Run("unknown database is rejected", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := pgconn.Connect(ctx, connStrTo("nonexistent"))
+		_, err := pgconn.ConnectConfig(ctx, connConfigTo(t, "nonexistent", ""))
 		require.Error(t, err, "a database with no matching upstream must be rejected")
 		var pgErr *pgconn.PgError
 		require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)

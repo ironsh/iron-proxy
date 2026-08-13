@@ -232,10 +232,10 @@ func TestPostgresListenerFromSync_LocalWinsOnCollision(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, listener)
 	require.Len(t, listener.Upstreams(), 1, "the synced upstream colliding with the local one is dropped")
-	require.Contains(t, logBuf.String(), "duplicate database")
+	require.Contains(t, logBuf.String(), "duplicate route")
 }
 
-func TestPostgresListenerFromSync_DuplicateSyncedDatabaseDropped(t *testing.T) {
+func TestPostgresListenerFromSync_SameDatabaseRoutesRetained(t *testing.T) {
 	raw := json.RawMessage(`[
 		{"id":"pgs_1","foreign_id":"a","database":"shared","dsn":{"type":"env","var":"PG_DSN"}},
 		{"id":"pgs_2","foreign_id":"b","database":"shared","dsn":{"type":"env","var":"PG_DSN"}}
@@ -246,9 +246,14 @@ func TestPostgresListenerFromSync_DuplicateSyncedDatabaseDropped(t *testing.T) {
 	listener, ok := postgresListenerFromSync(nil, mapEnv(pgListenerEnv()), logger, raw)
 	require.True(t, ok)
 	require.NotNil(t, listener)
-	require.Len(t, listener.Upstreams(), 1)
-	require.NotNil(t, listener.Upstream("shared"))
-	require.Contains(t, logBuf.String(), "duplicate database")
+	require.Len(t, listener.Upstreams(), 2)
+	require.Nil(t, listener.Upstream("shared"), "multiple routes require an explicit selector")
+	a, err := listener.SelectUpstream("shared", "a")
+	require.NoError(t, err)
+	require.Equal(t, "a", a.Route())
+	b, err := listener.SelectUpstream("shared", "b")
+	require.NoError(t, err)
+	require.Equal(t, "b", b.Route())
 }
 
 func TestPostgresListenerFromSync_InvalidPayload(t *testing.T) {

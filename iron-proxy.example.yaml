@@ -715,26 +715,26 @@ transforms:
 # (no per-user).
 #
 # The proxy runs a single postgres listener: the postgres key is one object
-# with a bind address and a list of upstreams. A single listen address serves
-# many upstream databases. The client selects an upstream by the database name
-# it sends in its startup message (psql's `dbname=`), and the proxy
-# authenticates that connection against the upstream's own credentials before
-# dialing it. The client must name a database explicitly; a database with no
-# matching upstream is rejected. Each upstream's `database` must equal the
-# database its DSN connects to (the dbname in the DSN) — otherwise the client
-# would land on a different database than the one it named, and the proxy
-# rejects the connection.
+# with a bind address and a list of upstream routes. A single listen address
+# serves many physical databases and can expose multiple policy routes for one
+# database. The client selects an upstream by the database name it sends in its
+# startup message (psql's `dbname=`), and, when a database has multiple routes,
+# the `iron.route` startup parameter. A database with no matching upstream is
+# rejected, and an ambiguous database without `iron.route` fails closed. Each
+# upstream's `database` must equal the database its DSN connects to (the dbname
+# in the DSN) — the logical route selector never replaces this physical check.
 # postgres:
 #   listen: ":5432"
 #   # The single credential clients present to the proxy, shared across every
-#   # upstream below. Routing is by database, so per-database credentials add
-#   # nothing.
+#   # upstream below.
 #   client:
 #     user: app_user
 #     password_env: PG_PROXY_PASSWORD
 #   upstreams:
 #     # Clients connect with dbname=appdb to reach this upstream.
 #     - database: appdb
+#       # Optional logical selector. Required when appdb has multiple routes.
+#       route: readonly
 #       # The DSN is loaded from any registered secret source and passed
 #       # verbatim to pgconn. URL or keyword/value form both work.
 #       dsn:
