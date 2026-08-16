@@ -103,9 +103,10 @@ func TestNewManagedUpstream(t *testing.T) {
 	require.Empty(t, u.Role())
 
 	// Settings are carried through and pinned.
-	u, err = NewManagedUpstream("centaur", dsn, "reader", []Setting{{Name: "centaur.slack_channel_id", Value: "C123"}})
+	u, err = NewManagedRoute("centaur", "company-context", dsn, "reader", []Setting{{Name: "centaur.slack_channel_id", Value: "C123"}})
 	require.NoError(t, err)
 	require.Equal(t, []Setting{{Name: "centaur.slack_channel_id", Value: "C123"}}, u.Settings())
+	require.Equal(t, "company-context", u.Route())
 	require.Contains(t, u.PinnedGUCs(), "centaur.slack_channel_id")
 
 	// Settings are validated identically to the YAML path.
@@ -147,13 +148,13 @@ func TestNewListener(t *testing.T) {
 	_, err = NewListener("127.0.0.1:0", "app", "pw", nil)
 	require.ErrorContains(t, err, "at least one upstream is required")
 	_, err = NewListener("127.0.0.1:0", "app", "pw", []*Upstream{mustUpstream("a"), mustUpstream("a")})
-	require.ErrorContains(t, err, `duplicate upstream database "a"`)
+	require.ErrorContains(t, err, `duplicate upstream route "a"`)
 }
 
 func TestListenerWithUpstreams(t *testing.T) {
 	dsn := staticDSN{name: "dsn", value: "host=db"}
 	mustUpstream := func(database string) *Upstream {
-		u, err := NewManagedUpstream(database, dsn, "", nil)
+		u, err := NewManagedRoute(database, database+"-route", dsn, "", nil)
 		require.NoError(t, err)
 		return u
 	}
@@ -162,7 +163,7 @@ func TestListenerWithUpstreams(t *testing.T) {
 	require.NoError(t, err)
 
 	merged, dropped := base.WithUpstreams([]*Upstream{mustUpstream("b"), mustUpstream("a")})
-	require.Equal(t, []string{"a"}, dropped, "existing database wins")
+	require.Equal(t, []string{"a/a-route"}, dropped, "existing route wins")
 	require.Len(t, merged.Upstreams(), 2)
 	require.NotNil(t, merged.Upstream("a"))
 	require.NotNil(t, merged.Upstream("b"))

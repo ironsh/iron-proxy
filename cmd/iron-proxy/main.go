@@ -598,7 +598,7 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 	synced := make([]*postgres.Upstream, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		u, err := postgres.NewManagedUpstream(e.Database, e.DSN, e.Role, e.Settings)
+		u, err := postgres.NewManagedRoute(e.Database, e.ForeignID, e.DSN, e.Role, e.Settings)
 		if err != nil {
 			logger.Error("skipping synced postgres upstream: invalid upstream",
 				slog.String("foreign_id", e.ForeignID),
@@ -606,14 +606,15 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 			)
 			continue
 		}
-		if seen[u.Database()] {
-			logger.Warn("skipping synced postgres upstream: duplicate database",
+		key := u.Database() + "\x00" + u.Route()
+		if seen[key] {
+			logger.Warn("skipping synced postgres upstream: duplicate route",
 				slog.String("foreign_id", e.ForeignID),
 				slog.String("database", u.Database()),
 			)
 			continue
 		}
-		seen[u.Database()] = true
+		seen[key] = true
 		synced = append(synced, u)
 	}
 
@@ -621,9 +622,9 @@ func postgresListenerFromSync(local *postgres.Listener, getenv func(string) stri
 	// address and client credential. Local wins on a database collision.
 	if local != nil {
 		merged, dropped := local.WithUpstreams(synced)
-		for _, db := range dropped {
-			logger.Warn("skipping synced postgres upstream: duplicate database",
-				slog.String("database", db))
+		for _, route := range dropped {
+			logger.Warn("skipping synced postgres upstream: duplicate route",
+				slog.String("route", route))
 		}
 		return merged, true
 	}

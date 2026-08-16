@@ -20,10 +20,18 @@ postgres:
     # Two upstreams routing to two distinct databases, each injecting its own
     # role. Each upstream's database must match the database its DSN connects to.
     - database: appdb
+      route: tenant
       dsn:
         type: env
         var: PG_UPSTREAM_DSN
       role: tenant_role
+
+    - database: appdb
+      route: other-role
+      dsn:
+        type: env
+        var: PG_UPSTREAM_DSN
+      role: other_role
 
     - database: otherdb
       dsn:

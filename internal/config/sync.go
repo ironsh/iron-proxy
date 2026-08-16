@@ -121,14 +121,12 @@ func MCPFromSync(raw json.RawMessage) (node yaml.Node, present bool, err error) 
 }
 
 // PostgresSyncEntry is one control-plane-synced postgres upstream, mapped to a
-// single route under the managed listener. The DSN, optional role, and routing
-// database come from the control plane; the per-route client credentials are
-// supplied separately via environment variables keyed off ForeignID (see the
-// managed-mode env convention in cmd/iron-proxy).
+// single route under the managed listener. ForeignID is the logical route
+// selector while Database remains the physical database the DSN must name.
 type PostgresSyncEntry struct {
 	ForeignID string
-	// Database is the routing key clients use to reach this upstream. Required:
-	// it must equal the database the DSN connects to, so the control plane must
+	// Database is the physical database clients request in StartupMessage. It
+	// must equal the database the DSN connects to, so the control plane must
 	// supply it explicitly.
 	Database string
 	DSN      secrets.Source

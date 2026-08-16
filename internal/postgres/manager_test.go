@@ -25,8 +25,8 @@ func testListener(listen string) *Listener {
 		listen:         listen,
 		clientUser:     "u",
 		clientPassword: "p",
-		upstreams: map[string]*Upstream{
-			"appdb": {
+		upstreams: map[upstreamKey]*Upstream{
+			{database: "appdb"}: {
 				database: "appdb",
 				dsn:      staticDSN{name: "test", value: "host=127.0.0.1"},
 			},

@@ -47,11 +47,19 @@ func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, lo
 		)
 		return
 	}
-	upstream := listener.Upstream(dbName)
-	if upstream == nil {
-		writeFatal(backend, "3D000", fmt.Sprintf("no upstream for database %q", dbName))
-		logger.Info("postgres: no upstream for database",
+	route := startup.Parameters["iron.route"]
+	upstream, selectErr := listener.SelectUpstream(dbName, route)
+	if selectErr != nil {
+		message := fmt.Sprintf("no upstream for database %q", dbName)
+		if errors.Is(selectErr, ErrRouteRequired) {
+			message = fmt.Sprintf("database %q has multiple policy routes; iron.route is required", dbName)
+		} else if errors.Is(selectErr, ErrUnknownRoute) {
+			message = fmt.Sprintf("no upstream for database %q and requested iron.route", dbName)
+		}
+		writeFatal(backend, "3D000", message)
+		logger.Info("postgres: upstream route selection failed",
 			slog.String("database", dbName),
+			slog.Bool("has_route", route != ""),
 			slog.String("listener", listener.Name()),
 			slog.String("remote", clientConn.RemoteAddr().String()),
 		)
