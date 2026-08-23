@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"gopkg.in/yaml.v3"
 
 	transformv1 "github.com/ironsh/iron-proxy/gen/transform/v1"
@@ -28,6 +29,7 @@ type fakeServer struct {
 	reqModified  *transformv1.HttpRequest
 	reqAnnot     map[string]string
 	lastReqProto *transformv1.TransformRequestRequest
+	lastReqMeta  metadata.MD
 
 	respAction    transformv1.TransformAction
 	respModified  *transformv1.HttpResponse
@@ -35,8 +37,9 @@ type fakeServer struct {
 	lastRespProto *transformv1.TransformResponseRequest
 }
 
-func (f *fakeServer) TransformRequest(_ context.Context, in *transformv1.TransformRequestRequest) (*transformv1.TransformRequestResponse, error) {
+func (f *fakeServer) TransformRequest(ctx context.Context, in *transformv1.TransformRequestRequest) (*transformv1.TransformRequestResponse, error) {
 	f.lastReqProto = in
+	f.lastReqMeta, _ = metadata.FromIncomingContext(ctx)
 	return &transformv1.TransformRequestResponse{
 		Action:          f.reqAction,
 		Response:        f.reqResponse,
@@ -109,6 +112,35 @@ func TestTransformRequest_Continue(t *testing.T) {
 	require.Equal(t, "example.com", srv.lastReqProto.GetContext().GetSni())
 	require.Equal(t, "GET", srv.lastReqProto.GetRequest().GetMethod())
 	require.Equal(t, "hello", srv.lastReqProto.GetRequest().GetHeaders()["X-Test"].GetValues()[0])
+}
+
+func TestTransformRequest_ForwardsConfiguredIdentity(t *testing.T) {
+	srv := &fakeServer{reqAction: transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE}
+	addr := startFakeServer(t, srv)
+	gt, err := newGRPCTransform(grpcConfig{Name: "test", Target: addr, WorkloadIdentity: "install/group/session"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = gt.Close() })
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+
+	_, err = gt.TransformRequest(context.Background(), testContext(), req)
+	require.NoError(t, err)
+	require.Equal(t, []string{"install/group/session"}, srv.lastReqMeta.Get("x-iron-workload-identity"))
+}
+
+func TestTransformRequest_UnknownActionsReject(t *testing.T) {
+	for _, action := range []transformv1.TransformAction{
+		transformv1.TransformAction_TRANSFORM_ACTION_UNSPECIFIED,
+		transformv1.TransformAction(99),
+	} {
+		t.Run(action.String(), func(t *testing.T) {
+			srv := &fakeServer{reqAction: action}
+			gt := newTestTransform(t, "test", startFakeServer(t, srv), false, false)
+			req, _ := http.NewRequest("GET", "https://example.com/", nil)
+			result, err := gt.TransformRequest(context.Background(), testContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionReject, result.Action)
+		})
+	}
 }
 
 func TestTransformRequest_TunnelInfoInContext(t *testing.T) {
@@ -287,6 +319,23 @@ func TestTransformResponse_Reject(t *testing.T) {
 	require.Equal(t, transform.ActionReject, result.Action)
 	require.NotNil(t, result.Response)
 	require.Equal(t, 502, result.Response.StatusCode)
+}
+
+func TestTransformResponse_UnknownActionsReject(t *testing.T) {
+	for _, action := range []transformv1.TransformAction{
+		transformv1.TransformAction_TRANSFORM_ACTION_UNSPECIFIED,
+		transformv1.TransformAction(99),
+	} {
+		t.Run(action.String(), func(t *testing.T) {
+			srv := &fakeServer{respAction: action}
+			gt := newTestTransform(t, "test", startFakeServer(t, srv), false, false)
+			req, _ := http.NewRequest("GET", "https://example.com/", nil)
+			resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody}
+			result, err := gt.TransformResponse(context.Background(), testContext(), req, resp)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionReject, result.Action)
+		})
+	}
 }
 
 // --- send body tests ---

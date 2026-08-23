@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/yaml.v3"
 
@@ -30,6 +31,7 @@ func init() {
 type grpcConfig struct {
 	Name             string                 `yaml:"name"`
 	Target           string                 `yaml:"target"`
+	WorkloadIdentity string                 `yaml:"workload_identity"`
 	TLS              tlsConfig              `yaml:"tls"`
 	SendRequestBody  bool                   `yaml:"send_request_body"`
 	SendResponseBody bool                   `yaml:"send_response_body"`
@@ -46,6 +48,7 @@ type tlsConfig struct {
 // GRPCTransform delegates to a single external gRPC TransformService server.
 type GRPCTransform struct {
 	name             string
+	workloadIdentity string
 	sendRequestBody  bool
 	sendResponseBody bool
 	rules            []hostmatch.Rule
@@ -119,6 +122,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 
 	return &GRPCTransform{
 		name:             cfg.Name,
+		workloadIdentity: cfg.WorkloadIdentity,
 		sendRequestBody:  cfg.SendRequestBody,
 		sendResponseBody: cfg.SendResponseBody,
 		rules:            rules,
@@ -139,6 +143,7 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
 
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-workload-identity", g.workloadIdentity)
 	resp, err := g.client.TransformRequest(ctx, &transformv1.TransformRequestRequest{
 		Context: transformContextToProto(tctx),
 		Request: pbReq,
@@ -151,12 +156,17 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 		tctx.Annotate(k, v)
 	}
 
-	if resp.GetAction() == transformv1.TransformAction_TRANSFORM_ACTION_REJECT {
+	switch resp.GetAction() {
+	case transformv1.TransformAction_TRANSFORM_ACTION_REJECT:
 		result := &transform.TransformResult{Action: transform.ActionReject}
 		if resp.GetResponse() != nil {
 			result.Response = protoToHTTPResponse(resp.GetResponse(), req)
 		}
 		return result, nil
+	case transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE:
+		// Continue below so a valid response may modify the request.
+	default:
+		return &transform.TransformResult{Action: transform.ActionReject}, nil
 	}
 
 	if resp.GetModifiedRequest() != nil {
@@ -180,6 +190,7 @@ func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.T
 		return nil, fmt.Errorf("grpc transform %q: marshaling response: %w", g.name, err)
 	}
 
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-workload-identity", g.workloadIdentity)
 	grpcResp, err := g.client.TransformResponse(ctx, &transformv1.TransformResponseRequest{
 		Context:  transformContextToProto(tctx),
 		Request:  pbReq,
@@ -193,12 +204,17 @@ func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.T
 		tctx.Annotate(k, v)
 	}
 
-	if grpcResp.GetAction() == transformv1.TransformAction_TRANSFORM_ACTION_REJECT {
+	switch grpcResp.GetAction() {
+	case transformv1.TransformAction_TRANSFORM_ACTION_REJECT:
 		result := &transform.TransformResult{Action: transform.ActionReject}
 		if grpcResp.GetModifiedResponse() != nil {
 			result.Response = protoToHTTPResponse(grpcResp.GetModifiedResponse(), req)
 		}
 		return result, nil
+	case transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE:
+		// Continue below so a valid response may modify the response.
+	default:
+		return &transform.TransformResult{Action: transform.ActionReject}, nil
 	}
 
 	if grpcResp.GetModifiedResponse() != nil {
