@@ -65,7 +65,13 @@ type Proxy struct {
 	ready           func() bool
 }
 
-const notReadyMessage = "proxy is not ready: awaiting control-plane config"
+const (
+	notReadyMessage = "proxy is not ready: awaiting control-plane config"
+	// Keep HTTP/2 receive windows bounded because each unread response stream
+	// owns transport buffers; the default stream window is 4 MiB.
+	maxHTTP2ReceiveBufferPerConnection = 2 << 20
+	maxHTTP2ReceiveBufferPerStream     = 1 << 20
+)
 
 // Options configures Proxy construction.
 type Options struct {
@@ -950,7 +956,11 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		DialContext: dialer.DialContext,
 		// A custom DialContext disables net/http's automatic HTTP/2; opt back in
 		// so gRPC upstreams negotiate h2 over the same (dnsguard-controlled) dialer.
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2: true,
+		HTTP2: &http.HTTP2Config{
+			MaxReceiveBufferPerConnection: maxHTTP2ReceiveBufferPerConnection,
+			MaxReceiveBufferPerStream:     maxHTTP2ReceiveBufferPerStream,
+		},
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
