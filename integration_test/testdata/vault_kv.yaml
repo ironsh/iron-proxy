@@ -1,0 +1,38 @@
+dns:
+  proxy_ip: "127.0.0.1"
+  listen: "127.0.0.1:0"
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  max_request_body_bytes: 1048576
+  upstream_deny_cidrs: []
+
+tls:
+  ca_cert: "{{.CACert}}"
+  ca_key: "{{.CAKey}}"
+
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "127.0.0.1"
+
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: vault_kv
+            mount: "secret"
+            path: "services/openai"
+            json_key: "api_key"
+          proxy_value: "proxy-vault-secret"
+          match_headers: ["X-Vault-Secret"]
+          rules:
+            - host: "127.0.0.1"
+
+metrics:
+  listen: "127.0.0.1:0"
+
+log:
+  level: info

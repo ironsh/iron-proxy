@@ -39,6 +39,29 @@ func echoHeadersUpstream(t *testing.T, headers ...string) string {
 	return srv.Listener.Addr().String()
 }
 
+// validatingEchoHeadersUpstream verifies non-empty request credentials before
+// reflecting them. The proxy should scrub the reflected values before they
+// reach the client.
+func validatingEchoHeadersUpstream(t *testing.T, expected map[string]string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for header, want := range expected {
+			got := r.Header.Get(header)
+			if got == "" {
+				continue
+			}
+			if got != want {
+				http.Error(w, "unexpected credential", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set(echoedHeaderName(header), got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
 // echoedHeaderName returns the response header name used by echoHeadersUpstream
 // for a given request header: "X-Foo" -> "X-Got-Foo".
 func echoedHeaderName(h string) string {
@@ -94,9 +117,9 @@ type proxyInstance struct {
 	HTTPAddr string
 	cmd      *exec.Cmd
 
-	addrsMu     sync.Mutex
-	addrs       map[string]string
-	namedAddrs  map[string]string // key: msg+"|"+name (for log lines that include a name field, like postgres servers).
+	addrsMu    sync.Mutex
+	addrs      map[string]string
+	namedAddrs map[string]string // key: msg+"|"+name (for log lines that include a name field, like postgres servers).
 }
 
 // AddrFor blocks until a JSON log line with the given "starting" msg has been

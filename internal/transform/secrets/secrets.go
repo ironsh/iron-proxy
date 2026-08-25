@@ -130,6 +130,15 @@ type Secrets struct {
 	secrets []resolvedSecret
 }
 
+type responseReplacement struct {
+	upstream string
+	client   string
+}
+
+type responseReplacementsKey struct{}
+
+const injectedSecretPlaceholder = "[REDACTED]"
+
 func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) {
 	var c secretsConfig
 	if err := cfg.Decode(&c); err != nil {
@@ -148,6 +157,7 @@ func defaultRegistry(logger *slog.Logger) sourceBuilderRegistry {
 		"control_plane":     newControlPlaneBuilder(logger),
 		"aws_sm":            newAWSSMBuilder(logger),
 		"aws_ssm":           newAWSSSMBuilder(logger),
+		"vault_kv":          newVaultKVBuilder(logger),
 		"1password":         newOPBuilder(logger),
 		"1password_connect": newOPConnectBuilder(logger),
 	}
@@ -355,11 +365,13 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		}
 
 		if sec.mode == "inject" {
-			locations, err := s.injectSecret(req, &sec, realValue)
+			locations, sentValue, err := s.injectSecret(req, &sec, realValue)
 			if err != nil {
 				return nil, fmt.Errorf("injecting secret %q: %w", name, err)
 			}
 			if len(locations) > 0 {
+				recordResponseReplacement(req, sentValue, injectedSecretPlaceholder)
+				recordResponseReplacement(req, realValue, injectedSecretPlaceholder)
 				injected = append(injected, secretRecord{Secret: name, Locations: locations})
 			}
 			continue
@@ -385,6 +397,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 		}
 
 		if len(locations) > 0 {
+			recordResponseReplacement(req, realValue, sec.proxyValue)
 			swapped = append(swapped, secretRecord{Secret: name, Locations: locations})
 		} else if sec.require {
 			tctx.Annotate("rejected", name)
@@ -401,14 +414,19 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	if len(unavailable) > 0 {
 		tctx.Annotate("secret_unavailable", unavailable)
 	}
+	if len(swapped) > 0 || len(injected) > 0 {
+		// Let the upstream transport negotiate compression itself so Go can
+		// transparently decode the response before secret scrubbing.
+		req.Header.Del("Accept-Encoding")
+	}
 
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
-func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue string) ([]string, error) {
+func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue string) ([]string, string, error) {
 	formatted, err := s.formatValue(sec, realValue)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var locations []string
@@ -422,7 +440,7 @@ func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue
 		req.URL.RawQuery = q.Encode()
 		locations = append(locations, "query:"+sec.injectQueryParam)
 	}
-	return locations, nil
+	return locations, formatted, nil
 }
 
 func (s *Secrets) formatValue(sec *resolvedSecret, realValue string) (string, error) {
@@ -436,8 +454,65 @@ func (s *Secrets) formatValue(sec *resolvedSecret, realValue string) (string, er
 	return buf.String(), nil
 }
 
-func (s *Secrets) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
+func (s *Secrets) TransformResponse(_ context.Context, _ *transform.TransformContext, req *http.Request, resp *http.Response) (*transform.TransformResult, error) {
+	replacements, _ := req.Context().Value(responseReplacementsKey{}).([]responseReplacement)
+	if len(replacements) == 0 {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+
+	for name, values := range resp.Header {
+		for i, value := range values {
+			resp.Header[name][i] = scrubString(value, replacements)
+		}
+	}
+
+	if req.Method == http.MethodHead || resp.ContentLength == 0 {
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
+	}
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil, fmt.Errorf("cannot scrub secret from encoded upstream response")
+	}
+
+	body := transform.RequireBufferedBody(resp.Body)
+	if body.Truncated() {
+		return nil, fmt.Errorf("cannot scrub secret from truncated upstream response")
+	}
+	reader := body.StreamingReader()
+	readCloser, ok := reader.(io.ReadCloser)
+	if !ok {
+		readCloser = io.NopCloser(reader)
+	}
+	resp.Body = transform.NewBufferedBody(newReplacingReadCloser(readCloser, replacements), body.MaxBytes())
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Content-MD5")
+	resp.Header.Del("Digest")
+	resp.Header.Del("ETag")
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+func recordResponseReplacement(req *http.Request, upstream, client string) {
+	if upstream == "" || upstream == client {
+		return
+	}
+	replacements, _ := req.Context().Value(responseReplacementsKey{}).([]responseReplacement)
+	for _, replacement := range replacements {
+		if replacement.upstream == upstream && replacement.client == client {
+			return
+		}
+	}
+	replacements = append(append([]responseReplacement(nil), replacements...), responseReplacement{
+		upstream: upstream,
+		client:   client,
+	})
+	*req = *req.WithContext(context.WithValue(req.Context(), responseReplacementsKey{}, replacements))
+}
+
+func scrubString(value string, replacements []responseReplacement) string {
+	for _, replacement := range replacements {
+		value = strings.ReplaceAll(value, replacement.upstream, replacement.client)
+	}
+	return value
 }
 
 func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue string) []string {
@@ -446,7 +521,9 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 		for name, vals := range req.Header {
 			for i, v := range vals {
 				if headerContains(name, v, sec.proxyValue) {
-					req.Header[name][i] = replaceInHeader(name, v, sec.proxyValue, realValue)
+					replaced := replaceInHeader(name, v, sec.proxyValue, realValue)
+					req.Header[name][i] = replaced
+					recordResponseReplacement(req, replaced, v)
 					locations = append(locations, "header:"+name)
 				}
 			}
@@ -468,7 +545,11 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 			if headerContains(canonical, v, sec.proxyValue) {
 				hit = true
 			}
-			return replaceInHeader(canonical, v, sec.proxyValue, realValue)
+			replaced := replaceInHeader(canonical, v, sec.proxyValue, realValue)
+			if replaced != v {
+				recordResponseReplacement(req, replaced, v)
+			}
+			return replaced
 		})
 		if hit {
 			locations = append(locations, "header:"+wireName)
