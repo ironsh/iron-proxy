@@ -28,9 +28,13 @@ func TestVaultKV(t *testing.T) {
 	}))
 	t.Cleanup(vault.Close)
 
-	upstreamHost := validatingEchoHeadersUpstream(t, map[string]string{
-		"X-Vault-Secret": "real-vault-secret",
-	})
+	upstreamValues := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamValues <- r.Header.Get("X-Vault-Secret")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamHost := upstream.Listener.Addr().String()
 	tmpDir := t.TempDir()
 	ca, err := cagen.Generate(cagen.Options{Name: "vault-kv-test", ExpiryHours: 1, Algorithm: cagen.Ed25519})
 	require.NoError(t, err)
@@ -52,11 +56,11 @@ func TestVaultKV(t *testing.T) {
 		"VAULT_CLIENT_KEY=",
 	})
 
-	status, headers := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{
+	status, _ := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{
 		"X-Vault-Secret": "proxy-vault-secret",
 	})
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "proxy-vault-secret", headers.Get("X-Got-Vault-Secret"))
+	require.Equal(t, http.StatusNoContent, status)
+	require.Equal(t, "real-vault-secret", <-upstreamValues)
 
 	request := <-requests
 	require.Equal(t, "/v1/secret/data/services/openai", request.path)

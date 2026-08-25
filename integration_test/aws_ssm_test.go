@@ -17,11 +17,11 @@ func TestAWSSystemsManagerParameterStore(t *testing.T) {
 		{"json_parameter", "X-JSON-Param", "proxy-json-param", "example_value"},
 	}
 
-	expected := make(map[string]string, len(cases))
-	for _, tc := range cases {
-		expected[tc.header] = tc.want
+	headers := make([]string, len(cases))
+	for i, tc := range cases {
+		headers[i] = tc.header
 	}
-	upstreamHost := validatingEchoHeadersUpstream(t, expected)
+	upstreamHost := echoHeadersUpstream(t, headers...)
 
 	cfgPath := renderConfig(t, t.TempDir(), "aws_ssm.yaml", nil)
 	proxy := startProxy(t, proxyBinary(t), cfgPath, nil)
@@ -30,7 +30,7 @@ func TestAWSSystemsManagerParameterStore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			status, hdr := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{tc.header: tc.sent})
 			require.Equal(t, http.StatusOK, status)
-			require.Equal(t, tc.sent, hdr.Get(echoedHeaderName(tc.header)))
+			require.Equal(t, tc.want, hdr.Get(echoedHeaderName(tc.header)))
 		})
 	}
 }

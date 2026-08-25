@@ -47,8 +47,6 @@ func TestBufferedBody_MaxBytesTruncates(t *testing.T) {
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
-	require.True(t, body.Truncated())
-	require.Equal(t, int64(5), body.MaxBytes())
 
 	// Reset and re-read: same truncated data.
 	body.Reset()
@@ -63,8 +61,6 @@ func TestBufferedBody_Unlimited(t *testing.T) {
 	data, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, "hello world", string(data))
-	require.False(t, body.Truncated())
-	require.Zero(t, body.MaxBytes())
 }
 
 func TestBufferedBody_NilBody(t *testing.T) {

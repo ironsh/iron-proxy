@@ -510,86 +510,16 @@ func TestSecrets_HostWithPort(t *testing.T) {
 	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
 }
 
-func TestSecrets_ResponseScrubsReflectedValues(t *testing.T) {
+func TestSecrets_ResponseIsNoop(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
 		e.MatchHeaders = nil
 	})})
 
-	req := openaiReq("GET", "/v1/chat")
-	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
-	doTransform(t, s, req)
-
-	resp := &http.Response{
-		StatusCode:    http.StatusOK,
-		Header:        http.Header{"X-Reflected-Secret": {"sk-real-openai-key"}},
-		Body:          transform.NewBufferedBody(io.NopCloser(strings.NewReader("before sk-real-openai-key after")), 1<<20),
-		ContentLength: int64(len("before sk-real-openai-key after")),
-	}
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	resp := &http.Response{StatusCode: http.StatusOK}
 	res, err := s.TransformResponse(context.Background(), &transform.TransformContext{}, req, resp)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionContinue, res.Action)
-	require.Equal(t, "proxy-openai-abc123", resp.Header.Get("X-Reflected-Secret"))
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, "before proxy-openai-abc123 after", string(body))
-	require.Equal(t, int64(-1), resp.ContentLength)
-}
-
-func TestSecrets_ResponseScrubsBasicAuthReflection(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry()})
-	req := openaiReq("GET", "/v1/chat")
-	proxyHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:proxy-openai-abc123"))
-	req.Header.Set("Authorization", proxyHeader)
-	doTransform(t, s, req)
-	realHeader := req.Header.Get("Authorization")
-
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"X-Reflected-Secret": {realHeader}},
-		Body:       transform.NewBufferedBody(http.NoBody, 1<<20),
-	}
-	_, err := s.TransformResponse(context.Background(), &transform.TransformContext{}, req, resp)
-	require.NoError(t, err)
-	require.Equal(t, proxyHeader, resp.Header.Get("X-Reflected-Secret"))
-}
-
-func TestSecrets_ResponseRedactsInjectedValue(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
-		e.ProxyValue = ""
-		e.MatchHeaders = nil
-		e.Inject = &injectConfig{Header: "Authorization", Formatter: "Bearer {{.Value}}"}
-	})})
-	req := openaiReq("GET", "/v1/chat")
-	doTransform(t, s, req)
-	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"))
-
-	resp := &http.Response{
-		StatusCode:    http.StatusOK,
-		Header:        http.Header{},
-		Body:          transform.NewBufferedBody(io.NopCloser(strings.NewReader("Bearer sk-real-openai-key")), 1<<20),
-		ContentLength: int64(len("Bearer sk-real-openai-key")),
-	}
-	_, err := s.TransformResponse(context.Background(), &transform.TransformContext{}, req, resp)
-	require.NoError(t, err)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, injectedSecretPlaceholder, string(body))
-}
-
-func TestSecrets_ResponseRejectsEncodedBody(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry()})
-	req := openaiReq("GET", "/v1/chat")
-	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
-	doTransform(t, s, req)
-
-	resp := &http.Response{
-		StatusCode:    http.StatusOK,
-		Header:        http.Header{"Content-Encoding": {"gzip"}},
-		Body:          transform.NewBufferedBody(io.NopCloser(strings.NewReader("encoded")), 1<<20),
-		ContentLength: 7,
-	}
-	_, err := s.TransformResponse(context.Background(), &transform.TransformContext{}, req, resp)
-	require.ErrorContains(t, err, "encoded upstream response")
 }
 
 func TestSecrets_ConcurrentSafety(t *testing.T) {
@@ -1574,3 +1504,4 @@ func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
 	defer fr.mu.Unlock()
 	require.Equal(t, 1, fr.fetchCalls["MISSING"])
 }
+
