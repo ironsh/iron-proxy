@@ -311,6 +311,26 @@ configured authorize and complete endpoints; ordinary proxied traffic remains
 subject to the full upstream deny list. Public, loopback, link-local, and cloud
 metadata ranges cannot be added through this setting.
 
+### Rule matching
+
+Transforms that take a `rules:` list share one matcher. A rule matches when
+every field it sets matches the request:
+
+```yaml
+rules:
+  - host: "api.openai.com" # domain glob; mutually exclusive with cidr
+    cidr: "10.0.0.0/8" # matches a literal-IP host
+    source_ip: "10.1.0.0/16" # client source address; CIDR or single IP
+    methods: ["POST"] # omitted or ["*"] matches all methods
+    paths: ["/v1/*"] # omitted matches all paths
+```
+
+`source_ip` matches the address the request arrived from, not the destination.
+Use it to give one proxy a different policy per client: each rule applies only
+to the source range it names. A rule that omits `source_ip` matches any
+source. A rule that sets it never matches a client address the proxy cannot
+parse as an IP.
+
 ### Allowlist
 
 Default-deny. Requests must match at least one domain glob or CIDR to proceed.
