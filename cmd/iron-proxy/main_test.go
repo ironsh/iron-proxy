@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/ironsh/iron-proxy/internal/management"
 	"github.com/ironsh/iron-proxy/internal/postgres"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
@@ -362,4 +367,95 @@ func TestApplyPipelineSync_PreservesAuditFunc(t *testing.T) {
 
 	holder.Load().EmitAudit(nil)
 	require.True(t, called, "audit func should be carried over to the new pipeline")
+}
+
+// testLogger discards output; these tests assert on behavior, not on logs.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// runAwaitShutdown starts awaitShutdown and returns the channels that drive it
+// plus a channel that closes when it returns.
+func runAwaitShutdown(reload management.ReloadFunc) (chan os.Signal, chan error, chan struct{}) {
+	sigc := make(chan os.Signal, 1)
+	errc := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		awaitShutdown(context.Background(), sigc, errc, reload, testLogger())
+		close(done)
+	}()
+	return sigc, errc, done
+}
+
+func requireStillRunning(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatal("awaitShutdown returned; the proxy must keep running")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func requireStopped(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitShutdown did not return")
+	}
+}
+
+func TestAwaitShutdown_SIGHUPReloadsAndKeepsRunning(t *testing.T) {
+	var reloads atomic.Int32
+	sigc, _, done := runAwaitShutdown(func(context.Context) error {
+		reloads.Add(1)
+		return nil
+	})
+
+	sigc <- syscall.SIGHUP
+	require.Eventually(t, func() bool { return reloads.Load() == 1 },
+		2*time.Second, 5*time.Millisecond, "SIGHUP must trigger a reload")
+	requireStillRunning(t, done)
+
+	sigc <- syscall.SIGHUP
+	require.Eventually(t, func() bool { return reloads.Load() == 2 },
+		2*time.Second, 5*time.Millisecond, "every SIGHUP must trigger a reload")
+	requireStillRunning(t, done)
+
+	sigc <- syscall.SIGTERM
+	requireStopped(t, done)
+	require.Equal(t, int32(2), reloads.Load())
+}
+
+func TestAwaitShutdown_FailedReloadKeepsRunning(t *testing.T) {
+	var reloads atomic.Int32
+	sigc, _, done := runAwaitShutdown(func(context.Context) error {
+		reloads.Add(1)
+		return errors.New("bad config")
+	})
+
+	sigc <- syscall.SIGHUP
+	require.Eventually(t, func() bool { return reloads.Load() == 1 },
+		2*time.Second, 5*time.Millisecond)
+	requireStillRunning(t, done)
+
+	sigc <- syscall.SIGINT
+	requireStopped(t, done)
+}
+
+func TestAwaitShutdown_SIGHUPIgnoredWithoutReload(t *testing.T) {
+	sigc, _, done := runAwaitShutdown(nil)
+
+	sigc <- syscall.SIGHUP
+	requireStillRunning(t, done)
+
+	sigc <- syscall.SIGTERM
+	requireStopped(t, done)
+}
+
+func TestAwaitShutdown_FatalErrorStops(t *testing.T) {
+	_, errc, done := runAwaitShutdown(func(context.Context) error { return nil })
+
+	errc <- errors.New("proxy: listener closed")
+	requireStopped(t, done)
 }

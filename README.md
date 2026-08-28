@@ -1034,6 +1034,19 @@ curl -X POST http://127.0.0.1:9092/v1/reload \
   -H "Authorization: Bearer $IRON_MANAGEMENT_API_KEY"
 ```
 
+### Reload with SIGHUP
+
+A proxy started with `--config` also reloads on `SIGHUP`, which does the same
+work as `POST /v1/reload` and needs no management server and no token:
+
+```bash
+kill -HUP "$(pidof iron-proxy)"
+```
+
+SIGHUP never stops the proxy. An invalid config leaves the running pipeline in
+place and logs the error. Managed mode has no config file to re-read, so it
+logs the signal and ignores it.
+
 ## iron.sh
 
 Need Vault/KMS secret backends, a Kubernetes operator, or centralized policy
