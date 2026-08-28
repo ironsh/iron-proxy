@@ -13,15 +13,35 @@ import (
 	"syscall"
 )
 
+var metadataAddresses = []netip.Addr{
+	netip.MustParseAddr("169.254.169.254"),
+	netip.MustParseAddr("fd00:ec2::254"),
+	netip.MustParseAddr("fd20:ce::254"),
+}
+
 // DefaultDenyCIDRs is the secure-default list applied when the operator has
 // not configured upstream_deny_cidrs. It blocks cloud instance metadata
 // endpoints and loopback. RFC1918 is intentionally excluded — many legitimate
 // iron-proxy deployments target private corporate networks.
-var DefaultDenyCIDRs = []string{
-	"169.254.169.254/32",
-	"fd00:ec2::254/128",
-	"127.0.0.0/8",
-	"::1/128",
+var DefaultDenyCIDRs = defaultDenyCIDRs()
+
+func defaultDenyCIDRs() []string {
+	cidrs := make([]string, 0, len(metadataAddresses)+2)
+	for _, address := range metadataAddresses {
+		cidrs = append(cidrs, netip.PrefixFrom(address, address.BitLen()).String())
+	}
+	return append(cidrs, "127.0.0.0/8", "::1/128")
+}
+
+// ContainsMetadataAddress reports whether prefix contains a known cloud
+// instance metadata address.
+func ContainsMetadataAddress(prefix netip.Prefix) bool {
+	for _, address := range metadataAddresses {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 // DenyError reports a connection refused because the resolved address falls

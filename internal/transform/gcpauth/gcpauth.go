@@ -40,6 +40,7 @@ import (
 
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/gcpjwt"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -258,12 +259,17 @@ func isTokenEndpoint(req *http.Request) bool {
 	}
 	switch host {
 	case "oauth2.googleapis.com":
-		return path == "/token"
+		return path == "/token" && !isIDTokenJWTBearerRequest(req)
 	case "metadata.google.internal", "169.254.169.254":
 		return strings.HasPrefix(path, "/computeMetadata/v1/instance/service-accounts/") &&
 			strings.HasSuffix(path, "/token")
 	}
 	return false
+}
+
+func isIDTokenJWTBearerRequest(req *http.Request) bool {
+	_, ok := gcpjwt.JWTBearerTargetAudience(req)
+	return ok
 }
 
 func stubTokenResponse(req *http.Request) *http.Response {

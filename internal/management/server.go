@@ -45,8 +45,16 @@ type statusResponse struct {
 type Options struct {
 	Addr   string
 	APIKey string
+	// Reload rebuilds the pipeline from the on-disk config. Standalone mode
+	// only; nil disables /v1/reload (managed proxies have no file to re-read).
 	Reload ReloadFunc
-	Logger *slog.Logger
+	// Status returns a JSON-encodable snapshot of the applied control-plane
+	// state. Managed mode only; nil disables /v1/status.
+	Status func() any
+	// SyncNow requests an immediate control-plane sync. Managed mode only;
+	// nil disables /v1/sync.
+	SyncNow func()
+	Logger  *slog.Logger
 
 	// Ctx is the process-scoped context passed to Reload. It must outlive
 	// individual HTTP requests so a client disconnect cannot abort a reload
@@ -57,11 +65,13 @@ type Options struct {
 
 // Server serves the management API.
 type Server struct {
-	server *http.Server
-	apiKey string
-	reload ReloadFunc
-	logger *slog.Logger
-	ctx    context.Context
+	server  *http.Server
+	apiKey  string
+	reload  ReloadFunc
+	status  func() any
+	syncNow func()
+	logger  *slog.Logger
+	ctx     context.Context
 }
 
 // New creates a Server bound to opts.Addr. The caller starts it with
@@ -73,12 +83,16 @@ func New(opts Options) *Server {
 		ctx = context.Background()
 	}
 	s := &Server{
-		apiKey: opts.APIKey,
-		reload: opts.Reload,
-		logger: opts.Logger,
-		ctx:    ctx,
+		apiKey:  opts.APIKey,
+		reload:  opts.Reload,
+		status:  opts.Status,
+		syncNow: opts.SyncNow,
+		logger:  opts.Logger,
+		ctx:     ctx,
 	}
 	mux.HandleFunc("/v1/reload", s.handleReload)
+	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/sync", s.handleSync)
 	s.server = &http.Server{
 		Addr:    opts.Addr,
 		Handler: mux,
@@ -111,6 +125,10 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
 		return
 	}
+	if s.reload == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "reload is unavailable in managed mode"})
+		return
+	}
 
 	// Use the server-scoped context, not r.Context(): reload mutates
 	// process-wide state and must not be cut short by a client disconnect.
@@ -130,6 +148,45 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Error("management reload failed", slog.String("error", err.Error()))
 	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
+}
+
+// handleStatus serves the applied control-plane state (managed mode).
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(r) {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.status == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "status is unavailable in standalone mode"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status())
+}
+
+// handleSync requests an immediate control-plane sync (managed mode). The
+// sync itself is asynchronous: callers poll /v1/status to observe the
+// applied result.
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(r) {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.syncNow == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "sync is unavailable in standalone mode"})
+		return
+	}
+	s.syncNow()
+	writeJSON(w, http.StatusAccepted, statusResponse{Status: "sync requested"})
 }
 
 func (s *Server) authorize(r *http.Request) bool {

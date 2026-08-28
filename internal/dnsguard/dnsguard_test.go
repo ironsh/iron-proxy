@@ -50,6 +50,41 @@ func TestNew_AcceptsValid(t *testing.T) {
 	require.NotNil(t, g)
 }
 
+func TestDefaultDenyCIDRsBlockMetadataAddresses(t *testing.T) {
+	guard, err := New(DefaultDenyCIDRs)
+	require.NoError(t, err)
+
+	for _, address := range []string{
+		"169.254.169.254",
+		"fd00:ec2::254",
+		"fd20:ce::254",
+	} {
+		t.Run(address, func(t *testing.T) {
+			require.True(t, guard.IsDenied(netip.MustParseAddr(address)))
+		})
+	}
+}
+
+func TestContainsMetadataAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		prefix   string
+		contains bool
+	}{
+		{name: "IPv4 metadata", prefix: "169.254.169.254/32", contains: true},
+		{name: "AWS IPv6 metadata", prefix: "fd00::/8", contains: true},
+		{name: "GCP IPv6 metadata", prefix: "fd20:ce::/64", contains: true},
+		{name: "unrelated private IPv4", prefix: "10.0.0.0/8", contains: false},
+		{name: "unrelated unique local IPv6", prefix: "fd12:3456::/48", contains: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.contains, ContainsMetadataAddress(netip.MustParsePrefix(tc.prefix)))
+		})
+	}
+}
+
 func TestNew_NilAndEmpty(t *testing.T) {
 	g, err := New(nil)
 	require.NoError(t, err)

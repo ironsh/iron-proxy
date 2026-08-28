@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +48,7 @@ func TestLoadConfig_EnvOnly_AllOverrides(t *testing.T) {
 		"IRON_PROXY_MAX_REQUEST_BODY_BYTES":           "2097152",
 		"IRON_PROXY_MAX_RESPONSE_BODY_BYTES":          "4194304",
 		"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT": "5m",
+		"IRON_PROXY_UPSTREAM_DENY_CIDRS":              "10.0.0.0/8, 192.168.0.0/16",
 		"IRON_TLS_CA_CERT":                            "/custom/ca.pem",
 		"IRON_TLS_CA_KEY":                             "/custom/ca-key.pem",
 		"IRON_TLS_CERT_CACHE_SIZE":                    "500",
@@ -66,6 +68,8 @@ func TestLoadConfig_EnvOnly_AllOverrides(t *testing.T) {
 	require.Equal(t, ":1080", cfg.Proxy.TunnelListen)
 	require.Equal(t, int64(2097152), cfg.Proxy.MaxRequestBodyBytes)
 	require.Equal(t, int64(4194304), cfg.Proxy.MaxResponseBodyBytes)
+	require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+	require.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"}, cfg.Proxy.UpstreamDenyCIDRs.Values)
 	require.Equal(t, "/custom/ca.pem", cfg.TLS.CACert)
 	require.Equal(t, "/custom/ca-key.pem", cfg.TLS.CAKey)
 	require.Equal(t, 500, cfg.TLS.CertCacheSize)
@@ -264,6 +268,99 @@ func TestApplyEnvOverrides_UpstreamResponseHeaderTimeout(t *testing.T) {
 	})
 }
 
+func TestApplyEnvOverrides_UpstreamDenyCIDRs(t *testing.T) {
+	t.Run("env override applied", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_DENY_CIDRS": "10.0.0.0/8,192.168.0.0/16",
+		})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+		require.Equal(t, []string{"10.0.0.0/8", "192.168.0.0/16"}, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("env override beats yaml value", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_DENY_CIDRS": "10.0.0.0/8",
+		})
+
+		cfg := Config{Proxy: Proxy{UpstreamDenyCIDRs: CIDRList{
+			Values: []string{"169.254.169.254/32"},
+			Set:    true,
+		}}}
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+		require.Equal(t, []string{"10.0.0.0/8"}, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("unset keeps default", func(t *testing.T) {
+		setEnvs(t, map[string]string{})
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.True(t, cfg.Proxy.UpstreamDenyCIDRs.Set)
+		require.Equal(t, dnsguard.DefaultDenyCIDRs, cfg.Proxy.UpstreamDenyCIDRs.Values)
+	})
+
+	t.Run("invalid cidr rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_DENY_CIDRS": "1.2.3.4",
+		})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_PROXY_UPSTREAM_DENY_CIDRS")
+		require.Contains(t, err.Error(), "must be CIDR notation")
+	})
+
+	t.Run("empty entry rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_PROXY_UPSTREAM_DENY_CIDRS": "10.0.0.0/8,",
+		})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_PROXY_UPSTREAM_DENY_CIDRS")
+		require.Contains(t, err.Error(), "empty CIDR entry")
+	})
+}
+
+func TestApplyEnvOverrides_ControlPlanePollInterval(t *testing.T) {
+	t.Run("env override applied", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "15s",
+		})
+
+		var cfg Config
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 15*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("env override beats yaml value", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "20s",
+		})
+
+		cfg := Config{ControlPlane: ControlPlane{PollInterval: Duration(time.Minute)}}
+		require.NoError(t, applyEnvOverrides(&cfg))
+		require.Equal(t, 20*time.Second, time.Duration(cfg.ControlPlane.PollInterval))
+	})
+
+	t.Run("invalid duration rejected", func(t *testing.T) {
+		setEnvs(t, map[string]string{
+			"IRON_CONTROL_PLANE_POLL_INTERVAL": "not-a-duration",
+		})
+
+		var cfg Config
+		err := applyEnvOverrides(&cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "IRON_CONTROL_PLANE_POLL_INTERVAL")
+	})
+}
+
 func TestApplyEnvOverrides_DNSEnabled(t *testing.T) {
 	t.Run("false disables dns", func(t *testing.T) {
 		setEnvs(t, map[string]string{"IRON_DNS_ENABLED": "false"})
@@ -341,6 +438,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 		"IRON_PROXY_MAX_REQUEST_BODY_BYTES",
 		"IRON_PROXY_MAX_RESPONSE_BODY_BYTES",
 		"IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT",
+		"IRON_PROXY_UPSTREAM_DENY_CIDRS",
 		"IRON_TLS_CA_CERT",
 		"IRON_TLS_CA_KEY",
 		"IRON_TLS_CERT_CACHE_SIZE",

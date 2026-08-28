@@ -1,0 +1,24 @@
+{{- if and (eq .Values.mode "standalone") (not .Values.configExistingConfigMap) }}
+{{- /*
+The core listen addresses (dns/http/https/tunnel/metrics) are supplied via
+IRON_*_LISTEN env vars from .Values.listeners (see iron-proxy.listenerEnv), so they
+are not written here. postgres and management have no env override, so when those
+listeners are enabled their listen address is merged into the config from
+.Values.listeners — keeping .Values.listeners the single source of truth for ports.
+*/}}
+{{- $l := .Values.listeners -}}
+{{- $cfg := deepCopy .Values.config -}}
+{{- $over := dict -}}
+{{- if $l.postgres.enabled }}{{- $_ := set $over "postgres" (dict "listen" (printf ":%v" (int $l.postgres.port))) -}}{{- end }}
+{{- if $l.management.enabled }}{{- $_ := set $over "management" (dict "listen" (printf ":%v" (int $l.management.port))) -}}{{- end }}
+{{- $merged := mergeOverwrite $cfg $over -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iron-proxy.fullname" . }}
+  labels:
+    {{- include "iron-proxy.labels" . | nindent 4 }}
+data:
+  proxy.yaml: |
+    {{- toYaml $merged | nindent 4 }}
+{{- end }}
