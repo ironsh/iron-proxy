@@ -19,12 +19,17 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
+	"github.com/ironsh/iron-proxy/internal/hostmatch"
+	"github.com/ironsh/iron-proxy/internal/mcp"
+	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
@@ -64,8 +69,9 @@ func startProxy(t *testing.T) (*Proxy, string, string, *x509.CertPool) {
 
 // replacerTransform replaces request and response bodies with fixed-size padding.
 type replacerTransform struct {
-	reqBody  []byte
-	respBody []byte
+	reqBody    []byte
+	reqHeaders http.Header
+	respBody   []byte
 }
 
 func (r *replacerTransform) Name() string { return "replacer" }
@@ -79,6 +85,7 @@ func (r *replacerTransform) TransformRequest(_ context.Context, _ *transform.Tra
 		req.Body = transform.NewBufferedBodyFromBytes(r.reqBody)
 		req.ContentLength = int64(len(r.reqBody))
 	}
+	copyHeaders(req.Header, r.reqHeaders)
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
@@ -133,6 +140,34 @@ func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) 
 	return p, httpAddr, httpsAddr, pool
 }
 
+func startHTTPProxyWithMCP(t *testing.T, policy *mcp.Policy, gateway *mcpgateway.Gateway) (*Proxy, string) {
+	t.Helper()
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
+	p := New(Options{
+		HTTPAddr:   "127.0.0.1:0",
+		Pipeline:   transform.NewPipelineHolder(pipeline),
+		MCPPolicy:  mcp.NewPolicyHolder(policy),
+		MCPGateway: mcpgateway.NewHolder(gateway),
+		Logger:     testLogger(),
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = p.httpServer.Serve(ln) }()
+	t.Cleanup(func() { _ = p.httpServer.Close() })
+	return p, ln.Addr().String()
+}
+
+func mustYAMLNode(t *testing.T, src string) yaml.Node {
+	t.Helper()
+	var doc yaml.Node
+	err := yaml.Unmarshal([]byte(src), &doc)
+	require.NoError(t, err)
+	require.Equal(t, yaml.DocumentNode, doc.Kind)
+	require.NotEmpty(t, doc.Content)
+	return *doc.Content[0]
+}
+
 func TestHTTPProxy(t *testing.T) {
 	// Start an upstream HTTP server
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +220,116 @@ func TestHTTPProxy_PostBody(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "echo: request body", string(body))
+}
+
+func TestMCPGatewayRoutesAllowedCallWithCredential(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "real-token")
+
+	reached := make(chan struct{}, 1)
+	var wantHost string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
+		require.Equal(t, "Bearer real-token", r.Header.Get("Authorization"))
+		require.Equal(t, "/upstream", r.URL.Path)
+		require.Equal(t, wantHost, r.Host)
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Contains(t, string(body), `"tools/call"`)
+		w.Header().Set("Content-Type", "application/json")
+		_, err = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+		require.NoError(t, err)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	wantHost = upstreamURL.Host
+
+	policy, err := mcp.Compile(mcp.Config{
+		Servers: []mcp.ServerConfig{{
+			Name:  "github",
+			Rules: []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
+			Tools: []mcp.ToolConfig{{Name: "search_repositories"}},
+		}},
+	})
+	require.NoError(t, err)
+	gateway, err := mcpgateway.Compile(mcpgateway.Config{
+		Routes: []mcpgateway.RouteConfig{{
+			Name:     "github",
+			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
+			Upstream: upstreamURL.String() + "/upstream",
+			Credentials: []mcpgateway.CredentialConfig{{
+				Source: mustYAMLNode(t, `type: env
+var: MCP_TOKEN
+`),
+				Inject: mcpgateway.InjectConfig{
+					Header:    "Authorization",
+					Formatter: "Bearer {{ .Value }}",
+				},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+	_, proxyAddr := startHTTPProxyWithMCP(t, policy, gateway)
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_repositories","arguments":{}}}`))
+	require.NoError(t, err)
+	req.Host = "github.mcp.local"
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gateway upstream was not reached")
+	}
+}
+
+func TestMCPGatewayDeniedToolDoesNotReachUpstream(t *testing.T) {
+	var reached atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	policy, err := mcp.Compile(mcp.Config{
+		Servers: []mcp.ServerConfig{{
+			Name:  "github",
+			Rules: []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
+			Tools: []mcp.ToolConfig{{Name: "search_repositories"}},
+		}},
+	})
+	require.NoError(t, err)
+	gateway, err := mcpgateway.Compile(mcpgateway.Config{
+		Routes: []mcpgateway.RouteConfig{{
+			Name:     "github",
+			Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", Paths: []string{"/mcp"}}},
+			Upstream: upstreamURL.String(),
+		}},
+	})
+	require.NoError(t, err)
+	_, proxyAddr := startHTTPProxyWithMCP(t, policy, gateway)
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_repository","arguments":{}}}`))
+	require.NoError(t, err)
+	req.Host = "github.mcp.local"
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), "blocked by iron-proxy policy")
+	require.Equal(t, int32(0), reached.Load())
 }
 
 func TestHTTPSProxy(t *testing.T) {
@@ -831,4 +976,145 @@ func TestContainsDotSegments(t *testing.T) {
 			require.Equal(t, tc.want, containsDotSegments(tc.path))
 		})
 	}
+}
+
+func TestPrepareReplayBodyBoundaries(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		contentLength int64
+		limit         int64
+		wantReplay    bool
+	}{
+		{name: "below limit", body: "1234", contentLength: 4, limit: 5, wantReplay: true},
+		{name: "at limit", body: "12345", contentLength: 5, limit: 5, wantReplay: true},
+		{name: "known over limit", body: "123456", contentLength: 6, limit: 5, wantReplay: false},
+		{name: "unknown at limit", body: "12345", contentLength: -1, limit: 5, wantReplay: true},
+		{name: "unknown over limit", body: "123456", contentLength: -1, limit: 5, wantReplay: false},
+		{name: "disabled", body: "12345", contentLength: 5, limit: 0, wantReplay: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared, replayBody, replayable, err := prepareReplayBody(
+				io.NopCloser(strings.NewReader(tc.body)),
+				tc.contentLength,
+				tc.limit,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantReplay, replayable)
+			if tc.wantReplay {
+				require.Equal(t, []byte(tc.body), replayBody)
+			} else {
+				require.Nil(t, replayBody)
+			}
+			got, err := io.ReadAll(prepared)
+			require.NoError(t, err)
+			require.NoError(t, prepared.Close())
+			require.Equal(t, tc.body, string(got))
+		})
+	}
+}
+
+func TestResponseRetryEligible(t *testing.T) {
+	cases := []struct {
+		name          string
+		method        string
+		contentType   string
+		contentLength int64
+		connection    string
+		upgrade       string
+		want          bool
+	}{
+		{name: "ordinary GET", method: http.MethodGet, contentLength: 0, want: true},
+		{name: "ordinary HEAD", method: http.MethodHead, contentLength: 0, want: true},
+		{name: "ordinary known body", method: http.MethodPost, contentType: "application/json", contentLength: 4, want: true},
+		{name: "known body with content type parameters", method: http.MethodPost, contentType: "application/json; charset=utf-8", contentLength: 4, want: true},
+		{name: "known body without content type", method: http.MethodPost, contentLength: 4, want: true},
+		{name: "unknown length with content type", method: http.MethodPost, contentType: "application/json", contentLength: -1, want: false},
+		{name: "unknown length without content type", method: http.MethodPost, contentLength: -1, want: false},
+		{name: "gRPC", method: http.MethodPost, contentType: "application/grpc", contentLength: 4, want: false},
+		{name: "gRPC proto", method: http.MethodPost, contentType: "application/grpc+proto", contentLength: 4, want: false},
+		{name: "gRPC JSON", method: http.MethodPost, contentType: "application/grpc+json", contentLength: 4, want: false},
+		{name: "gRPC web", method: http.MethodPost, contentType: "application/grpc-web", contentLength: 4, want: false},
+		{name: "gRPC web text", method: http.MethodPost, contentType: "application/grpc-web-text", contentLength: 4, want: false},
+		{name: "gRPC web mixed case and parameters", method: http.MethodPost, contentType: " Application/GRPC-Web+Proto ; charset=utf-8", contentLength: 4, want: false},
+		{name: "gRPC prefix is conservative", method: http.MethodPost, contentType: "application/grpcish", contentLength: 4, want: false},
+		{name: "WebSocket", method: http.MethodGet, contentLength: 0, connection: "Upgrade", upgrade: "websocket", want: false},
+		{name: "WebSocket mixed case and connection tokens", method: http.MethodGet, contentLength: 0, connection: "keep-alive, UpGrAdE", upgrade: "WebSocket", want: false},
+		{name: "upgrade without connection header", method: http.MethodGet, contentLength: 0, upgrade: "websocket", want: true},
+		{name: "connection upgrade without protocol", method: http.MethodGet, contentLength: 0, connection: "Upgrade", want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body io.Reader
+			if tc.contentLength != 0 {
+				body = strings.NewReader("body")
+			}
+			req := httptest.NewRequest(tc.method, "https://service.example/", body)
+			req.ContentLength = tc.contentLength
+			req.Header.Set("Content-Type", tc.contentType)
+			req.Header.Set("Connection", tc.connection)
+			req.Header.Set("Upgrade", tc.upgrade)
+
+			require.Equal(t, tc.want, responseRetryEligible(req))
+		})
+	}
+}
+
+func TestHTTPProxy_FailsClosedUntilReady(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	caCert, caKey := generateTestCA(t)
+	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
+	require.NoError(t, err)
+
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
+	audits := make(chan transform.PipelineResult, 2)
+	pipeline.SetAuditFunc(func(r *transform.PipelineResult) {
+		audits <- *r
+	})
+	holder := transform.NewPipelineHolder(pipeline)
+
+	var ready atomic.Bool
+	p := New(Options{
+		HTTPAddr:  "127.0.0.1:0",
+		CertCache: cache,
+		Pipeline:  holder,
+		Logger:    testLogger(),
+		Ready:     ready.Load,
+	})
+
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = p.httpServer.Serve(httpLn) }()
+	t.Cleanup(func() { _ = p.httpServer.Close() })
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/test", httpLn.Addr()), nil)
+	require.NoError(t, err)
+	req.Host = upstream.Listener.Addr().String()
+
+	// Not ready: the proxy must reject rather than pass the request through
+	// an un-synced pipeline.
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	audit := <-audits
+	require.Equal(t, transform.ActionReject, audit.Action)
+	require.Equal(t, http.StatusServiceUnavailable, audit.StatusCode)
+	require.Len(t, audit.RequestTransforms, 1)
+	require.Equal(t, "ready", audit.RequestTransforms[0].Name)
+	require.Equal(t, transform.ActionReject, audit.RequestTransforms[0].Action)
+
+	// Ready: the same request flows.
+	ready.Store(true)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }

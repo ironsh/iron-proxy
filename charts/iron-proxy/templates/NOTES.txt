@@ -1,0 +1,50 @@
+iron-proxy has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Run mode: {{ .Values.mode }}
+
+1. Find the Service address clients should use:
+
+   kubectl --namespace {{ .Release.Namespace }} get svc {{ include "iron-proxy.fullname" . }}
+
+{{- if not .Values.listeners.dns.enabled }}
+
+   The DNS server is disabled (listeners.dns.enabled=false). Point clients at the
+   proxy via explicit HTTP(S)_PROXY settings; proxy_ip is not needed.
+{{- else if eq .Values.mode "standalone" }}
+
+   IMPORTANT: config.dns.proxy_ip must equal the IP clients reach iron-proxy on
+   (typically this Service's ClusterIP or LoadBalancer IP). It is currently set to
+   "{{ .Values.config.dns.proxy_ip }}". Update it with --set config.dns.proxy_ip=<ip>
+   (and ideally pin service.clusterIP to a known value) then `helm upgrade`.
+{{- else }}
+
+   IMPORTANT: managed.proxyIP (IRON_DNS_PROXY_IP) must equal the IP clients reach
+   iron-proxy on and is required. It is currently {{ if .Values.managed.proxyIP }}"{{ .Values.managed.proxyIP }}"{{ else }}UNSET — the proxy will fail to start{{ end }}.
+   Set it with --set managed.proxyIP=<ip> then `helm upgrade`.
+{{- end }}
+
+{{- if .Values.listeners.dns.enabled }}
+
+2. Point client pods at iron-proxy for DNS so hostnames resolve to proxy_ip, then
+   send their HTTP/HTTPS traffic through it.
+{{- else }}
+
+2. Send client HTTP/HTTPS traffic through iron-proxy (e.g. HTTPS_PROXY/HTTP_PROXY).
+{{- end }}
+
+{{- if ne .Values.ca.mode "none" }}
+
+3. MITM mode terminates TLS, so clients must trust the proxy CA.
+{{- if eq .Values.ca.mode "existingSecret" }}
+   The CA comes from Secret "{{ .Values.ca.existingSecret }}". Distribute its
+   "{{ .Values.ca.certKey }}" entry to clients as a trusted root.
+{{- else if eq .Values.ca.mode "inline" }}
+   The CA was supplied inline and stored in Secret "{{ include "iron-proxy.caSecretName" . }}".
+   Distribute its ca.crt entry to clients as a trusted root.
+{{- end }}
+{{- end }}
+
+4. Check health:
+
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "iron-proxy.fullname" . }} {{ .Values.listeners.metrics.port }}:{{ .Values.listeners.metrics.port }}
+   curl http://localhost:{{ .Values.listeners.metrics.port }}/healthz   # -> OK

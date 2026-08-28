@@ -16,13 +16,18 @@ type SyncResponse struct {
 	Rules      json.RawMessage `json:"rules"`
 	Secrets    json.RawMessage `json:"secrets"`
 	// Transforms is the control plane's pre-shaped transform array, bundling
-	// the gcp_auth, hmac_sign, and oauth_token transforms granted to the
-	// proxy's principal. Unlike rules/secrets it is already in {name, config}
-	// form.
+	// the gcp_auth, gcp_id_token, hmac_sign, and oauth_token transforms granted
+	// to the proxy's principal. Unlike rules/secrets it is already in {name,
+	// config} form.
 	Transforms  json.RawMessage `json:"transforms"`
 	MCP         json.RawMessage `json:"mcp"`
 	Postgres    json.RawMessage `json:"postgres"`
 	IngestToken string          `json:"ingest_token"`
+	// Status and PrincipalID describe the proxy's control-plane assignment as
+	// of this sync. The control plane includes them only on responses that
+	// carry a config payload; hash-match responses leave them empty.
+	Status      string `json:"status"`
+	PrincipalID string `json:"principal_id"`
 }
 
 // Client talks to the iron.sh control plane REST API. Requests are

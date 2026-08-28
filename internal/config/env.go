@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
 // applyEnvOverrides layers IRON_* environment variables on top of an existing
@@ -46,6 +49,9 @@ func applyEnvOverrides(cfg *Config) error {
 	}
 	if v := os.Getenv("IRON_METRICS_LISTEN"); v != "" {
 		cfg.Metrics.Listen = v
+	}
+	if v := os.Getenv("IRON_MANAGEMENT_LISTEN"); v != "" {
+		cfg.Management.Listen = v
 	}
 	if v := os.Getenv("IRON_LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v
@@ -91,5 +97,38 @@ func applyEnvOverrides(cfg *Config) error {
 		cfg.Proxy.UpstreamResponseHeaderTimeout = Duration(d)
 	}
 
+	if v := os.Getenv("IRON_PROXY_UPSTREAM_DENY_CIDRS"); v != "" {
+		cidrs, err := splitCIDREnvList(v)
+		if err != nil {
+			return fmt.Errorf("IRON_PROXY_UPSTREAM_DENY_CIDRS: %w", err)
+		}
+		if err := dnsguard.ValidateCIDRs(cidrs); err != nil {
+			return fmt.Errorf("IRON_PROXY_UPSTREAM_DENY_CIDRS: %w", err)
+		}
+		cfg.Proxy.UpstreamDenyCIDRs.Values = cidrs
+		cfg.Proxy.UpstreamDenyCIDRs.Set = true
+	}
+
+	if v := os.Getenv("IRON_CONTROL_PLANE_POLL_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("IRON_CONTROL_PLANE_POLL_INTERVAL: %w", err)
+		}
+		cfg.ControlPlane.PollInterval = Duration(d)
+	}
+
 	return nil
+}
+
+func splitCIDREnvList(v string) ([]string, error) {
+	parts := strings.Split(v, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			return nil, fmt.Errorf("empty CIDR entry")
+		}
+		values = append(values, trimmed)
+	}
+	return values, nil
 }

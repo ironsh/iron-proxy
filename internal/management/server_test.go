@@ -121,3 +121,76 @@ func TestUnknownPath(t *testing.T) {
 	rec := do(t, s, http.MethodPost, "/anything-else", "Bearer secret")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+func newManagedTestServer(t *testing.T, key string, status func() any, syncNow func()) *Server {
+	t.Helper()
+	return New(Options{
+		Addr:    "127.0.0.1:0",
+		APIKey:  key,
+		Status:  status,
+		SyncNow: syncNow,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
+func TestStatus_Success(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any {
+		return map[string]any{"principal_id": "prn_1", "synced_once": true}
+	}, func() {})
+	rec := do(t, s, http.MethodGet, "/v1/status", "Bearer secret")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	require.Equal(t, "prn_1", body["principal_id"])
+	require.Equal(t, true, body["synced_once"])
+}
+
+func TestStatus_MissingAuth(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() {})
+	rec := do(t, s, http.MethodGet, "/v1/status", "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestStatus_WrongMethod(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() {})
+	rec := do(t, s, http.MethodPost, "/v1/status", "Bearer secret")
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestStatus_StandaloneUnavailable(t *testing.T) {
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
+	rec := do(t, s, http.MethodGet, "/v1/status", "Bearer secret")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSync_Success(t *testing.T) {
+	var poked bool
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() { poked = true })
+	rec := do(t, s, http.MethodPost, "/v1/sync", "Bearer secret")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.True(t, poked)
+}
+
+func TestSync_MissingAuth(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() {})
+	rec := do(t, s, http.MethodPost, "/v1/sync", "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestSync_WrongMethod(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() {})
+	rec := do(t, s, http.MethodGet, "/v1/sync", "Bearer secret")
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestSync_StandaloneUnavailable(t *testing.T) {
+	s := newTestServer(t, "secret", func(context.Context) error { return nil })
+	rec := do(t, s, http.MethodPost, "/v1/sync", "Bearer secret")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestReload_ManagedUnavailable(t *testing.T) {
+	s := newManagedTestServer(t, "secret", func() any { return nil }, func() {})
+	rec := do(t, s, http.MethodPost, "/v1/reload", "Bearer secret")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}

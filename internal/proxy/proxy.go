@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -23,7 +24,10 @@ import (
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/mcp"
+	"github.com/ironsh/iron-proxy/internal/mcpgateway"
+	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"golang.org/x/net/http2"
 )
 
 // Proxy is the HTTP/HTTPS proxy server. When Mode is TLSModeMITM, the HTTPS
@@ -31,21 +35,23 @@ import (
 // listener peeks the SNI from the ClientHello and TCP-passthroughs to the
 // upstream without terminating TLS.
 type Proxy struct {
-	httpServer     *http.Server
-	httpsServer    *http.Server
-	httpsAddr      string
-	tlsMode        string
-	tlsListener    net.Listener
-	tunnelAddr     string
-	tunnelListener net.Listener
-	tunnelDone     chan struct{}
-	certCache      *certcache.Cache
-	pipeline       *transform.PipelineHolder
-	transport      *http.Transport
-	resolver       *net.Resolver
-	guard          *dnsguard.Guard
-	mcpPolicy      *mcp.PolicyHolder
-	logger         *slog.Logger
+	httpServer           *http.Server
+	httpsServer          *http.Server
+	httpsAddr            string
+	tlsMode              string
+	tlsListener          net.Listener
+	tunnelAddr           string
+	tunnelListener       net.Listener
+	tunnelDone           chan struct{}
+	certCache            *certcache.Cache
+	pipeline             *transform.PipelineHolder
+	transport            *http.Transport
+	resolver             *net.Resolver
+	guard                *dnsguard.Guard
+	mcpPolicy            *mcp.PolicyHolder
+	mcpGateway           *mcpgateway.Holder
+	responseRetryHandler *responseretry.Handler
+	logger               *slog.Logger
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
 	// connections that would otherwise sit on blocking Reads.
@@ -56,7 +62,10 @@ type Proxy struct {
 	// 443 in production so a client-supplied CONNECT port cannot pivot an
 	// allowlisted hostname onto a different port. Overridable in tests.
 	sniUpstreamPort string
+	ready           func() bool
 }
+
+const notReadyMessage = "proxy is not ready: awaiting control-plane config"
 
 // Options configures Proxy construction.
 type Options struct {
@@ -69,7 +78,11 @@ type Options struct {
 	Resolver   *net.Resolver
 	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
 	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
-	Logger     *slog.Logger
+	MCPGateway *mcpgateway.Holder
+	// ResponseRetryHandler may add headers and replay the exact transformed
+	// request once after selected upstream response statuses.
+	ResponseRetryHandler *responseretry.Handler
+	Logger               *slog.Logger
 	// UpstreamResponseHeaderTimeout overrides the upstream HTTP transport's
 	// ResponseHeaderTimeout. Zero falls back to
 	// config.DefaultUpstreamResponseHeaderTimeout.
@@ -78,6 +91,12 @@ type Options struct {
 	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
 	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
 	UpstreamProxy func(*http.Request) (*url.URL, error)
+	// Ready, when non-nil, gates request handling: while it returns false
+	// every proxied request is rejected with 503. Managed proxies use it to
+	// fail closed until the first control-plane config has been applied, so
+	// requests can never pass through un-transformed (leaking placeholder
+	// credentials upstream) during startup.
+	Ready func() bool
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -92,19 +111,22 @@ func New(opts Options) *Proxy {
 		guard, _ = dnsguard.New(nil)
 	}
 	p := &Proxy{
-		httpsAddr:      opts.HTTPSAddr,
-		tlsMode:        opts.TLSMode,
-		tunnelAddr:     opts.TunnelAddr,
-		tunnelDone:     make(chan struct{}),
-		certCache:      opts.CertCache,
-		pipeline:       opts.Pipeline,
-		transport:      buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
-		resolver:       opts.Resolver,
-		guard:          guard,
-		mcpPolicy:      opts.MCPPolicy,
-		logger:         opts.Logger,
-		shutdownCtx:    shutdownCtx,
-		shutdownCancel: shutdownCancel,
+		ready:                opts.Ready,
+		httpsAddr:            opts.HTTPSAddr,
+		tlsMode:              opts.TLSMode,
+		tunnelAddr:           opts.TunnelAddr,
+		tunnelDone:           make(chan struct{}),
+		certCache:            opts.CertCache,
+		pipeline:             opts.Pipeline,
+		transport:            buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
+		resolver:             opts.Resolver,
+		guard:                guard,
+		mcpPolicy:            opts.MCPPolicy,
+		mcpGateway:           opts.MCPGateway,
+		responseRetryHandler: opts.ResponseRetryHandler,
+		logger:               opts.Logger,
+		shutdownCtx:          shutdownCtx,
+		shutdownCancel:       shutdownCancel,
 	}
 
 	p.httpServer = &http.Server{
@@ -119,6 +141,9 @@ func New(opts Options) *Proxy {
 			GetCertificate: p.getCertificate,
 		},
 	}
+	// Enable HTTP/2 on the HTTPS listener (adds h2 to the TLS ALPN and serves
+	// negotiated conns through the existing handler); zero config never errors.
+	_ = http2.ConfigureServer(p.httpsServer, &http2.Server{})
 
 	return p
 }
@@ -247,6 +272,31 @@ func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.P
 	}
 }
 
+func (p *Proxy) isReady() bool {
+	return p.ready == nil || p.ready()
+}
+
+func markNotReady(result *transform.PipelineResult) {
+	result.Action = transform.ActionReject
+	result.StatusCode = http.StatusServiceUnavailable
+	result.RequestTransforms = append(result.RequestTransforms, transform.TransformTrace{
+		Name:   "ready",
+		Action: transform.ActionReject,
+		Annotations: map[string]any{
+			"reason": "awaiting_control_plane_config",
+		},
+	})
+}
+
+func notReadyResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 " + http.StatusText(http.StatusServiceUnavailable),
+		Header:     http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(notReadyMessage + "\n")),
+	}
+}
+
 func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, nil)
 }
@@ -312,6 +362,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
+
+	if !p.isReady() {
+		markNotReady(result)
+		http.Error(w, notReadyMessage, http.StatusServiceUnavailable)
+		return
+	}
 
 	bodyLimits := pl.BodyLimits()
 	// Wrap request body for lazy buffering by transforms.
@@ -380,18 +436,49 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 
+	upstreamScheme := scheme
+	upstreamHost := host
+	upstreamPath := r.URL.Path
+	upstreamRawPath := r.URL.RawPath
+	upstreamURL := ""
+
+	if mcpServer != nil {
+		gateway := p.mcpGateway.Load()
+		if route := gateway.Match(r); route != nil {
+			applied, err := route.Apply(r.Context(), r)
+			if err != nil {
+				if markIfClientCancel(r, err, result) {
+					return
+				}
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			upstreamURL = applied.RequestURL
+			mcpTrace.SetGateway(map[string]any{
+				"route":                applied.Name,
+				"upstream":             applied.Upstream,
+				"credentials_injected": applied.InjectedCredentialIDs,
+			})
+		}
+	}
+
 	// Build upstream request. Use r.URL (which transforms may have modified)
 	// rather than r.RequestURI (which is immutable). Preserve RawPath so
 	// percent-encoded reserved characters like %2F survive to the upstream —
 	// some APIs (e.g. GCS object names) treat decoded vs encoded slashes as
 	// distinct path segments.
-	upstreamURL := (&url.URL{
-		Scheme:   scheme,
-		Host:     host,
-		Path:     r.URL.Path,
-		RawPath:  r.URL.RawPath,
-		RawQuery: r.URL.RawQuery,
-	}).String()
+	if upstreamURL == "" {
+		upstreamURL = (&url.URL{
+			Scheme:   upstreamScheme,
+			Host:     upstreamHost,
+			Path:     upstreamPath,
+			RawPath:  upstreamRawPath,
+			RawQuery: r.URL.RawQuery,
+		}).String()
+	}
 
 	reqBody := transform.RequireBufferedBody(r.Body)
 	// Check Len() before StreamingReader(), which clears the original reader.
@@ -415,6 +502,27 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		upstreamReq.ContentLength = r.ContentLength
 	}
 
+	var replayBody []byte
+	replayable := false
+	responseRetryEnabled := p.responseRetryHandler != nil && responseRetryEligible(upstreamReq)
+	if responseRetryEnabled {
+		upstreamReq.Body, replayBody, replayable, err = prepareReplayBody(
+			upstreamReq.Body,
+			upstreamReq.ContentLength,
+			bodyLimits.MaxRequestBodyBytes,
+		)
+		if err != nil {
+			result.Action = transform.ActionContinue
+			result.StatusCode = http.StatusBadGateway
+			result.Err = err
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		if replayable {
+			upstreamReq.ContentLength = int64(len(replayBody))
+		}
+	}
+
 	resp, err := p.doUpstream(upstreamReq)
 	if err != nil {
 		if markIfClientCancel(r, err, result) {
@@ -427,6 +535,65 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		return
 	}
 	defer resp.Body.Close()
+
+	if responseRetryEnabled {
+		chargeStarted := time.Now()
+		decision, replay, retryErr := p.responseRetryHandler.Decide(r.Context(), upstreamReq, resp, replayable)
+		if retryErr != nil {
+			p.logger.Warn("response retry authorization failed", slog.String("error", retryErr.Error()))
+		}
+		if replay {
+			_ = resp.Body.Close() // The 402 body is never returned after authorization.
+			replayReq := upstreamReq.Clone(r.Context())
+			replayReq.Body = io.NopCloser(bytes.NewReader(replayBody))
+			replayReq.ContentLength = int64(len(replayBody))
+			replayReq.Header = upstreamReq.Header.Clone()
+			for name, values := range decision.Headers {
+				replayReq.Header.Del(name)
+				for _, value := range values {
+					replayReq.Header.Add(name, value)
+				}
+			}
+			if decision.Traceparent != "" {
+				replayReq.Header.Set("Traceparent", decision.Traceparent)
+			}
+			replayStarted := time.Now()
+			resp, err = p.doUpstream(replayReq)
+			completionTraceparent := decision.Traceparent
+			if completionTraceparent == "" {
+				completionTraceparent = upstreamReq.Header.Get("Traceparent")
+			}
+			if err != nil {
+				p.completeResponseRetry(
+					r.Context(),
+					decision.AttemptID,
+					nil,
+					"upstream_transport_error",
+					completionTraceparent,
+					time.Since(replayStarted),
+					time.Since(chargeStarted),
+				)
+				if markIfClientCancel(r, err, result) {
+					return
+				}
+				result.Action = transform.ActionContinue
+				result.StatusCode = http.StatusBadGateway
+				result.Err = err
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+			p.completeResponseRetry(
+				r.Context(),
+				decision.AttemptID,
+				resp,
+				"",
+				completionTraceparent,
+				time.Since(replayStarted),
+				time.Since(chargeStarted),
+			)
+		}
+	}
 
 	// Wrap response body for lazy buffering by transforms.
 	resp.Body = transform.NewBufferedBody(resp.Body, bodyLimits.MaxResponseBodyBytes)
@@ -468,6 +635,50 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 
 	p.writeResponse(w, finalResp)
+}
+
+type multiReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func prepareReplayBody(body io.ReadCloser, contentLength, limit int64) (io.ReadCloser, []byte, bool, error) {
+	if limit <= 0 || contentLength > limit {
+		return body, nil, false, nil
+	}
+	replayBody, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		if closeErr := body.Close(); closeErr != nil {
+			return nil, nil, false, errors.Join(err, closeErr)
+		}
+		return nil, nil, false, err
+	}
+	if int64(len(replayBody)) > limit {
+		return &multiReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(replayBody), body),
+			Closer: body,
+		}, nil, false, nil
+	}
+	if err := body.Close(); err != nil {
+		return nil, nil, false, err
+	}
+	return io.NopCloser(bytes.NewReader(replayBody)), replayBody, true, nil
+}
+
+func responseRetryEligible(req *http.Request) bool {
+	if req.ContentLength < 0 || isWebSocketUpgrade(req) {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(req.Header.Get("Content-Type"), ";", 2)[0]))
+	return !strings.HasPrefix(contentType, "application/grpc")
+}
+
+func (p *Proxy) completeResponseRetry(ctx context.Context, attemptID string, resp *http.Response, transportError, traceparent string, replayDuration, chargeDuration time.Duration) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := p.responseRetryHandler.Complete(ctx, attemptID, resp, transportError, traceparent, replayDuration, chargeDuration); err != nil {
+		p.logger.Warn("response retry completion failed", slog.String("error", err.Error()))
+	}
 }
 
 // isWebSocketUpgrade detects a WebSocket upgrade request. Connection is
@@ -686,6 +897,8 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
+	// Forward upstream trailers (e.g. gRPC status) after the body.
+	defer writeTrailers(w, resp)
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
 		// If a transform buffered the response body, set Content-Length
 		// from the buffered data. Otherwise preserve the upstream header
@@ -733,8 +946,11 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		Proxy:                 proxyFunc,
-		DialContext:           dialer.DialContext,
+		Proxy:       proxyFunc,
+		DialContext: dialer.DialContext,
+		// A custom DialContext disables net/http's automatic HTTP/2; opt back in
+		// so gRPC upstreams negotiate h2 over the same (dnsguard-controlled) dialer.
+		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -774,6 +990,16 @@ func copyHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		for _, v := range vs {
 			dst.Add(k, v)
+		}
+	}
+}
+
+// writeTrailers forwards upstream response trailers (e.g. gRPC status) to the
+// client after the body, via the TrailerPrefix convention.
+func writeTrailers(w http.ResponseWriter, resp *http.Response) {
+	for k, vs := range resp.Trailer {
+		for _, v := range vs {
+			w.Header().Add(http.TrailerPrefix+k, v)
 		}
 	}
 }
