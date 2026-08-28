@@ -84,6 +84,9 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 			if msgs := result.MCP.MCPMessages(); len(msgs) > 0 {
 				mcpAttrs = append(mcpAttrs, slog.Any("messages", msgs))
 			}
+			if gateway := result.MCP.MCPGateway(); len(gateway) > 0 {
+				mcpAttrs = append(mcpAttrs, slog.Any("gateway", gateway))
+			}
 			attrs = append(attrs, slog.Group("mcp", mcpAttrs...))
 		}
 		if result.BodyCapture != nil && result.BodyCapture.RequestBody() != "" {

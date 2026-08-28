@@ -29,8 +29,10 @@ Single binary. Single YAML config.
 - **Upstream IP deny list.** Even when a host is allowed, the proxy refuses
   to dial it if its resolved address falls inside a denied CIDR — closing
   the SSRF/DNS-rebinding gap where an allowlisted hostname points at IMDS
-  or loopback. Cloud metadata endpoints (`169.254.169.254`) and loopback are
-  denied by default; override via `proxy.upstream_deny_cidrs`.
+  or loopback. Cloud metadata endpoints (`169.254.169.254`,
+  `fd00:ec2::254`, and `fd20:ce::254`) and loopback are denied by default;
+  override via `proxy.upstream_deny_cidrs` or
+  `IRON_PROXY_UPSTREAM_DENY_CIDRS`.
 - **Boundary-level secret injection.** Workloads send proxy tokens; iron-proxy
   replaces them with real secrets before the request leaves. If the sandbox is
   compromised, the attacker gets tokens that are useless outside the proxy.
@@ -40,8 +42,9 @@ Single binary. Single YAML config.
 - **Streaming-aware.** WebSocket upgrades and Server-Sent Events are proxied
   natively. No special configuration for agent workloads that hold long-lived
   connections.
-- **CONNECT and SOCKS5 support.** Optional tunnel listener for tools that
-  natively support proxy configuration via `HTTPS_PROXY` or SOCKS5 settings.
+- **Explicit proxy support.** Optional tunnel listener for tools that natively
+  support proxy configuration via `HTTP_PROXY`, `HTTPS_PROXY`, or SOCKS5
+  settings.
 - **PostgreSQL MITM proxy.** Optional listener that authenticates clients
   against proxy-managed credentials, injects `SET ROLE` on the upstream
   session, and rejects client attempts to mutate the role (`SET ROLE`,
@@ -277,6 +280,36 @@ through the proxy. Exceptions:
 - **`passthrough`:** glob patterns forwarded to the OS resolver (e.g.,
   `*.internal.corp`). Traffic to these hosts bypasses the proxy entirely.
 - **`records`:** static A or CNAME records. Highest precedence.
+
+### Response retry handler
+
+Set `IRON_RESPONSE_RETRY_HANDLER_URL`,
+`IRON_RESPONSE_RETRY_COMPLETE_URL`, `IRON_RESPONSE_RETRY_HANDLER_TOKEN`,
+`IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID`, and a comma-separated
+`IRON_RESPONSE_RETRY_STATUSES` list to enable externally authorized response
+retries. The authorization handler receives the exact upstream scheme, authority, method,
+path/query, replayability, response status and headers, trace context, and
+sandbox identity. It may return request headers plus an attempt ID for one
+exact replay. The completion handler then receives the replay status and
+response headers selected by `IRON_RESPONSE_RETRY_COMPLETION_HEADERS`, which
+defaults to `Payment-Receipt`.
+
+Response bodies are never sent to either handler, destinations cannot change,
+and connection/framing headers are rejected. Requests over
+`proxy.max_request_body_bytes` proceed normally but are marked non-replayable;
+if challenged, their original response is returned. Handler failures also
+preserve the original response. Handler URLs must use HTTPS unless loopback or
+`IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP=true` is explicitly configured for a
+trusted internal network. Redirects are rejected, and the response retry token
+must be configured independently from the control-plane token. WebSocket,
+gRPC, and unknown-length streaming requests bypass response retry handling.
+
+When a trusted handler resolves inside `proxy.upstream_deny_cidrs`, set
+`IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS` to a comma-separated list of the
+narrow private CIDRs it may use. This exception applies only to the exact
+configured authorize and complete endpoints; ordinary proxied traffic remains
+subject to the full upstream deny list. Public, loopback, link-local, and cloud
+metadata ranges cannot be added through this setting.
 
 ### Allowlist
 
@@ -576,6 +609,40 @@ Behavior:
 
 Pipeline ordering: the MCP interceptor runs after the transform pipeline, so `allowlist` still gates which hosts can be reached and `secrets` has already swapped proxy tokens by the time the interceptor evaluates the body.
 
+### MCP Gateway
+
+`mcp_gateway` routes client-facing MCP hosts to concrete upstream servers after the MCP policy accepts the request. This lets agents call stable internal hosts while iron-proxy forwards to the real upstream and injects credentials that never enter the sandbox.
+
+Gateway routes only apply to requests that matched an MCP server. The MCP policy still enforces the tool allowlist first. If policy denies a `tools/call`, the gateway route is not applied and upstream is not reached.
+
+```yaml
+mcp:
+  servers:
+    - name: github
+      rules:
+        - host: "github.mcp.local"
+          paths: ["/mcp", "/mcp/*"]
+      tools:
+        - name: "search_repositories"
+
+mcp_gateway:
+  routes:
+    - name: github
+      rules:
+        - host: "github.mcp.local"
+          paths: ["/mcp", "/mcp/*"]
+      upstream: "https://mcp.github.com/v1"
+      credentials:
+        - source:
+            type: env
+            var: GITHUB_MCP_TOKEN
+          inject:
+            header: Authorization
+            formatter: "Bearer {{ .Value }}"
+```
+
+Credentials use the same secret sources as the `secrets` transform. They are required by default. Set `require: false` on a credential to skip it when unavailable. Audit logs record the route, upstream URL, and credential injection locations, but never the injected credential values.
+
 Limitations in v1:
 
 - Only Streamable HTTP transport is supported. The legacy HTTP+SSE transport (separate `/messages` and `/sse` endpoints) is not.
@@ -599,12 +666,13 @@ Bodies are buffered incrementally as transforms read them, and automatically
 rewound between pipeline stages. If a transform doesn't read the body, no
 buffering occurs and the body streams through untouched.
 
-### Tunnel listener (CONNECT/SOCKS5)
+### Tunnel listener (HTTP/CONNECT/SOCKS5)
 
-The tunnel listener accepts HTTP CONNECT and SOCKS5 connections on a
-dedicated port. This is useful for tools that natively support proxy
-configuration via `HTTPS_PROXY`/`ALL_PROXY` environment variables or
-SOCKS5 settings, rather than relying on DNS-based routing.
+The tunnel listener accepts absolute-form HTTP proxy requests, HTTP CONNECT,
+and SOCKS5 connections on a dedicated port. This is useful for tools that
+natively support proxy configuration via `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+environment variables or SOCKS5 settings, rather than relying on DNS-based
+routing.
 
 To enable it, set `tunnel_listen` under `proxy`:
 
@@ -615,10 +683,11 @@ proxy:
 
 When omitted, the tunnel listener is disabled.
 
-Both protocols go through the same transform pipeline as regular HTTP/HTTPS
-requests. The proxy evaluates a synthetic CONNECT request against your
-allowlist and secrets transforms, so tunnel connections are subject to the
-same default-deny policy.
+All protocols go through the same transform pipeline as regular HTTP/HTTPS
+requests. Absolute-form HTTP requests are handled by the normal HTTP proxy
+path. For CONNECT and SOCKS5, the proxy evaluates a synthetic CONNECT request
+against your allowlist and secrets transforms, so tunnel connections are
+subject to the same default-deny policy.
 
 After the CONNECT or SOCKS5 handshake, the proxy peeks at the first byte to
 detect the inner protocol:
@@ -637,6 +706,13 @@ curl -x http://172.20.0.2:8080 \
   https://httpbin.org/get
 ```
 
+**Plain HTTP proxy example:**
+
+```bash
+curl -x http://172.20.0.2:8080 \
+  http://httpbin.org/get
+```
+
 **SOCKS5 example:**
 
 ```bash
@@ -649,6 +725,7 @@ You can also set the standard environment variables so all tools route
 through the tunnel automatically:
 
 ```bash
+export HTTP_PROXY=http://172.20.0.2:8080
 export HTTPS_PROXY=http://172.20.0.2:8080
 export ALL_PROXY=socks5h://172.20.0.2:8080
 ```

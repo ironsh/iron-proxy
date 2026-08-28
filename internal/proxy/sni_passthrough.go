@@ -53,6 +53,11 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	pl, finish := p.beginPipelineRun(result)
 	defer finish()
 
+	if !p.isReady() {
+		markNotReady(result)
+		return nil
+	}
+
 	if sni == "" {
 		result.Action = transform.ActionReject
 		result.StatusCode = http.StatusBadRequest

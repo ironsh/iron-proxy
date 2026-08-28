@@ -9,8 +9,9 @@ import (
 // collects one Message entry per JSON-RPC message observed on either side of
 // the proxy, in the order they were processed.
 type Trace struct {
-	Server   string    `json:"server"`
-	Messages []Message `json:"messages,omitempty"`
+	Server   string         `json:"server"`
+	Messages []Message      `json:"messages,omitempty"`
+	Gateway  map[string]any `json:"gateway,omitempty"`
 
 	mu sync.Mutex
 	// toolsListIDs is the set of JSON-RPC request IDs whose method was
@@ -87,6 +88,17 @@ func (t *Trace) Append(m Message) {
 	t.mu.Unlock()
 }
 
+// SetGateway records MCP gateway metadata on the trace. Values must be
+// JSON-serializable and must not include real credential values.
+func (t *Trace) SetGateway(gateway map[string]any) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.Gateway = gateway
+	t.mu.Unlock()
+}
+
 // recordToolsListID notes that this trace saw a request with method
 // tools/list and the supplied id, so the response-side filter knows to
 // rewrite the matching response. Notification ids (absent or null) are
@@ -160,6 +172,23 @@ func (t *Trace) MessagesSnapshot() []Message {
 	return out
 }
 
+// GatewaySnapshot returns a copy of gateway metadata safe for audit rendering.
+func (t *Trace) GatewaySnapshot() map[string]any {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.Gateway) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(t.Gateway))
+	for k, v := range t.Gateway {
+		out[k] = v
+	}
+	return out
+}
+
 // MCPServer implements transform.MCPAudit.
 func (t *Trace) MCPServer() string {
 	if t == nil {
@@ -203,4 +232,9 @@ func (t *Trace) MCPMessages() []map[string]any {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// MCPGateway implements transform.MCPAudit.
+func (t *Trace) MCPGateway() map[string]any {
+	return t.GatewaySnapshot()
 }
