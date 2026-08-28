@@ -669,7 +669,73 @@ func TestSecrets_RequireRejectsNoHeaders(t *testing.T) {
 	require.Equal(t, transform.ActionReject, res.Action)
 }
 
-func TestSecrets_RequireAllowsConnectWithoutHeaderWhenConfigured(t *testing.T) {
+func TestSecrets_AllowConnectWithoutHeader(t *testing.T) {
+	cases := []struct {
+		name         string
+		allow        bool
+		method       string
+		matchHeaders []string
+		header       string
+		want         transform.TransformAction
+	}{
+		{
+			name:   "opted in, CONNECT with no header, passes through",
+			allow:  true,
+			method: http.MethodConnect,
+			want:   transform.ActionContinue,
+		},
+		{
+			name:   "not opted in, CONNECT with no header, rejected",
+			allow:  false,
+			method: http.MethodConnect,
+			want:   transform.ActionReject,
+		},
+		{
+			name:   "opted in, GET with no header, still rejected",
+			allow:  true,
+			method: http.MethodGet,
+			want:   transform.ActionReject,
+		},
+		{
+			name:   "opted in, CONNECT carrying a wrong token, still rejected",
+			allow:  true,
+			method: http.MethodConnect,
+			header: "Bearer not-the-proxy-value",
+			want:   transform.ActionReject,
+		},
+		{
+			name:         "opted in, CONNECT but secret scans every header, still rejected",
+			allow:        true,
+			method:       http.MethodConnect,
+			matchHeaders: []string{},
+			want:         transform.ActionReject,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+				e.Require = true
+				e.AllowConnectWithoutHeader = tc.allow
+				if tc.matchHeaders != nil {
+					e.MatchHeaders = tc.matchHeaders
+				}
+			})})
+
+			req := httptest.NewRequest(tc.method, "http://api.openai.com:443", nil)
+			req.Host = "api.openai.com:443"
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+
+			res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, res.Action)
+		})
+	}
+}
+
+func TestSecrets_AllowConnectWithoutHeaderStillSwapsWhenPresent(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
 		e.Require = true
 		e.AllowConnectWithoutHeader = true
@@ -677,23 +743,13 @@ func TestSecrets_RequireAllowsConnectWithoutHeaderWhenConfigured(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
 	req.Host = "api.openai.com:443"
+	req.Header.Set("Authorization", "Bearer proxy-openai-abc123")
 
 	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionContinue, res.Action)
-}
-
-func TestSecrets_RequireRejectsConnectWithoutHeaderByDefault(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
-		e.Require = true
-	})})
-
-	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
-	req.Host = "api.openai.com:443"
-
-	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionReject, res.Action)
+	require.Equal(t, "Bearer sk-real-openai-key", req.Header.Get("Authorization"),
+		"opting in must not stop the swap when the header is present")
 }
 
 func TestSecrets_RequireWithBodySwap(t *testing.T) {
