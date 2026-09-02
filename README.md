@@ -440,7 +440,7 @@ The sandbox never holds real credentials. Instead:
 
 1. Configure iron-proxy with the real secret source: environment variables, a
    file on disk, AWS Secrets Manager, AWS Systems Manager Parameter Store,
-   1Password (service account), or 1Password Connect.
+   Vault KV, 1Password (service account), or 1Password Connect.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -483,6 +483,14 @@ Secret sources:
   `region`, `with_decryption`, `ttl`, and `failure_ttl` are supported.
   `with_decryption` defaults to `true`, which is the expected setting for
   `SecureString` parameters.
+- **`vault_kv`:** reads the secret map at `path` from the Vault KV engine mounted
+  at `mount`. `kv_version` may be `1` or `2` and defaults to `2`. The map is
+  returned as JSON; set `json_key` to select one top-level string field. The
+  official Vault client reads its address, token, namespace, TLS, and proxy
+  settings from standard `VAULT_*` environment variables such as `VAULT_ADDR`,
+  `VAULT_TOKEN`, `VAULT_NAMESPACE`, and `VAULT_CACERT`. Optional `ttl` and
+  `failure_ttl` are supported. This source handles static KV data only; dynamic
+  secrets with renewable leases are not supported.
 - **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
   reference) using a 1Password service account token. The token is read from
   `OP_SERVICE_ACCOUNT_TOKEN`. Optional `ttl` and `failure_ttl` are supported.
@@ -499,6 +507,24 @@ extracted. Use it to pull one field out of a JSON secret.
 (empty caches forever). `failure_ttl` controls how long a fetch error is
 cached before retrying; it defaults to 1m and is independent of `ttl`, so a
 long success TTL does not delay recovery from a transient backend outage.
+
+For example, to select `api_key` from a KV v2 secret stored at
+`secret/services/openai`:
+
+```yaml
+source:
+  type: vault_kv
+  mount: secret
+  path: services/openai
+  json_key: api_key
+  ttl: 5m
+  failure_ttl: 15s
+```
+
+For production machine authentication, run Vault Agent or Vault Proxy with
+auto-auth and point the Vault client environment at its local listener. This
+keeps AppRole, Kubernetes, or cloud authentication and token renewal outside
+iron-proxy.
 
   > **Note:** a bug in `onepassword-sdk-go` breaks builds with `CGO_ENABLED=0`,
   > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)
@@ -1036,9 +1062,9 @@ curl -X POST http://127.0.0.1:9092/v1/reload \
 
 ## iron.sh
 
-Need Vault/KMS secret backends, a Kubernetes operator, or centralized policy
-management? [iron.sh](https://iron.sh) builds on iron-proxy with enterprise
-features for teams running this at scale.
+Need dynamic Vault secret engines, KMS backends, a Kubernetes operator, or
+centralized policy management? [iron.sh](https://iron.sh) builds on iron-proxy
+with enterprise features for teams running this at scale.
 
 ## Verify release signatures
 
