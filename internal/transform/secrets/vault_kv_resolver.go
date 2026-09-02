@@ -82,7 +82,7 @@ func (r *vaultKVBuilder) Build(raw yaml.Node) (secretSource, error) {
 			return "", fmt.Errorf("reading Vault KV secret %q: %w", secretPath, err)
 		}
 		if len(data) == 0 {
-			return "", fmt.Errorf("Vault KV secret %q resolved without data", secretPath)
+			return "", fmt.Errorf("vault KV secret %q resolved without data", secretPath)
 		}
 		value, err := json.Marshal(data)
 		if err != nil {
