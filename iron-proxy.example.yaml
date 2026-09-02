@@ -226,6 +226,46 @@ transforms:
         #   rules:
         #     - host: "api.openai.com"
 
+  # Secret broker: let a sandbox USE a credential without being able to READ
+  # it. The sandbox holds only a placeholder; the proxy swaps it for the real
+  # credential on requests to the hosts listed for that placeholder, and swaps
+  # any echoed credential back to the placeholder on the response so it cannot
+  # be recovered via an echo endpoint. Requires MITM mode.
+  #
+  # Where the secrets transform above scopes a swap by host, secretbroker also
+  # bounds which headers it will write into, refuses a "*" host, fails closed
+  # when the secrets file is unavailable, and scrubs the response. Use it when
+  # whoever is inside the sandbox may actively try to read the credential.
+  #
+  # Place this LAST in transforms: so header-capturing transforms (annotate)
+  # run first and record the placeholder rather than the real credential.
+  # - name: secretbroker
+  #   config:
+  #     # Root-owned file (mode 0600) holding a flat JSON object of
+  #     # secret_ref -> credential: {"github_token": "ghp_the_real_token"}.
+  #     # Missing, unreadable, or malformed disables substitution and logs one
+  #     # warning naming the path — never the contents. Re-read when the file
+  #     # changes (size or mtime), so rotating in place needs no restart.
+  #     secrets_file: "/etc/iron-proxy/secrets.json"
+  #     entries:
+  #       - placeholder: "IRON_PLACEHOLDER_GITHUB_TOKEN"  # what the sandbox holds
+  #         secret_ref: "github_token"     # key in secrets_file
+  #         hosts: ["api.github.com"]      # the only hosts it may be sent to; "*" rejected
+  #         headers: ["X-Api-Key"]         # scanned in addition to Authorization
+  #         match_body: false              # scan the request body too
+  #         scrub_response: true           # default; swap echoes back to the placeholder
+  #
+  #       # A credential that lives in a secrets backend rather than the file.
+  #       # source and secret_ref are mutually exclusive.
+  #       - placeholder: "IRON_PLACEHOLDER_OPENAI_KEY"
+  #         source:
+  #           type: env
+  #           var: OPENAI_API_KEY
+  #         rules:                         # full host/method/path rules also work
+  #           - host: "api.openai.com"
+  #             methods: ["POST"]
+  #             paths: ["/v1/*"]
+
   # GCP service account authentication. Signs a JWT with the configured
   # keyfile, exchanges it at Google's token endpoint for a short-lived OAuth2
   # access token, and sets Authorization: Bearer on matching requests. Tokens

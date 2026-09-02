@@ -414,6 +414,87 @@ long success TTL does not delay recovery from a transient backend outage.
   > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)
   > via a `replace` directive in `go.mod` until the fix lands upstream.
 
+### Secret broker
+
+The `secrets` transform above assumes the workload is merely untrusted with the
+network. `secretbroker` assumes the workload is untrusted with the credential
+itself: it is built for sandboxes — work-trial containers, evaluation
+environments, shared dev boxes — where whoever is inside may actively try to
+read the secret rather than just use it.
+
+The sandbox holds only a placeholder. `secretbroker` swaps the placeholder for
+the real credential on requests to hosts you have listed for that placeholder,
+and swaps any echoed credential back to the placeholder on the way in, so the
+credential cannot be recovered by bouncing a request off an echo endpoint.
+
+```yaml
+- name: secretbroker
+  config:
+    # Root-owned file holding a flat JSON object of secret_ref -> credential.
+    # Mode 0600, owned by the user iron-proxy runs as; the sandbox must not be
+    # able to read it.
+    secrets_file: "/etc/iron-proxy/secrets.json"
+    entries:
+      - placeholder: "IRON_PLACEHOLDER_GITHUB_TOKEN" # what the sandbox holds
+        secret_ref: "github_token" # key in secrets_file
+        hosts: ["api.github.com"] # the only hosts it may be sent to
+        headers: ["X-Api-Key"] # scanned in addition to Authorization
+        match_body: false # scan the request body too
+        scrub_response: true # default; swap echoes back to the placeholder
+```
+
+```json
+{ "github_token": "ghp_the_real_token" }
+```
+
+Per entry:
+
+- **`placeholder`:** the fake token the sandbox holds. Must be unique across
+  entries.
+- **`secret_ref`:** a key in `secrets_file`. Mutually exclusive with `source`.
+- **`source`:** any secret source the [`secrets`](#secrets) transform accepts
+  (`env`, `aws_sm`, `aws_ssm`, `1password`, `1password_connect`) when the
+  credential does not live in `secrets_file`. Mutually exclusive with
+  `secret_ref`.
+- **`hosts`:** domain globs or CIDRs the credential may be sent to. `"*"` is
+  rejected — an entry that substitutes everywhere defeats the point.
+- **`rules`:** full `host`/`methods`/`paths` rules, as elsewhere in
+  iron-proxy. Combined with `hosts`; at least one of the two is required.
+- **`headers`:** request headers to scan, in addition to `Authorization`,
+  which is always scanned. Headers outside this set are left untouched, so the
+  sandbox cannot smuggle the credential out through a header of its choosing.
+- **`match_body`:** scan the request body. Off by default.
+- **`scrub_response`:** replace the credential with the placeholder in the
+  response headers and body. On by default.
+
+Notes on the guarantees:
+
+- **Host scoping is per entry.** A placeholder is only ever substituted on a
+  request matching that entry's own rules, so one entry's credential can never
+  reach another entry's host.
+- **It fails closed.** If `secrets_file` is missing, unreadable, or malformed,
+  no substitution happens: the placeholder travels upstream and the upstream
+  rejects it. One warning naming the path — never its contents — is logged per
+  distinct failure, and the entry is annotated `secret_unavailable`.
+- **`Authorization: Basic` is decoded.** A credential embedded as
+  `base64(user:token)`, which is how git-over-HTTPS sends one, is swapped
+  inside the encoded payload and re-encoded.
+- **The audit stream keeps showing the placeholder.** `secretbroker` annotates
+  the placeholder and the `secret_ref` — both non-secret names — and never the
+  credential. Place `secretbroker` **last** in `transforms:` so that transforms
+  which capture request headers into the audit stream, such as
+  [`annotate`](#annotate), run first and record the placeholder.
+- **`secrets_file` is re-read when it changes** (size or mtime), so rotating a
+  credential in place needs no restart. `POST /v1/reload` on the
+  [management API](#management-api) also re-reads it, since it rebuilds the
+  pipeline from the config file.
+- **Response scrubbing is bounded by
+  [`max_response_body_bytes`](#body-limits).** The response body is scrubbed
+  within the proxy's existing body-capture limit; a body past that limit is
+  truncated by that mechanism. Server-Sent Events bodies are left alone so
+  per-chunk streaming keeps working — their headers are still scrubbed, and the
+  entry is annotated `scrub_skipped: sse_body`.
+
 ### Judge
 
 The judge transform calls an LLM to produce an allow/deny decision for

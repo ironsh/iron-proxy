@@ -428,8 +428,8 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 	if len(sec.matchHeaders) == 0 {
 		for name, vals := range req.Header {
 			for i, v := range vals {
-				if headerContains(name, v, sec.proxyValue) {
-					req.Header[name][i] = replaceInHeader(name, v, sec.proxyValue, realValue)
+				if HeaderContains(name, v, sec.proxyValue) {
+					req.Header[name][i] = ReplaceInHeader(name, v, sec.proxyValue, realValue)
 					locations = append(locations, "header:"+name)
 				}
 			}
@@ -449,14 +449,14 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 		}
 		hit := false
 		for _, v := range vals {
-			if headerContains(name, v, sec.proxyValue) {
+			if HeaderContains(name, v, sec.proxyValue) {
 				hit = true
 				break
 			}
 		}
 		req.Header.Del(name)
 		for _, v := range vals {
-			req.Header.Add(name, replaceInHeader(name, v, sec.proxyValue, realValue))
+			req.Header.Add(name, ReplaceInHeader(name, v, sec.proxyValue, realValue))
 		}
 		if hit {
 			locations = append(locations, "header:"+name)
@@ -476,29 +476,35 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 	return locations
 }
 
-// replaceInHeader performs a secret replacement in a header value. For
+// ReplaceInHeader performs a substitution in a header value. For
 // Authorization headers with HTTP Basic auth, the base64 payload is decoded
-// before replacement and re-encoded after.
-func replaceInHeader(headerName, value, proxyValue, realValue string) string {
+// before replacement and re-encoded after, so a credential embedded in
+// "Basic base64(user:secret)" is still swapped.
+//
+// The substitution is direction-agnostic: pass (placeholder, real) to swap a
+// placeholder for a credential on the way upstream, or (real, placeholder) to
+// scrub an echoed credential on the way back. Exported so other transforms
+// (e.g. secretbroker) share this one implementation of the Basic-auth case.
+func ReplaceInHeader(headerName, value, from, to string) string {
 	if strings.EqualFold(headerName, "Authorization") {
 		if decoded, ok := decodeBasicAuth(value); ok {
-			replaced := strings.ReplaceAll(decoded, proxyValue, realValue)
+			replaced := strings.ReplaceAll(decoded, from, to)
 			return "Basic " + base64.StdEncoding.EncodeToString([]byte(replaced))
 		}
 	}
-	return strings.ReplaceAll(value, proxyValue, realValue)
+	return strings.ReplaceAll(value, from, to)
 }
 
-// headerContains checks whether a header value contains the proxy token.
-// For Authorization headers with HTTP Basic auth, the base64 payload is
-// decoded before checking.
-func headerContains(headerName, value, proxyValue string) bool {
+// HeaderContains reports whether a header value contains needle. For
+// Authorization headers with HTTP Basic auth, the base64 payload is decoded
+// before checking. Exported alongside ReplaceInHeader.
+func HeaderContains(headerName, value, needle string) bool {
 	if strings.EqualFold(headerName, "Authorization") {
 		if decoded, ok := decodeBasicAuth(value); ok {
-			return strings.Contains(decoded, proxyValue)
+			return strings.Contains(decoded, needle)
 		}
 	}
-	return strings.Contains(value, proxyValue)
+	return strings.Contains(value, needle)
 }
 
 // decodeBasicAuth extracts and base64-decodes the payload from a "Basic ..."
