@@ -9,8 +9,8 @@ proxy:
   upstream_deny_cidrs: []
 
 tls:
-  ca_cert: "{{.CACert}}"
-  ca_key: "{{.CAKey}}"
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
 
 transforms:
   - name: allowlist

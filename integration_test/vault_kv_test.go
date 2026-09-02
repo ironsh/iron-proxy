@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ironsh/iron-proxy/internal/cagen"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,22 +27,8 @@ func TestVaultKV(t *testing.T) {
 	}))
 	t.Cleanup(vault.Close)
 
-	upstreamValues := make(chan string, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamValues <- r.Header.Get("X-Vault-Secret")
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(upstream.Close)
-	upstreamHost := upstream.Listener.Addr().String()
-	tmpDir := t.TempDir()
-	ca, err := cagen.Generate(cagen.Options{Name: "vault-kv-test", ExpiryHours: 1, Algorithm: cagen.Ed25519})
-	require.NoError(t, err)
-	certPath, keyPath, err := cagen.WriteFiles(tmpDir, ca)
-	require.NoError(t, err)
-	cfgPath := renderConfig(t, tmpDir, "vault_kv.yaml", struct {
-		CACert string
-		CAKey  string
-	}{CACert: certPath, CAKey: keyPath})
+	upstreamHost := echoHeadersUpstream(t, "X-Vault-Secret")
+	cfgPath := renderConfig(t, t.TempDir(), "vault_kv.yaml", nil)
 	proxy := startProxy(t, proxyBinary(t), cfgPath, []string{
 		"VAULT_ADDR=" + vault.URL,
 		"VAULT_TOKEN=integration-token",
@@ -56,11 +41,11 @@ func TestVaultKV(t *testing.T) {
 		"VAULT_CLIENT_KEY=",
 	})
 
-	status, _ := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{
+	status, headers := proxyGet(t, proxy.HTTPAddr, upstreamHost, map[string]string{
 		"X-Vault-Secret": "proxy-vault-secret",
 	})
-	require.Equal(t, http.StatusNoContent, status)
-	require.Equal(t, "real-vault-secret", <-upstreamValues)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "real-vault-secret", headers.Get("X-Got-Vault-Secret"))
 
 	request := <-requests
 	require.Equal(t, "/v1/secret/data/services/openai", request.path)

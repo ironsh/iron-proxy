@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -69,7 +70,8 @@ func (r *vaultKVBuilder) Build(raw yaml.Node) (secretSource, error) {
 		return nil, fmt.Errorf("vault_kv source kv_version must be 1 or 2, got %d", cfg.KVVersion)
 	}
 
-	name := fmt.Sprintf("vault_kv:%s/%s", cfg.Mount, cfg.Path)
+	secretPath := cfg.Mount + "/" + cfg.Path
+	name := "vault_kv:" + secretPath
 	return buildLazySource(name, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		client, err := r.clientFor(ctx)
 		if err != nil {
@@ -77,14 +79,14 @@ func (r *vaultKVBuilder) Build(raw yaml.Node) (secretSource, error) {
 		}
 		data, err := client.ReadKV(ctx, cfg.Mount, cfg.Path, cfg.version())
 		if err != nil {
-			return "", fmt.Errorf("reading Vault KV secret %q: %w", cfg.Mount+"/"+cfg.Path, err)
+			return "", fmt.Errorf("reading Vault KV secret %q: %w", secretPath, err)
 		}
 		if len(data) == 0 {
-			return "", fmt.Errorf("Vault KV secret %q resolved without data", cfg.Mount+"/"+cfg.Path)
+			return "", fmt.Errorf("Vault KV secret %q resolved without data", secretPath)
 		}
 		value, err := json.Marshal(data)
 		if err != nil {
-			return "", fmt.Errorf("encoding Vault KV secret %q as JSON: %w", cfg.Mount+"/"+cfg.Path, err)
+			return "", fmt.Errorf("encoding Vault KV secret %q as JSON: %w", secretPath, err)
 		}
 		return string(value), nil
 	})
@@ -130,7 +132,10 @@ func (c vaultAPIKVClient) ReadKV(ctx context.Context, mount, secretPath string, 
 	if err != nil {
 		return nil, err
 	}
-	if secret == nil || secret.Data == nil {
+	if secret.Data == nil {
+		if secret.Raw != nil && len(secret.Raw.Warnings) > 0 {
+			return nil, fmt.Errorf("secret resolved without data: %s", strings.Join(secret.Raw.Warnings, "; "))
+		}
 		return nil, fmt.Errorf("secret resolved without data")
 	}
 	return secret.Data, nil

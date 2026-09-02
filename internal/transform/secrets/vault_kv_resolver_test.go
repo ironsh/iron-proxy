@@ -222,6 +222,41 @@ func TestVaultKVClientCache_ReusesClient(t *testing.T) {
 	require.Equal(t, int64(1), calls.Load())
 }
 
+func TestVaultAPIKVClient_IncludesWarningsWhenDataMissing(t *testing.T) {
+	const warning = "Invalid path for a versioned K/V secrets engine"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		// The in-memory server and response writer are torn down with the test;
+		// the client call below reports any response read failure.
+		_, _ = io.WriteString(w, `{"warnings":["`+warning+`"]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := vaultapi.NewClient(&vaultapi.Config{
+		Address:    server.URL,
+		HttpClient: server.Client(),
+	})
+	require.NoError(t, err)
+	adapter := vaultAPIKVClient{client: client}
+
+	cases := []struct {
+		name    string
+		version int
+	}{
+		{name: "KV v1", version: 1},
+		{name: "KV v2", version: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := adapter.ReadKV(context.Background(), "secret", "services/openai", tc.version)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "secret resolved without data")
+			require.ErrorContains(t, err, warning)
+		})
+	}
+}
+
 func TestVaultKVBuilder_OfficialClientEnvironment(t *testing.T) {
 	type requestRecord struct {
 		path      string
