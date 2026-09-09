@@ -463,6 +463,13 @@ values before forwarding upstream. You control where it looks:
 - **`require`:** when `true`, requests to a matching host that do **not** contain
   the proxy token are rejected with 403. This prevents a compromised workload
   from bypassing the secret-swap mechanism with alternative credentials. Default: `false`.
+- **`allow_connect_without_header`:** narrows `require` for tunnelled traffic.
+  A `CONNECT` request opens a tunnel and carries none of the headers in
+  `match_headers`, so `require: true` rejects it. Set this to `true` to let
+  such a request through untransformed. A `CONNECT` that does carry a
+  `match_headers` header is still rejected when the token is wrong, and every
+  other method is still rejected. It has no effect when `match_headers` is
+  empty, because an empty list scans all headers. Default: `false`.
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.

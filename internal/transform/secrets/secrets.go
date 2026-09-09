@@ -43,6 +43,8 @@ type secretEntry struct {
 	MatchHeaders []string `yaml:"match_headers,omitempty"`
 	MatchBody    bool     `yaml:"match_body,omitempty"`
 	Require      bool     `yaml:"require,omitempty"`
+
+	AllowConnectWithoutHeader bool `yaml:"allow_connect_without_header,omitempty"`
 }
 
 type replaceConfig struct {
@@ -52,6 +54,10 @@ type replaceConfig struct {
 	MatchPath    bool     `yaml:"match_path,omitempty"`
 	MatchQuery   bool     `yaml:"match_query,omitempty"`
 	Require      bool     `yaml:"require,omitempty"`
+
+	// AllowConnectWithoutHeader keeps a required secret from rejecting a
+	// CONNECT tunnel that carries none of MatchHeaders.
+	AllowConnectWithoutHeader bool `yaml:"allow_connect_without_header,omitempty"`
 }
 
 type injectConfig struct {
@@ -76,6 +82,8 @@ type resolvedSecret struct {
 	matchPath    bool
 	matchQuery   bool
 	require      bool
+
+	allowConnectWithoutHeader bool
 
 	// inject mode fields
 	injectHeader     string
@@ -250,6 +258,8 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 				matchQuery:   replace.MatchQuery,
 				require:      replace.Require,
 				rules:        rules,
+
+				allowConnectWithoutHeader: replace.AllowConnectWithoutHeader,
 			})
 		}
 	}
@@ -312,6 +322,8 @@ func normalizeEntry(i int, entry *secretEntry) (*replaceConfig, *injectConfig, e
 		MatchHeaders: entry.MatchHeaders,
 		MatchBody:    entry.MatchBody,
 		Require:      entry.Require,
+
+		AllowConnectWithoutHeader: entry.AllowConnectWithoutHeader,
 	}, nil, nil
 }
 
@@ -387,7 +399,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 		if len(locations) > 0 {
 			swapped = append(swapped, secretRecord{Secret: name, Locations: locations})
-		} else if sec.require {
+		} else if sec.require && !sec.allowsUnmatchedConnect(req) {
 			tctx.Annotate("rejected", name)
 			return &transform.TransformResult{Action: transform.ActionReject}, nil
 		}
@@ -404,6 +416,35 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+// allowsUnmatchedConnect reports whether a required secret may pass req
+// through untransformed. It is true only when the secret opts in with
+// allow_connect_without_header, req is a CONNECT tunnel, and req carries none
+// of the headers the secret matches on.
+//
+// A CONNECT that does carry a match header still goes through the normal
+// path, so a tunnel that presents the wrong proxy token is still rejected.
+// A secret with no match headers scans every header, so "without a matching
+// header" has no meaning for it and this always returns false.
+func (sec *resolvedSecret) allowsUnmatchedConnect(req *http.Request) bool {
+	if !sec.allowConnectWithoutHeader || req.Method != http.MethodConnect || len(sec.matchHeaders) == 0 {
+		return false
+	}
+	for _, matcher := range sec.matchHeaders {
+		if matcher.re != nil {
+			for headerName := range req.Header {
+				if matcher.re.MatchString(http.CanonicalHeaderKey(headerName)) {
+					return false
+				}
+			}
+			continue
+		}
+		if len(req.Header.Values(matcher.name)) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue string) ([]string, error) {
