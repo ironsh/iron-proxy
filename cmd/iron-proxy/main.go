@@ -253,6 +253,14 @@ func main() {
 	// Initialize metrics server.
 	metricsServer := metrics.New(cfg.Metrics.Listen, logger)
 
+	// Standalone mode re-reads the config file on POST /v1/reload and on
+	// SIGHUP. Managed mode keeps the control plane as the source of truth, so
+	// it has no file to re-read and leaves this nil.
+	var reload management.ReloadFunc
+	if !managed && *configPath != "" {
+		reload = newReloadFunc(*configPath, holder, mcpHolder, gatewayHolder, pgManager, bodyLimits, logger)
+	}
+
 	// Initialize management server: /v1/reload in standalone mode,
 	// /v1/status and /v1/sync in managed mode.
 	var mgmtServer *management.Server
@@ -267,7 +275,7 @@ func main() {
 			mgmtOpts.Status = func() any { return poller.Status() }
 			mgmtOpts.SyncNow = poller.Poke
 		} else {
-			mgmtOpts.Reload = newReloadFunc(*configPath, holder, mcpHolder, gatewayHolder, pgManager, bodyLimits, logger)
+			mgmtOpts.Reload = reload
 		}
 		mgmtServer = management.New(mgmtOpts)
 	}
@@ -301,16 +309,12 @@ func main() {
 		logger.Info("transform pipeline", slog.String("transforms", pipeline.Names()))
 	}
 
-	// Wait for shutdown signal or fatal error from any background goroutine.
+	// Wait for a reload signal, a shutdown signal, or a fatal error from any
+	// background goroutine.
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	select {
-	case sig := <-sigc:
-		logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
-	case err := <-errc:
-		logger.Error("fatal error", slog.String("error", err.Error()))
-	}
+	awaitShutdown(ctx, sigc, errc, reload, logger)
 
 	// Cancel context to stop the poller, then shut down services.
 	cancel()
@@ -344,6 +348,34 @@ func main() {
 	}
 
 	logger.Info("iron-proxy stopped")
+}
+
+// awaitShutdown blocks until a shutdown signal or a fatal error arrives.
+// SIGHUP does not stop the proxy. It runs reload, which re-reads the config
+// file and swaps the transform pipeline in place. A failed reload leaves the
+// running pipeline untouched. A nil reload means there is no config file to
+// re-read, so the signal is logged and ignored.
+func awaitShutdown(ctx context.Context, sigc <-chan os.Signal, errc <-chan error, reload management.ReloadFunc, logger *slog.Logger) {
+	for {
+		select {
+		case sig := <-sigc:
+			if sig == syscall.SIGHUP {
+				if reload == nil {
+					logger.Warn("ignoring SIGHUP: no config file to re-read")
+					continue
+				}
+				if err := reload(ctx); err != nil {
+					logger.Error("config reload failed", slog.String("error", err.Error()))
+				}
+				continue
+			}
+			logger.Info("received signal, shutting down", slog.String("signal", sig.String()))
+			return
+		case err := <-errc:
+			logger.Error("fatal error", slog.String("error", err.Error()))
+			return
+		}
+	}
 }
 
 // initManaged registers with the control plane, performs an initial sync, builds
