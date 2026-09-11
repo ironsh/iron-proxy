@@ -2,28 +2,36 @@ package hostmatch
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 )
 
 // RuleConfig is the YAML-decoded form of a host/method/path matching rule.
 type RuleConfig struct {
-	Host    string   `yaml:"host,omitempty"`
-	CIDR    string   `yaml:"cidr,omitempty"`
-	Methods []string `yaml:"methods,omitempty"`
-	Paths   []string `yaml:"paths,omitempty"`
+	Host     string   `yaml:"host,omitempty"`
+	CIDR     string   `yaml:"cidr,omitempty"`
+	SourceIP string   `yaml:"source_ip,omitempty"`
+	Methods  []string `yaml:"methods,omitempty"`
+	Paths    []string `yaml:"paths,omitempty"`
 }
 
 // Rule is a compiled matching rule ready for use.
 type Rule struct {
-	Matcher *Matcher
-	Methods map[string]bool // nil = all methods
-	Paths   []string        // nil = all paths
+	Matcher  *Matcher
+	SourceIP *net.IPNet      // nil = any source address
+	Methods  map[string]bool // nil = all methods
+	Paths    []string        // nil = all paths
 }
 
-// Matches returns true if the request matches this rule.
-func (r *Rule) Matches(host, method, path string) bool {
+// Matches returns true if the request matches this rule. remoteAddr is the
+// client address ("host:port" or a bare IP); it is only read when the rule
+// sets SourceIP. A rule with SourceIP never matches an unparsable address.
+func (r *Rule) Matches(host, method, path, remoteAddr string) bool {
 	if !r.Matcher.Matches(host) {
+		return false
+	}
+	if r.SourceIP != nil && !r.SourceIP.Contains(net.ParseIP(StripPort(remoteAddr))) {
 		return false
 	}
 	if r.Methods != nil && !r.Methods[method] {
@@ -60,13 +68,21 @@ func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 			return nil, fmt.Errorf("%s: rules[%d]: %w", prefix, i, err)
 		}
 
+		var sourceIP *net.IPNet
+		if rc.SourceIP != "" {
+			_, sourceIP, err = net.ParseCIDR(sourceCIDR(rc.SourceIP))
+			if err != nil {
+				return nil, fmt.Errorf("%s: rules[%d]: source_ip %q: %w", prefix, i, rc.SourceIP, err)
+			}
+		}
+
 		for _, p := range rc.Paths {
 			if !strings.HasPrefix(p, "/") {
 				return nil, fmt.Errorf("%s: rules[%d]: path %q must start with /", prefix, i, p)
 			}
 		}
 
-		r := Rule{Matcher: m}
+		r := Rule{Matcher: m, SourceIP: sourceIP}
 		if !isWildcard(rc.Methods) {
 			r.Methods = make(map[string]bool, len(rc.Methods))
 			for _, method := range rc.Methods {
@@ -90,9 +106,21 @@ func isWildcard(methods []string) bool {
 func MatchAnyRule(rules []Rule, req *http.Request) bool {
 	host := StripPort(req.Host)
 	for _, r := range rules {
-		if r.Matches(host, req.Method, req.URL.Path) {
+		if r.Matches(host, req.Method, req.URL.Path, req.RemoteAddr) {
 			return true
 		}
 	}
 	return false
+}
+
+// sourceCIDR widens a bare IP address into a single-address CIDR block and
+// returns any other input unchanged.
+func sourceCIDR(sourceIP string) string {
+	if strings.Contains(sourceIP, "/") {
+		return sourceIP
+	}
+	if strings.Contains(sourceIP, ":") {
+		return sourceIP + "/128"
+	}
+	return sourceIP + "/32"
 }
